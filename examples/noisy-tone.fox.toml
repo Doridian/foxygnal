@@ -1,0 +1,59 @@
+# A 1 kHz complex tone plus noise, rate-limited to real time, 2 s written to disk.
+#   foxygnal run examples/noisy-tone.fox.toml
+# Inspect the result with e.g. inspectrum, or numpy.fromfile(..., dtype=numpy.complex64).
+
+[[block]]
+id = "tone"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = 1000.0, amplitude = 0.8, sample_rate = 48000.0 }
+ui = { x = 40, y = 40 }
+
+[[block]]
+id = "noise"
+kind = "noise_source"
+params = { type = "c32", amplitude = 0.05 }
+ui = { x = 40, y = 200 }
+
+[[block]]
+id = "sum"
+kind = "add"
+params = { type = "c32" }
+ui = { x = 300, y = 120 }
+
+[[block]]
+id = "throttle"
+kind = "throttle"
+params = { type = "c32", sample_rate = 48000.0 }
+ui = { x = 520, y = 120 }
+
+[[block]]
+id = "two_seconds"
+kind = "head"
+params = { type = "c32", count = 96000 }
+ui = { x = 740, y = 120 }
+
+[[block]]
+id = "out"
+kind = "file_sink"
+params = { type = "c32", path = "noisy-tone.c32" }
+ui = { x = 960, y = 120 }
+
+[[connect]]
+from = "tone.out"
+to = "sum.a"
+
+[[connect]]
+from = "noise.out"
+to = "sum.b"
+
+[[connect]]
+from = "sum.out"
+to = "throttle.in"
+
+[[connect]]
+from = "throttle.out"
+to = "two_seconds.in"
+
+[[connect]]
+from = "two_seconds.out"
+to = "out.in"

@@ -1,0 +1,5 @@
+/target
+*.c32
+*.f32
+*.cu8
+.playwright-mcp/

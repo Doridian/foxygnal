@@ -1,0 +1,29 @@
+:root {
+  --bg: #0e1116;
+  --panel: #151a21;
+  --panel-2: #1b222b;
+  --line: #2a323d;
+  --text: #e6edf3;
+  --muted: #9aa7b4;
+  --accent: #f59e3b; /* fox orange */
+  --ok: #3fb950;
+  /* Stream type colours, shared by ports, wires and scope traces */
+  --t-c32: #f59e3b;
+  --t-f32: #4cc2ff;
+  --t-i16: #c48cff;
+  --t-u8: #8bd450;
+  color-scheme: dark;
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 14px;
+}
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+button {
+  font: inherit;
+}
