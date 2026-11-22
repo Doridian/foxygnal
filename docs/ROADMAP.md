@@ -82,7 +82,5 @@ Goal: credible numbers on a Raspberry Pi.
 
 ## Open questions
 
-- **License.** Not chosen yet. GPL-3.0 (like GNU Radio) or MIT/Apache-2.0 (the Rust
-  ecosystem default)?
 - **Plugin strategy** (M6). WASM gives sandboxing and portability at some per-call cost.
 - **Name casing**: `foxygnal` vs `Foxygnal` in the UI.

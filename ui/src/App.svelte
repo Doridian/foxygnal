@@ -47,6 +47,7 @@
     <strong class="logo">foxygnal</strong>
     <span class="muted">untitled.fox.toml</span>
     <span class="spacer"></span>
+    <a class="muted source" href="https://git.foxden.network/FoxDen/foxygnal" target="_blank" rel="noreferrer">Source (AGPL)</a>
     <button class="run" disabled title="Run control arrives in M1">▶ Run</button>
   </header>
 
@@ -113,6 +114,9 @@
   }
   .logo {
     color: var(--accent);
+  }
+  .source {
+    font-size: 12px;
   }
   .spacer {
     flex: 1;

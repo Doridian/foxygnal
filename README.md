@@ -52,3 +52,9 @@ docs/               plans and design notes
 - [Roadmap](docs/ROADMAP.md): milestones M0–M6
 - [Blocks](docs/BLOCKS.md): block catalog, implemented and planned
 - [UI](docs/UI.md): UI concept and interaction principles
+
+## License
+
+[AGPL-3.0-or-later](LICENSE). foxygnal is served over the network, so if you run a modified
+version for others, AGPL §13 requires offering them its source. The UI links to the source
+for this reason.
