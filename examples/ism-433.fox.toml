@@ -1,0 +1,48 @@
+# ISM-band sensors at 433.92 MHz: weather stations, thermometers, doorbells.
+#
+# The decoder listens to the whole 1 MHz around 433.92 MHz at once and tries
+# every device in its table (Acurite, Ambient Weather, LaCrosse, Fine Offset,
+# Oregon Scientific, Nexus/Prologue/Rubicson, Schrader TPMS, EV1527/PT2262
+# remotes, …), OOK and FSK. The same graph works at 315 MHz (US tire pressure
+# sensors, older remotes), 345 MHz (Honeywell/2Gig alarms), 319.5 MHz
+# (Interlogix) and 868 MHz (Europe): change `freq`. Click the wire into `log`
+# and choose Messages:
+#
+#   t=12.345 model=Acurite-Tower id=1234 channel=A battery_ok=1 temperature_C=21.3 humidity=45 mic=CHECKSUM rssi_dB=… snr_dB=… offset_kHz=…
+#
+# Set the decoder's `analyze` to see a pulse summary of each packet nothing
+# decoded (`model=unknown guess=PWM short_us=… long_us=…`).
+#
+#   SDR 433.92 MHz, 1 MS/s ──▶ ISM decoder ──text──▶ log
+#
+#   foxygnal run examples/ism-433.fox.toml   (prints the messages: stdout = true)
+
+[vars]
+freq = "433.92M"
+samp_rate = "1M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$freq", sample_rate = "$samp_rate", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "ism"
+kind = "ism_decoder"
+params = { devices = "-scm,-scmplus,-idm", level = 8.0, analyze = false }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 700, y = 120 }
+
+[[connect]]
+from = "sdr.out"
+to = "ism.in"
+
+[[connect]]
+from = "ism.out"
+to = "log.in"

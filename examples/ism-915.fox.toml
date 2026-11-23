@@ -1,0 +1,45 @@
+# ISM-band sensors at 915 MHz (North America): ERT utility meters and the
+# 915 MHz weather sensors.
+#
+# Electricity, gas and water meters with an ERT module (Itron and others) hop
+# around 910–920 MHz, sending SCM, SCM+ and IDM messages (meter ID, type,
+# consumption) every few seconds to minutes; 2.4 MS/s centred on 912.6 MHz
+# hears a good share of the hops. Weather sensors sold for 915 MHz (LaCrosse,
+# Fine Offset / Ambient Weather 915 versions, Acurite, …) sit at 915 MHz:
+# set `freq` to 915M for them. Click the wire into `log` and choose Messages:
+#
+#   t=12.345 model=ERT-SCM id=12345678 physical_tamper=0 ert_type=7 encoder_tamper=0 consumption_data=123456 MeterType=Electric mic=CRC …
+#
+#   SDR 912.6 MHz, 2.4 MS/s ──▶ ISM decoder ──text──▶ log
+#
+#   foxygnal run examples/ism-915.fox.toml   (prints the messages: stdout = true)
+
+[vars]
+freq = "912.6M"
+samp_rate = "2.4M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$freq", sample_rate = "$samp_rate", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "ism"
+kind = "ism_decoder"
+params = { devices = "all", level = 8.0, analyze = false }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 700, y = 120 }
+
+[[connect]]
+from = "sdr.out"
+to = "ism.in"
+
+[[connect]]
+from = "ism.out"
+to = "log.in"

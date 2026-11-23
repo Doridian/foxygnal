@@ -171,9 +171,16 @@ template.
         POCSAG test found instead. Speed and polarity from Sync 1, phases A–D, BCH(31,21)
         repair, short and long addresses, alphanumeric / numeric / tone / secure / binary
         pages, fragments marked; "FLEX" template
-  - [ ] ISM-band sensors (433/868/915 MHz): an OOK/FSK pulse demodulator, PWM/PPM/Manchester
-        slicers, and a table of device formats in the spirit of rtl_433 (weather stations, tire
-        pressure sensors, doorbells, power meters)
+  - [x] ISM-band sensors (315/345/433/868/915 MHz): `ism_decoder`, an OOK envelope and FSK
+        discriminator pulse detector (minimum-statistics noise floor), PCM/NRZ, PPM, PWM,
+        Manchester and differential-Manchester slicers, and a table of ~30 device formats in
+        the spirit of rtl_433 with its model and field names: Acurite (592TXR tower, 5n1,
+        Atlas, 3n1, 899, 606TX, 609TXC, 986), Ambient Weather F007TH / WH31E, LaCrosse
+        (TX141 family, TX29/TX35-IT, TX-3/4/6U/7U), Fine Offset WH24/WH65/WH1080, Oregon
+        Scientific v2.1/v3, Nexus/Prologue/Rubicson, TPMS (Schrader, Toyota, Ford, Citroen),
+        Honeywell/2Gig, Interlogix, EV1527/PT2262 remotes, ERT SCM/SCM+/IDM meters; an
+        `analyze` mode for unknown signals; "ISM sensors at 433 MHz" and "ERT meters and 915
+        MHz sensors" templates. Checked against rtl_433's public test captures and on air
   - [x] A **Map** instrument for any decoder's positions (`lat=`/`lon=`, keyed by `icao`,
         `mmsi`, APRS `src` or object name, `serial`, `id`, `callsign`): trails, heading
         arrows, labels, fading and expiry, details on click, merged identity and static

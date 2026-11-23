@@ -261,6 +261,18 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/flex.fox.toml"),
     },
     Example {
+        name: "ism-433",
+        title: "ISM sensors at 433 MHz",
+        description: "An SDR at 433.92 MHz, 1 MS/s → ISM decoder: weather stations, thermometers, tire pressure sensors and doorbells, like rtl_433 (Acurite, Ambient Weather, LaCrosse, Fine Offset, Oregon Scientific, Nexus, …). Needs a real receiver; change `freq` for 315, 345 or 868 MHz.",
+        toml: include_str!("../../../examples/ism-433.fox.toml"),
+    },
+    Example {
+        name: "ism-915",
+        title: "ERT meters and 915 MHz sensors",
+        description: "An SDR at 912.6 MHz, 2.4 MS/s → ISM decoder: ERT utility meters (SCM, SCM+, IDM) and 915 MHz weather sensors. Needs a real receiver.",
+        toml: include_str!("../../../examples/ism-915.fox.toml"),
+    },
+    Example {
         name: "aprs",
         title: "APRS packet decoder",
         description: "An SDR at 144.39 MHz (144.8 MHz in Europe) → FM demod → AFSK 1200 → HDLC/AX.25 → APRS positions, messages and objects. Needs a real receiver.",

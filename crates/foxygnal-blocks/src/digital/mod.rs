@@ -21,6 +21,7 @@ pub mod ais;
 pub mod ax25;
 mod flex;
 pub mod hdlc;
+pub mod ism;
 mod modem;
 mod packet;
 pub mod pocsag;
@@ -47,6 +48,7 @@ pub fn register(r: &mut Registry) {
     flex::register(r);
     afsk::register(r);
     hdlc::register(r);
+    ism::register(r);
 }
 
 /// Text (or packet bytes) waiting to go out on a `u8` port, one message at a

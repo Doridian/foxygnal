@@ -46,7 +46,10 @@ Mode S replies, Comm-B, Mode A/C on request), "UAT aircraft and weather decoder"
 decoder" (`examples/pocsag.fox.toml`), "FLEX pager decoder" (`examples/flex.fox.toml`, the
 1600/3200/6400 bps paging used across North America), "APRS packet decoder"
 (`examples/aprs.fox.toml`), "AIS ship decoder" (`examples/ais.fox.toml`, both AIS channels
-at once) and "ACARS aircraft datalink" (`examples/acars.fox.toml`).
+at once), "ACARS aircraft datalink" (`examples/acars.fox.toml`), and, in the spirit of rtl_433, "ISM
+sensors at 433 MHz" (`examples/ism-433.fox.toml`: weather stations, thermometers, tire
+pressure sensors, door sensors and doorbells) and "ERT meters and 915 MHz sensors"
+(`examples/ism-915.fox.toml`).
 
 **Maps.** The Map instrument plots the positions any decoder reports (`lat=… lon=…`):
 ADS-B aircraft, AIS ships, APRS stations and objects, each with a trail, a heading arrow and

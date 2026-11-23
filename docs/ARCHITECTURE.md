@@ -402,7 +402,7 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
 ## Decoded messages (M6)
 
 Decoders (`adsb_decoder`, `uat_decoder`, `rds_decoder`, `pocsag_decoder`, `flex_decoder`,
-`ais_decoder`, `acars_decoder`, `hdlc_deframer`,
+`ais_decoder`, `acars_decoder`, `ism_decoder`, `hdlc_deframer`,
 `packet_decoder` in hex mode, …) need a way to show a
 person what they found, without per-block UI code. The convention: **a decoded message is one line of
 UTF-8 text, `\n`-terminated, on a `u8` output.** Lines are `key=value` fields where that
@@ -559,6 +559,57 @@ and `out` (text: `event=start/end/lost/cut`, the mode, and the sender's clock er
 - Pixels are the mean frequency over each pixel's time. A scan that runs into a sync or
   separator tone holds its last clean pixel over the final 0.35 ms, which band-limited audio
   smears.
+
+## ISM-band sensors (M11)
+
+`ism_decoder` (`digital::ism`) does what rtl_433 does, inside one block: complex baseband in
+(250 kS/s – 3.2 MS/s, typically 1 MS/s around 433.92 MHz or 2.4 MS/s around 912.6 MHz),
+decoded-message lines out. It is organised like rtl_433 so that its device formats carry
+over: pulses, then line codes, then device decoders.
+
+1. **Pulse detection** (`ism::pulse`). The envelope is the square root of the power averaged
+   over ~6 µs (short enough for 30 µs ERT chips). The noise floor is the quietest 1 ms
+   average of the envelope over the last 128 ms (minimum statistics: it follows a rising
+   floor even while packets keep coming, which a floor updated only between pulses does
+   not). A packet starts when the envelope rises `level` dB (default 8) above the floor and
+   stays up for 24 µs. Within a packet the thresholds sit around the midpoint between the
+   floor and the pulses' running mean height, with hysteresis, and pulses or gaps shorter
+   than ~12 µs are glitches that merge into their neighbours. A packet ends after a 17 ms
+   gap (longer than an EV1527 sync gap) or 2048 pulses. While a carrier is on, an FSK
+   detector runs on the angle of the averaged `x[n]·conj(x[n-1])`: minimum and maximum
+   trackers (fast attack, slow decay), a slicer at their midpoint with hysteresis, and the
+   same glitch merging. Time on the upper tone is a pulse, on the lower a gap (rtl_433's
+   convention: mark = higher frequency). An FSK burst ends when the carrier has been off for
+   ~100 µs, and counts with ≥ 16 changes if the frequency stayed near the two tones (noise
+   on a discriminator spreads between them). A second, slow detector (30 µs envelope, 50 µs
+   glitches, 3 dB lower level, no FSK) runs alongside for the OOK devices whose symbols are
+   150 µs or longer, which is most weather sensors and the remotes: weak pulses stay whole
+   there, and it is what takes the 609TXC test from 6 dB to 2 dB SNR (in the full 1 MHz band
+   at 1 MS/s). A message both detectors decode is written once. Every line ends with the
+   train's level, SNR and frequency offset (`rssi_dB`, `snr_dB`, `offset_kHz`).
+2. **Slicers** (`ism::slicer`). Each device names a line code and its timing in µs (short,
+   long, sync, gap limit, reset limit, tolerance), and the train is sliced into rows of bits
+   (`ism::bits::BitBuffer`, 50 rows × 1024 bits, fixed size). PCM covers NRZ and RZ, PPM puts
+   the bit in the gap (long = 1), PWM in the pulse (short = 1, a sync-width pulse starts a
+   row), Manchester has rtl_433's hard-coded leading zero (rising mid-bit edge = 0), and
+   differential Manchester takes two half-bits as 1. The conventions are rtl_433's, so a
+   device documented there reads the same.
+3. **Devices** (`ism::devices`). A table of `Device { key, modulation, timing, decode }`; the
+   decode function looks for the preamble, checks the CRC / checksum / LFSR digest / parity,
+   applies sanity checks and writes one line per message with rtl_433's model and field names
+   (`model=Acurite-Tower id=… channel=A battery_ok=1 temperature_C=21.3 humidity=45
+   mic=CHECKSUM`). Identical lines from the repeats in one packet are written once. The
+   `devices` parameter picks a subset (`all`, `acurite_txr,oregon`, or exclusions like
+   `-scm,-scmplus,-idm`).
+4. **Analysis.** With `analyze` on, a packet no device decoded becomes a `model=unknown`
+   line: pulse and gap width histograms (`pulse_us=220:24,410:32`), and a guess at the line
+   code with its short / long widths, the starting point for adding a device.
+
+Every packet is decoded synchronously in `work()`; the buffers (pulse arrays, bit rows, the
+line buffer) are allocated once, so nothing allocates per sample or per packet. The tests
+(`tests/ism*.rs`) carry an independent encoder for every device and run it through noise, a
+frequency offset and ±10 % timing jitter at 250 kS/s and 1 MS/s (ERT at 1 and 2.4 MS/s);
+setting `ISM_DUMP=dir` writes their signals as `.cf32` files, which rtl_433 decodes too.
 
 ## Digital video (M14)
 
