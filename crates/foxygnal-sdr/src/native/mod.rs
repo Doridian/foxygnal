@@ -96,7 +96,12 @@ pub(crate) fn open_library<S: AsRef<str>>(
         match unsafe { libloading::Library::new(name) } {
             Ok(lib) => return Ok(lib),
             Err(e) => {
-                let e = e.to_string();
+                // Since libloading 0.9 the error itself only says e.g.
+                // "dlopen failed"; the loader's message is its source.
+                let e = match std::error::Error::source(&e) {
+                    Some(source) => source.to_string(),
+                    None => e.to_string(),
+                };
                 // `name` itself missing just means try the next one; anything
                 // else (a missing dependency such as libusb, the wrong
                 // architecture) is worth showing. glibc names the file it
