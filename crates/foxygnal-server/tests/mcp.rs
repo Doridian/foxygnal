@@ -85,7 +85,14 @@ impl Rig {
         let err = r["isError"].as_bool().unwrap();
         let body = match &r["structuredContent"] {
             Value::Null => r["content"][0]["text"].clone(),
-            s => s.clone(),
+            s => {
+                assert!(s.is_object(), "{name}: structuredContent must be an object");
+                // Arrays come wrapped; unwrap them for the assertions.
+                match s.as_object().map(|o| (o.len(), o.get("result"))) {
+                    Some((1, Some(inner))) => inner.clone(),
+                    _ => s.clone(),
+                }
+            }
         };
         (err, body, r)
     }
@@ -315,7 +322,7 @@ async fn editing_is_checked_and_attributed() {
             "edit_graph",
             json!({"operations": [
                 {"op": "add_block", "id": "real", "kind": "null_sink", "params": {"type": "f32"}},
-                {"op": "connect", "from": "tone.out", "to": "real.in"},
+                {"op": "connect", "from": "tone.out", "to": "real.in", "convert": false},
             ]}),
         )
         .await;
@@ -587,4 +594,171 @@ async fn files_stay_in_the_project() {
         imp["toml"].as_str().unwrap().contains("signal_source"),
         "{imp}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mismatched_wires_get_a_converter() {
+    let r = rig("convert");
+    let rep = r
+        .ok(
+            "edit_graph",
+            json!({"operations": [
+                {"op": "add_block", "id": "real", "kind": "signal_source", "params": {"type": "f32", "sample_rate": 48000}},
+                {"op": "add_block", "id": "cplx", "kind": "null_sink", "params": {"type": "c32"}},
+                {"op": "connect", "from": "real", "to": "cplx"},
+            ]}),
+        )
+        .await;
+    assert_eq!(rep["builds"], true, "{rep}");
+    let note = rep["notes"][0].as_str().unwrap();
+    assert!(note.contains("inserted `f32_to_c32_1`"), "{note}");
+    let g = r.session.graph();
+    assert!(
+        g.connections
+            .iter()
+            .any(|c| c.from == "real.out" && c.to == "f32_to_c32_1.in")
+    );
+    assert!(
+        g.connections
+            .iter()
+            .any(|c| c.from == "f32_to_c32_1.out" && c.to == "cplx.in")
+    );
+
+    // A converter with settings says so.
+    let rep = r
+        .ok(
+            "edit_graph",
+            json!({"operations": [
+                {"op": "add_block", "id": "iq", "kind": "signal_source", "params": {"type": "c32", "sample_rate": 48000}},
+                {"op": "add_block", "id": "audio", "kind": "null_sink", "params": {"type": "f32"}},
+                {"op": "connect", "from": "iq", "to": "audio"},
+            ]}),
+        )
+        .await;
+    let note = rep["notes"][0].as_str().unwrap();
+    assert!(
+        note.contains("c32_to_f32") && note.contains("part="),
+        "{note}"
+    );
+
+    // Asked not to, it leaves the mismatch for the check report to name.
+    let rep = r
+        .ok(
+            "edit_graph",
+            json!({"operations": [
+                {"op": "add_block", "id": "iq2", "kind": "signal_source", "params": {"type": "c32", "sample_rate": 48000}},
+                {"op": "add_block", "id": "audio2", "kind": "null_sink", "params": {"type": "f32"}},
+                {"op": "connect", "from": "iq2", "to": "audio2", "convert": false},
+            ]}),
+        )
+        .await;
+    assert_eq!(rep["builds"], false, "{rep}");
+    assert!(
+        rep["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("iq2.out"),
+        "{rep}"
+    );
+}
+
+/// Write c32 samples as a raw file.
+fn c32_file(dir: &Path, name: &str, xs: &[(f32, f32)]) -> PathBuf {
+    let path = dir.join(name);
+    let bytes: Vec<u8> = xs
+        .iter()
+        .flat_map(|(i, q)| i.to_le_bytes().into_iter().chain(q.to_le_bytes()))
+        .collect();
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// QPSK symbols (pseudo-random) at 45°, 135°, …, amplitude 0.5.
+fn qpsk_symbols(n: usize) -> Vec<(f32, f32)> {
+    let mut s = 0x1234_5678u32;
+    (0..n)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            let a = 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+            (
+                if s & 1 == 0 { a } else { -a },
+                if s & 2 == 0 { a } else { -a },
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn constellations_and_symbol_rates() {
+    let r = rig("constellation");
+    // One sample per symbol, a little noise: QPSK with a high MER.
+    let mut n = 0x9e37_79b9u32;
+    let mut noise = || {
+        n ^= n << 13;
+        n ^= n >> 17;
+        n ^= n << 5;
+        (n as f32 / u32::MAX as f32 - 0.5) * 0.02
+    };
+    let syms: Vec<(f32, f32)> = qpsk_symbols(20_000)
+        .into_iter()
+        .map(|(i, q)| (i + noise(), q + noise()))
+        .collect();
+    let sym_file = c32_file(&r.dir, "qpsk.c32", &syms);
+    // Eight samples per symbol through a root-raised-cosine filter.
+    let taps = foxygnal_dsp::taps::rrc(8.0, 0.35, 11, 1.0);
+    let up: Vec<(f32, f32)> = qpsk_symbols(4000)
+        .into_iter()
+        .flat_map(|s| std::iter::once(s).chain(std::iter::repeat_n((0.0, 0.0), 7)))
+        .collect();
+    let shaped: Vec<(f32, f32)> = (0..up.len())
+        .map(|i| {
+            taps.iter().enumerate().fold((0.0, 0.0), |(a, b), (k, h)| {
+                let (x, y) = up[(i + up.len() - k) % up.len()];
+                (a + h * x, b + h * y)
+            })
+        })
+        .collect();
+    let shaped_file = c32_file(&r.dir, "shaped.c32", &shaped);
+    let mut ops = Vec::new();
+    for (id, path, rate) in [
+        ("syms", &sym_file, 10_000.0),
+        ("shaped", &shaped_file, 80_000.0),
+    ] {
+        ops.extend([
+            json!({"op": "add_block", "id": id, "kind": "file_source",
+                   "params": {"type": "c32", "path": path.to_str().unwrap(), "repeat": true, "sample_rate": rate}}),
+            json!({"op": "add_block", "id": format!("{id}_t"), "kind": "throttle", "params": {"type": "c32"}}),
+            json!({"op": "add_block", "id": format!("{id}_s"), "kind": "null_sink", "params": {"type": "c32"}}),
+            json!({"op": "connect", "from": id, "to": format!("{id}_t")}),
+            json!({"op": "connect", "from": format!("{id}_t"), "to": format!("{id}_s")}),
+        ]);
+    }
+    let rep = r.ok("edit_graph", json!({"operations": ops})).await;
+    assert_eq!(rep["builds"], true, "{rep}");
+    r.ok("run", json!({})).await;
+
+    let c = r
+        .ok(
+            "measure",
+            json!({"wire": "syms_t.out", "kind": "constellation", "seconds": 0.5}),
+        )
+        .await;
+    assert_eq!(c["modulation"], "QPSK", "{c}");
+    assert!(c["mer_db"].as_f64().unwrap() > 25.0, "{c}");
+    assert!(
+        (c["rotation_deg"].as_f64().unwrap() - 45.0).abs() < 2.0,
+        "{c}"
+    );
+
+    let c = r
+        .ok(
+            "measure",
+            json!({"wire": "shaped_t.out", "kind": "constellation", "seconds": 1.0}),
+        )
+        .await;
+    let rate = c["symbol_rate_hz"].as_f64().unwrap_or(0.0);
+    assert!((rate - 10_000.0).abs() < 50.0, "{c}");
+    r.ok("stop", json!({})).await;
 }
