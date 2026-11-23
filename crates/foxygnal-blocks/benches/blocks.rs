@@ -338,5 +338,57 @@ fn fm_receiver(c: &mut Criterion) {
     bench_chain(c, "graph", "fm_receiver_2m4", chain);
 }
 
-criterion_group!(benches, blocks, sources, fm_receiver);
+/// DVB-S at 2 samples per symbol, rate 3/4, Es/N0 10 dB, 1.5 kHz off: the
+/// signal from `dvbs_modulator`, then the demodulator (acquisition included,
+/// so the first ~20 k symbols try every hypothesis). Throughput is input
+/// samples/s; symbols/s is half that.
+fn dvbs_demodulator(c: &mut Criterion) {
+    use foxygnal_blocks::testing::VectorSink;
+    let reg = foxygnal_blocks::registry();
+    let (symbol_rate, sps) = (1e6, 2usize);
+    // 600 packets ≈ 650 k symbols.
+    let ts: Vec<u8> = (0..600u32)
+        .flat_map(|i| {
+            let mut p = vec![0x47, 0x01, 0x00, 0x10 | (i as u8 & 15)];
+            p.extend((4..188u32).map(|k| (i.wrapping_mul(31) ^ k.wrapping_mul(97)) as u8));
+            p
+        })
+        .collect();
+    let mut fg = Flowgraph::new();
+    let src = fg.add("src", VectorSource::instance(ts));
+    let p = json!({ "rate": "3/4", "sps": sps, "symbol_rate": symbol_rate, "gain": 0.5 });
+    let m = fg.add("mod", reg.build("dvbs_modulator", &params(p)).unwrap());
+    let (sink, out) = VectorSink::<Complex32>::instance();
+    let sink = fg.add("sink", sink);
+    fg.connect(src, 0, m, 0).unwrap();
+    fg.connect(m, 0, sink, 0).unwrap();
+    fg.start().unwrap().wait().unwrap();
+    let clean = out.lock().unwrap().clone();
+    // σ per component for Es/N0 = 10 dB at signal power 0.25.
+    let sigma = (0.25 * sps as f32 / 10.0 / 2.0).sqrt();
+    let nz = cnoise(clean.len(), 9);
+    let rate = symbol_rate * sps as f64;
+    let data: Vec<Complex32> = clean
+        .iter()
+        .zip(&nz)
+        .enumerate()
+        .map(|(i, (&x, &n))| {
+            let ph = std::f64::consts::TAU * 1_500.0 * i as f64 / rate;
+            // cnoise is uniform with σ ≈ 0.29 per component.
+            x * Complex32::from_polar(1.0, ph as f32) + n * (sigma / 0.2887)
+        })
+        .collect();
+    let chain = Chain {
+        data,
+        rate,
+        blocks: vec![(
+            "dvbs_demodulator",
+            json!({ "symbol_rate": symbol_rate, "rate": "3/4" }),
+        )],
+        sink_type: "u8",
+    };
+    bench_chain(c, "graph", "dvbs_demodulator_3_4_2sps", chain);
+}
+
+criterion_group!(benches, blocks, sources, fm_receiver, dvbs_demodulator);
 criterion_main!(benches);

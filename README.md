@@ -50,6 +50,13 @@ header, with slant correction) draws pictures in the Image instrument as they ar
 saves each one as a PNG with an Image Sink. Templates: "SSTV pictures" (the ISS on 145.8 MHz,
 `examples/sstv.fox.toml`) and "SSTV from a recording" (a WAV file, `examples/sstv-wav.fox.toml`).
 
+**Digital TV (DATV).** A DVB-S modulator and demodulator (EN 300 421, the mode of amateur
+digital TV on 23 cm and QO-100) turn an MPEG transport stream into QPSK and back: Viterbi,
+Reed-Solomon and the rest of the DVB FEC chain, with the code rate, carrier and phase found
+automatically, at several MBd on one core. Templates: "DATV loopback (DVB-S)" (a TS file
+through a noisy channel, no hardware, `examples/datv-loopback.fox.toml`) and "DATV receiver
+(DVB-S)" (an SDR to a TS over UDP for ffplay or VLC, `examples/datv-rx.fox.toml`).
+
 **AI assistants (MCP).** foxygnal is also a [Model Context Protocol](https://modelcontextprotocol.io)
 server. An assistant can look up blocks, build and check graphs, run them, and measure what's
 on a wire: the signals in a spectrum, levels, decoded messages, pictures. With

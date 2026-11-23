@@ -452,7 +452,8 @@ format knows about pictures.
   last row again with the last-row flag, so sinks and the instrument close the picture.
 
 Video (M14) will probably need a frame-level probe that drops whole frames when behind; see
-the open questions in the roadmap.
+the open questions in the roadmap. Digital TV arrives as an MPEG transport stream on a `u8`
+wire (see "DVB-S and the DVB FEC chain").
 
 ### SSTV decoder
 
@@ -473,6 +474,99 @@ and `out` (text: `event=start/end/lost/cut`, the mode, and the sender's clock er
 - Pixels are the mean frequency over each pixel's time. A scan that runs into a sync or
   separator tone holds its last clean pixel over the final 0.35 ms, which band-limited audio
   smears.
+
+## DVB-S and the DVB FEC chain (M14)
+
+`blocks/src/dvb/` holds a DVB-S modem (EN 300 421) and the FEC chain it shares with DVB-T
+(EN 300 744) and, for the outer part, DVB-C. The FEC pieces are plain structs with no block
+code, so DVB-T reuses them as they are; nothing in them allocates after construction.
+
+**The TS wire.** An MPEG transport stream travels on a `u8` wire as whole 188-byte packets,
+each starting with 0x47, and nothing else. A packet the RS decoder couldn't correct is still
+sent, with its transport_error_indicator bit (0x80 in byte 1) set, so a player keeps its
+timing. The demodulator's `ts` output and the modulator's input are such wires.
+
+**The chain** (transmit order; the receiver runs it backwards):
+
+| stage | module | notes |
+|---|---|---|
+| energy dispersal | `scramble` | PRBS 1 + x¹⁴ + x¹⁵ from `100101010000000`, restarted every 8 packets, whose first sync byte is sent inverted (0xB8); sync bytes aren't scrambled but the PRBS runs through them. One 1504-byte XOR table, built at compile time |
+| RS(204,188), t = 8 | `rs` | shortened RS(255,239) over GF(2⁸) (`0x11D`), g(x) = Π(x + αⁱ), i = 0…15. Decoder: 16 syndromes by table lookup (one per byte and syndrome, the only cost for a clean packet), then Berlekamp-Massey, a Chien search over the 204 positions that exist, and Forney |
+| interleaver | `interleave` | Forney, I = 12, M = 17: branch j a FIFO of 17j bytes (deinterleaver 17(11 − j)); 2244 bytes (11 packets) end to end. Sync bytes ride branch 0, undelayed |
+| inner code | `conv` | K = 7, G1 = 171₈ (X), G2 = 133₈ (Y), punctured 1/2 … 7/8 per EN 300 421 table 2; the kept bits go alternately to I and Q |
+| decoder | `viterbi` | soft `i8` input (0 = erasure, which is how punctured bits come back), `i16` path metrics renormalized every step, 32 butterflies written as plain array code LLVM vectorizes, decisions one byte per state; traceback over 256 steps every 128 |
+
+The receive side adds `outer::TsSync`, which finds the 204-byte grid in the decoded bits
+(three sync bytes 1632 bits apart, at any bit offset) and `outer::OuterDecoder`
+(deinterleave, RS, descramble). Two details matter:
+
+- **Polarity.** The code maps an inverted input to an inverted output, and 0x47 inverted is
+  0xB8, so a receiver locked 180° off decodes a valid-looking stream with every byte
+  inverted. Only one sync byte in 8 is 0xB8, so two 0xB8 in a row mean the polarity is wrong:
+  `TsSync` flips it, at lock and after a 180° slip of the carrier loop later (which the sync
+  bytes alone wouldn't show).
+- **Group phase.** Descrambling needs each packet's place in its group of 8. The sync bytes
+  are visible before deinterleaving (branch 0 has no delay), so the decoder counts from the
+  last 0xB8 seen there and shifts by the deinterleaver's 11 packets; a corrected 0xB8 after
+  RS overrides the count. Packets before the first 0xB8 aren't output.
+
+**Modulator** (`dvbs_modulator`): TS in (bytes before a 0x47 are skipped to find the grid),
+one packet at a time through the outer encoder and the convolutional encoder into a
+preallocated symbol buffer, Gray QPSK (bit 0 → +, I first), then an RRC (α = 0.35, 16
+symbols) polyphase interpolator to `sps` samples per symbol, scaled for the RMS `gain`. The
+output rate is `sps × symbol_rate`. It doesn't pace itself: the TS has to arrive at the
+channel's useful rate, symbol rate × 2 × R × 188/204 bits/s (a throttled file, or a live
+encoder at that mux rate).
+
+**Demodulator** (`dvbs_demodulator`), per chunk of ≤ 2048 input samples:
+
+1. An NCO (`Rotator`) removes the carrier offset found so far; the RRC matched filter
+   (10 symbols) runs at the input rate, any `sps ≥ 2`.
+2. Gardner timing recovery with a cubic interpolator (the same scheme as `clock_recovery`).
+3. AGC on the symbols, then a second-order decision-directed QPSK Costas loop.
+4. While the TS isn't locked, the symbols' 4th power (which removes the QPSK modulation)
+   goes into a 4096-point FFT; a line 25× above the mean bin is 4× the residual offset and
+   moves the NCO (range ± symbol rate / 8). Then 1500 symbols to settle.
+5. Once locked, the timing and carrier loops narrow (0.008 → 0.002 and 0.015 → 0.004 per
+   symbol): at low SNR the wide loops slip cycles.
+6. Soft bits (`i8`) to the FEC, which **acquires** first: it collects 14 000 symbols and
+   tries every hypothesis: code rate (all five in `auto`), puncturing phase (the period's
+   start on a symbol boundary: 1, 3, 2, 3, 4 phases), and 4 of the constellation's 8
+   symmetries (a 90° rotation, and a mirrored spectrum; the other 4 are these inverted,
+   which `TsSync` handles). Each is Viterbi-decoded over 2048 symbols and ranked by its
+   re-encoded bit error rate; the best 6 are decoded over the whole buffer and accepted when
+   sync bytes appear 204 bytes apart in 6 of 8 packets. Then it **tracks**: the buffer is
+   replayed (so little is lost) and every symbol goes on through the chain. Losing the
+   packet grid (8 wrong sync bytes in a row, e.g. after a 90° slip) starts a new acquisition.
+7. Decoded packets go into a 64 KB FIFO; input is taken only while 16 KB are free, so a
+   slow consumer back-pressures the demodulator and nothing is dropped.
+
+The `status` output follows the decoded-messages convention: a line per second of stream
+time (`t=… state=lock rate=3/4 mer_db=… ber=… rs_corrected=… rs_failed=… packets=… pps=…
+freq_hz=…`; `state` is `search`, `sync` (rate found, no grid) or `lock`) and one per lock
+change (`event=lock rate=… spectrum=normal|inverted freq_hz=…`, `event=unlock`). MER is
+from the decisions; `ber` is the channel bit error rate the Viterbi decoder corrected,
+measured by re-encoding its output and comparing with the hard decisions of the bits
+received; `rs_corrected` counts bytes. Lines are dropped, not queued, if the text consumer
+stalls, so a stuck log can't stall the video.
+
+**Measured** (`tests/dvbs.rs`, release build, 250 kBd at 2 samples/symbol, 1.5 kHz off,
+30 ppm clock error, 400 packets per point; "clean" = no uncorrectable packet):
+
+| rate | decodes (≥ 98 % of packets) | clean | EN 300 421 QEF, ideal modem |
+|---|---|---|---|
+| 1/2 | Es/N0 2.5 dB | 3.5 dB | 3.4 dB |
+| 2/3 | 4.0 dB | 4.5 dB | 5.1 dB |
+| 3/4 | 5.0 dB | 5.5 dB | 6.1 dB |
+| 5/6 | 6.0 dB | 6.5 dB | 7.1 dB |
+| 7/8 | 6.5 dB | 7.0 dB | 7.7 dB |
+
+(The last column is the standard's required Eb/N0 for quasi-error-free reception, minus its
+0.8 dB implementation margin, as Es/N0. QEF means about one error an hour, a stricter test
+than 400 clean packets.) Speed on a Ryzen 9 7940HS laptop: the Viterbi decoder alone
+decodes about 54 Mbit/s on one core (SSE2 build), the whole demodulator about 21 MS/s of
+input, i.e. 10 MBd at 2 samples per symbol and rate 3/4 (`cargo bench -p foxygnal-blocks
+--bench blocks -- dvbs`), acquisition included.
 
 ## Recording and playback (M6)
 
