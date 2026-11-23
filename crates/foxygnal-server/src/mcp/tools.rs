@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use foxygnal_core::graph::{BlockSpec, ConnectionSpec};
-use foxygnal_core::{GraphSpec, ParamKind, Params};
+use foxygnal_core::{GraphSpec, ParamKind, Params, StreamType};
 use serde_json::{Map, Value, json};
 
 use super::Mcp;
@@ -29,13 +29,18 @@ pub struct ToolOut {
 
 impl ToolOut {
     /// A JSON result, shown to the model as pretty-printed text too.
+    /// Structured content must be an object: anything else is wrapped as
+    /// `{"result": …}`.
     fn json(v: Value) -> Self {
+        let text = serde_json::to_string_pretty(&v).unwrap_or_default();
+        let structured = if v.is_object() {
+            v
+        } else {
+            json!({ "result": v })
+        };
         Self {
-            content: vec![json!({
-                "type": "text",
-                "text": serde_json::to_string_pretty(&v).unwrap_or_default(),
-            })],
-            structured: Some(v),
+            content: vec![json!({"type": "text", "text": text})],
+            structured: Some(structured),
             error: false,
         }
     }
@@ -176,7 +181,7 @@ const TOOLS: &[Tool] = &[
         description: "Apply edits to the open graph, in order, all or nothing. Operations (field `op`): \
 `add_block` {id, kind, params?, const_inputs?, x?, y?}; `remove_block` {id} (and its wires); \
 `set_params` {id, params} (a null value resets that setting to its default; live settings change a running graph at once); \
-`connect` {from, to} (`block.port`; the port may be left out if the block has only one); `disconnect` {from, to}; \
+`connect` {from, to, convert?} (`block.port`; the port may be left out if the block has only one; if the two ends' stream types differ and exactly one converter block fits, it is inserted between them unless convert=false, and the reply's `notes` say so or list the choices); `disconnect` {from, to}; \
 `set_const_input` {id, input, value} (null removes it); `set_variable` {name, value} (null removes it). \
 Returns the check report. While running, a change to anything but live settings applies on the next run (`stale`).",
         read_only: false,
@@ -263,12 +268,13 @@ Returns the check report. While running, a change to anything but live settings 
         description: "Watch a wire of the running graph for a while and summarize it. \
 `spectrum`: noise floor, the signals standing out of it (strongest point and power-weighted centre frequency, bandwidth, level in dBFS, height above the noise) and a coarse outline of the whole spectrum; frequencies are absolute when the wire knows its centre frequency. \
 `level`: RMS, peak and DC in dBFS. \
+`constellation` (c32 wires): envelope spread, a PSK order estimate (BPSK/QPSK/8PSK from the M-th power test) with EVM and MER, DC offset, and the symbol rate from the spectral line of |x|² (needs more than one sample per symbol, i.e. before clock recovery). \
 `messages`: the text lines a decoder wrote (u8 wires), including recent ones from before the call.",
         read_only: true,
         schema: || {
             json!({"type": "object", "properties": {
                 "wire": wire_prop(),
-                "kind": {"type": "string", "enum": ["spectrum", "level", "messages"]},
+                "kind": {"type": "string", "enum": ["spectrum", "level", "constellation", "messages"]},
                 "seconds": {"type": "number", "description": "How long to watch (0.1–30).", "default": 1.0},
                 "fft_size": {"type": "integer", "description": "Spectrum resolution: FFT size, a power of two (64–8192).", "default": 4096},
                 "signals": {"type": "integer", "description": "Spectrum: at most this many signals (the strongest).", "default": 8},
@@ -703,7 +709,87 @@ fn endpoint(mcp: &Mcp, g: &GraphSpec, text: &str, output: bool) -> Result<String
     }
 }
 
-fn apply_op(mcp: &Mcp, g: &mut GraphSpec, op: &Value) -> Result<(), String> {
+/// The stream types of an output and an input of `g`, from the blocks as
+/// they would be built (variables evaluated). `None` if that can't be worked
+/// out yet (unknown blocks, sub-graphs, a graph that doesn't resolve).
+fn port_types(mcp: &Mcp, g: &GraphSpec, from: &str, to: &str) -> Option<(StreamType, StreamType)> {
+    let reg = mcp.session.registry();
+    let r = foxygnal_core::resolve(g, reg, mcp.session.graphs()).ok()?;
+    let ty = |ep: &str, output: bool| -> Option<StreamType> {
+        let (id, port) = ep.rsplit_once('.')?;
+        let b = r.graph.blocks.iter().find(|b| b.id == id)?;
+        let inst = reg.build(&b.kind, &b.params).ok()?;
+        let ports = if output { &inst.outputs } else { &inst.inputs };
+        ports
+            .iter()
+            .enumerate()
+            .find(|(i, (name, _))| name == port || i.to_string() == port)
+            .map(|(_, (_, t))| *t)
+    };
+    Some((ty(from, true)?, ty(to, false)?))
+}
+
+/// Converter block kinds from `a` to `b` (one fixed-type input and output).
+fn converters(mcp: &Mcp, a: StreamType, b: StreamType) -> Vec<&'static str> {
+    mcp.session
+        .registry()
+        .descriptors()
+        .filter(|d| {
+            d.category == "Converters"
+                && d.inputs.len() == 1
+                && d.outputs.len() == 1
+                && d.inputs[0].ty == Some(a)
+                && d.outputs[0].ty == Some(b)
+        })
+        .map(|d| d.kind)
+        .collect()
+}
+
+/// Wire `from` → a new `kind` block → `to`; returns the new block's id.
+fn insert_converter(g: &mut GraphSpec, kind: &str, from: &str, to: &str) -> String {
+    let id = (1..)
+        .map(|i| format!("{kind}_{i}"))
+        .find(|id| !g.blocks.iter().any(|b| &b.id == id))
+        .expect("an unused id");
+    let pos = |ep: &str, key: &str| {
+        let bid = ep.rsplit_once('.').map_or(ep, |(b, _)| b);
+        g.blocks
+            .iter()
+            .find(|b| b.id == bid)
+            .and_then(|b| b.ui.get(key).and_then(Value::as_f64))
+    };
+    let mid = |key: &str| match (pos(from, key), pos(to, key)) {
+        (Some(a), Some(b)) => (a + b) / 2.0,
+        (Some(a), None) | (None, Some(a)) => a,
+        _ => 0.0,
+    };
+    let mut ui = std::collections::BTreeMap::new();
+    ui.insert("x".to_owned(), json!(mid("x")));
+    ui.insert("y".to_owned(), json!(mid("y") + 120.0));
+    g.blocks.push(BlockSpec {
+        id: id.clone(),
+        kind: kind.to_owned(),
+        params: Params::new(),
+        const_inputs: Params::new(),
+        ui,
+    });
+    g.connections.push(ConnectionSpec {
+        from: from.to_owned(),
+        to: format!("{id}.in"),
+    });
+    g.connections.push(ConnectionSpec {
+        from: format!("{id}.out"),
+        to: to.to_owned(),
+    });
+    id
+}
+
+fn apply_op(
+    mcp: &Mcp,
+    g: &mut GraphSpec,
+    op: &Value,
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
     let reg = mcp.session.registry();
     let block_mut = |g: &mut GraphSpec, id: &str| -> Result<usize, String> {
         g.blocks
@@ -792,6 +878,49 @@ fn apply_op(mcp: &Mcp, g: &mut GraphSpec, op: &Value) -> Result<(), String> {
                     c.from
                 ));
             }
+            let convert = op.get("convert").and_then(Value::as_bool) != Some(false);
+            if let Some((a, b)) = port_types(mcp, g, &from, &to)
+                && a != b
+                && convert
+            {
+                let fits = converters(mcp, a, b);
+                if let [kind] = fits.as_slice() {
+                    let id = insert_converter(g, kind, &from, &to);
+                    let settings: Vec<String> = mcp
+                        .session
+                        .registry()
+                        .get(kind)
+                        .map(|d| {
+                            d.params
+                                .iter()
+                                .map(|p| format!("{}={}", p.name, p.default))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let check = if settings.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "; check its settings ({}), e.g. with set_params on `{id}`",
+                            settings.join(", ")
+                        )
+                    };
+                    notes.push(format!(
+                        "`{from}` carries {a} and `{to}` takes {b}: inserted `{id}` ({kind}) between them{check}"
+                    ));
+                    return Ok(());
+                }
+                notes.push(if fits.is_empty() {
+                    format!(
+                        "`{from}` carries {a} and `{to}` takes {b}, and no single block converts {a} to {b}; set the blocks' `type` to match, or convert in steps"
+                    )
+                } else {
+                    format!(
+                        "`{from}` carries {a} and `{to}` takes {b}; several blocks convert that ({}): add the right one and wire it in between",
+                        fits.join(", ")
+                    )
+                });
+            }
             g.connections.push(ConnectionSpec { from, to });
         }
         "disconnect" => {
@@ -862,8 +991,9 @@ fn edit_graph(mcp: &Mcp, args: &Value) -> Out {
         .and_then(Value::as_array)
         .ok_or("`operations` (an array) is missing")?;
     let mut g = mcp.session.graph();
+    let mut notes = Vec::new();
     for (i, op) in ops.iter().enumerate() {
-        apply_op(mcp, &mut g, op).map_err(|e| {
+        apply_op(mcp, &mut g, op, &mut notes).map_err(|e| {
             format!(
                 "operation {} ({}): {e}. Nothing was changed.",
                 i + 1,
@@ -873,11 +1003,11 @@ fn edit_graph(mcp: &Mcp, args: &Value) -> Out {
     }
     mcp.session
         .set_graph_by(MCP_CLIENT, g.clone(), mcp.session.name(), Some(BY));
-    Ok(ToolOut::json(graph_report(
-        mcp,
-        &g,
-        &mcp.session.meta_now(),
-    )))
+    let mut v = graph_report(mcp, &g, &mcp.session.meta_now());
+    if !notes.is_empty() {
+        v["notes"] = json!(notes);
+    }
+    Ok(ToolOut::json(v))
 }
 
 // ---- Files --------------------------------------------------------------------------
@@ -1154,7 +1284,16 @@ async fn measure(mcp: &Mcp, args: &Value) -> Out {
                 "some_lost": c.gap,
             })))
         }
-        k => Err(format!("unknown kind `{k}`: spectrum, level or messages")),
+        "constellation" => {
+            let cfg = probe_config(json!({"kind": "constellation", "points": 8192}));
+            let c = sample(mcp, &wire, cfg, 30.0, secs).await?;
+            let mut v = constellation_summary(&c, meta.sample_rate)?;
+            v["wire"] = json!(label);
+            Ok(ToolOut::json(v))
+        }
+        k => Err(format!(
+            "unknown kind `{k}`: spectrum, level, constellation or messages"
+        )),
     }
 }
 
@@ -1308,6 +1447,139 @@ fn spectrum_summary(
         }
     }
     Ok(v)
+}
+
+/// What the I/Q points of a wire say about its modulation.
+fn constellation_summary(c: &Collected, rate: Option<f64>) -> Result<Value, String> {
+    use foxygnal_core::Complex32;
+    let k = &c.constellation;
+    if k.points.len() < 64 {
+        return Err("too few points arrived (is it a c32 wire with a signal on it?)".into());
+    }
+    let pts: Vec<Complex32> = k.points.iter().copied().collect();
+    let n = pts.len() as f64;
+    let (mut sum, mut sum_sq, mut sum_mag) = (Complex32::default(), 0.0f64, 0.0f64);
+    for z in &pts {
+        sum += z;
+        sum_sq += f64::from(z.norm_sqr());
+        sum_mag += f64::from(z.norm());
+    }
+    let mean_mag = sum_mag / n;
+    let var_mag = (sum_sq / n - mean_mag * mean_mag).max(0.0);
+    let spread = var_mag.sqrt() / mean_mag.max(1e-12);
+    let dc = sum / n as f32;
+    let mut v = json!({
+        "points": pts.len(),
+        "rms": round3((sum_sq / n).sqrt()),
+        "mean_magnitude": round3(mean_mag),
+        "envelope_spread": round3(spread),
+        "dc": [round3(f64::from(dc.re)), round3(f64::from(dc.im))],
+    });
+
+    // The M-th power test: (z/|z|)^M averages to a large value for M-PSK
+    // whenever M is a multiple of the order.
+    let unit: Vec<Complex32> = pts
+        .iter()
+        .filter(|z| z.norm() > 1e-9)
+        .map(|z| z / z.norm())
+        .collect();
+    let power = |m: i32| {
+        let s: Complex32 = unit.iter().map(|u| u.powi(m)).sum();
+        s / unit.len().max(1) as f32
+    };
+    let tests: Vec<(i32, Complex32)> = [2, 4, 8].into_iter().map(|m| (m, power(m))).collect();
+    v["mth_power"] = json!(
+        tests
+            .iter()
+            .map(|(m, p)| json!({"m": m, "strength": round3(f64::from(p.norm()))}))
+            .collect::<Vec<_>>()
+    );
+    // Synchronized PSK (one sample per symbol, at the symbol centres) has a
+    // nearly constant envelope and a strong M-th power line.
+    let order = if spread < 0.25 {
+        tests.iter().find(|(_, p)| p.norm() > 0.6).copied()
+    } else {
+        None
+    };
+    match order {
+        Some((m, p)) => {
+            let name = match m {
+                2 => "BPSK",
+                4 => "QPSK",
+                _ => "8PSK",
+            };
+            let theta = p.arg() / m as f32;
+            let step = std::f32::consts::TAU / m as f32;
+            let (mut err, mut refp) = (0.0f64, 0.0f64);
+            for z in &pts {
+                let k = ((z.arg() - theta) / step).round();
+                let ideal = Complex32::from_polar(mean_mag as f32, theta + k * step);
+                err += f64::from((z - ideal).norm_sqr());
+                refp += f64::from(ideal.norm_sqr());
+            }
+            let evm = (err / refp).sqrt();
+            v["modulation"] = json!(name);
+            v["rotation_deg"] = json!(round1(f64::from(theta.to_degrees())));
+            v["evm_percent"] = json!(round1(evm * 100.0));
+            v["mer_db"] = json!(round1(-20.0 * evm.max(1e-9).log10()));
+        }
+        None => {
+            v["modulation"] = json!(if spread < 0.25 {
+                "constant envelope, no PSK clusters (FM/FSK, or not yet synchronized)"
+            } else {
+                "varying envelope (QAM/ASK/AM, noise, or not yet synchronized)"
+            });
+        }
+    }
+
+    // The symbol-rate line: |x|² of a pulse-shaped linear modulation has a
+    // spectral line at the symbol rate.
+    if k.cyclo_frames > 0 {
+        let nfft = k.cyclo.len();
+        let half = nfft / 2;
+        let p = &k.cyclo[..half];
+        let mut sorted: Vec<f64> = p[4..].to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let median = sorted[sorted.len() / 2].max(1e-30);
+        let (i, &max) = p
+            .iter()
+            .enumerate()
+            .skip(4)
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .expect("non-empty");
+        let snr = 10.0 * (max / median).log10();
+        if snr > 12.0 {
+            let shift = if i + 1 < half {
+                let (l, c, r) = (p[i - 1].max(1e-30).ln(), max.ln(), p[i + 1].max(1e-30).ln());
+                let d = l - 2.0 * c + r;
+                if d < 0.0 {
+                    (0.5 * (l - r) / d).clamp(-0.5, 0.5)
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            let frac = (i as f64 + shift) / nfft as f64;
+            v["symbol_rate_line_db"] = json!(round1(snr));
+            match rate {
+                Some(r) => {
+                    v["symbol_rate_hz"] = json!((frac * r).round());
+                    v["samples_per_symbol"] = json!(round3(1.0 / frac));
+                }
+                None => v["symbol_rate_cycles_per_sample"] = json!(frac),
+            }
+        } else {
+            v["symbol_rate"] = json!(
+                "no line in |x|² (one sample per symbol, a constant-envelope signal, or too noisy)"
+            );
+        }
+    }
+    Ok(v)
+}
+
+fn round3(x: f64) -> f64 {
+    (x * 1000.0).round() / 1000.0
 }
 
 // ---- Watches ---------------------------------------------------------------------

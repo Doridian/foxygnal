@@ -249,6 +249,12 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/pocsag.fox.toml"),
     },
     Example {
+        name: "flex",
+        title: "FLEX pager decoder",
+        description: "An SDR on a paging channel (929–932 MHz in North America) → FM demod → FLEX decoder (1600/3200/6400 bps, 2- and 4-level FSK, all phases). Needs a real receiver; set `freq` to a FLEX channel in your area.",
+        toml: include_str!("../../../examples/flex.fox.toml"),
+    },
+    Example {
         name: "aprs",
         title: "APRS packet decoder",
         description: "An SDR at 144.39 MHz (144.8 MHz in Europe) → FM demod → AFSK 1200 → HDLC/AX.25 → APRS positions, messages and objects. Needs a real receiver.",

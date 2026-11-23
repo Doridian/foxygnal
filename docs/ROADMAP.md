@@ -148,13 +148,13 @@ do the work through the same engine the UI uses.
 - [x] Tools for building graphs: list and search blocks (descriptors, help text, ports,
       settings), list examples and templates, read, check (the same type-checked errors
       as the editor, naming both endpoints, plus unconnected inputs), create and edit
-      `.fox.toml` graphs, import and export `.grc`. Not yet: inserting converters
-      automatically (the error names both types)
+      `.fox.toml` graphs (a converter is inserted when a wire's ends disagree and exactly
+      one fits), import and export `.grc`
 - [x] Tools for signals: run and stop, change live settings, read per-block and per-wire stats,
       attach a probe and get a *summary* rather than raw samples (strongest peaks and their
-      levels, noise floor, occupied bandwidth, level meter), read decoded messages, fetch the
-      current picture as a PNG, list SDR devices, record a short SigMF capture. Not yet: a
-      constellation summary (spread, symbol rate)
+      levels, noise floor, occupied bandwidth, level meter, constellation: PSK order, EVM/MER,
+      symbol rate), read decoded messages, fetch the current picture as a PNG, list SDR
+      devices, record a short SigMF capture
 - [x] Resources: the block catalog, docs, the open graph, examples; prompts for common jobs
       ("build a receiver", "find signals in this band", "decode this recording")
 - [x] Safety: transmitting is never possible over MCP: TX blocks stay disarmed until a person
@@ -167,8 +167,10 @@ Goal: the narrowband signals within reach of an RTL-SDR and a simple antenna, ea
 template.
 
 - **Paging and telemetry**
-  - [ ] FLEX (1600/3200/6400, 2- and 4-level FSK): the paging system used locally, which M8's
-        POCSAG test found instead
+  - [x] FLEX (1600/3200/6400, 2- and 4-level FSK): the paging system used locally, which M8's
+        POCSAG test found instead. Speed and polarity from Sync 1, phases A–D, BCH(31,21)
+        repair, short and long addresses, alphanumeric / numeric / tone / secure / binary
+        pages, fragments marked; "FLEX" template
   - [ ] ISM-band sensors (433/868/915 MHz): an OOK/FSK pulse demodulator, PWM/PPM/Manchester
         slicers, and a table of device formats in the spirit of rtl_433 (weather stations, tire
         pressure sensors, doorbells, power meters)

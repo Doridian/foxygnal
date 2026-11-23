@@ -1,0 +1,68 @@
+# FLEX pager decoder: 1600, 3200 and 6400 bps, 2- and 4-level FSK.
+#
+# FLEX is the paging protocol most North American carriers use, around
+# 929–932 MHz: a continuous, rattling signal (POCSAG comes in bursts).
+# Set `freq` to a paging channel used in your area. The FM demodulator runs
+# without de-emphasis so the decoder sees the flat FSK levels; the decoder
+# finds each frame's speed from its sync pattern, and the polarity, by itself.
+# Click the wire into `log` and choose Messages:
+#
+#   t=12.345 baud=1600 levels=2 phase=A cycle=3 frame=45 capcode=001234567 type=alpha msg="…"
+#
+#   SDR 2.4 MS/s ──xlate ÷50──▶ 48 kS/s ──FM demod (flat)──▶ FLEX ──text──▶ log
+#
+#   foxygnal run examples/flex.fox.toml   (prints the messages: stdout = true)
+#
+# Pager messages can be personal: decode only what you may lawfully receive,
+# and don't share what you read.
+
+[vars]
+freq = "929.6625M"
+offset = "250k"
+samp_rate = "2.4M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$freq - $offset", sample_rate = "$samp_rate", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "channel"
+kind = "freq_xlating_fir"
+params = { offset = "$offset", cutoff = 9000.0, transition = 6000.0, decimation = 50, window = "hamming" }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "fm_demod"
+params = { deviation = 4800.0, deemphasis = "off" }
+ui = { x = 700, y = 120 }
+
+[[block]]
+id = "flex"
+kind = "flex_decoder"
+params = { fix_errors = 2 }
+ui = { x = 1030, y = 120 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 1350, y = 120 }
+
+[[connect]]
+from = "sdr.out"
+to = "channel.in"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.out"
+to = "flex.in"
+
+[[connect]]
+from = "flex.out"
+to = "log.in"
