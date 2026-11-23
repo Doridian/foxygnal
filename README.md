@@ -48,6 +48,13 @@ header, with slant correction) draws pictures in the Image instrument as they ar
 saves each one as a PNG with an Image Sink. Templates: "SSTV pictures" (the ISS on 145.8 MHz,
 `examples/sstv.fox.toml`) and "SSTV from a recording" (a WAV file, `examples/sstv-wav.fox.toml`).
 
+**Digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
+demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
+you pick with its AAC sound, and shows codecs, resolution, frame rate, bit rates and errors.
+H.264 and HEVC are decoded by the browser (WebCodecs); MPEG-2, which most DVB services still
+use, by foxygnal's own decoder compiled to WebAssembly. Template: "Video from a TS file"
+(`examples/ts-video.fox.toml`).
+
 **AI assistants (MCP).** foxygnal is also a [Model Context Protocol](https://modelcontextprotocol.io)
 server. An assistant can look up blocks, build and check graphs, run them, and measure what's
 on a wire: the signals in a spectrum, levels, decoded messages, pictures. With

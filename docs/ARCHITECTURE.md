@@ -29,6 +29,7 @@ frames of a few KB each.
 | `foxygnal-server` | REST + WebSocket API, probes and instruments, static UI | core, dsp, sdr, grc |
 | `foxygnal-plugin` | block plugins: WebAssembly components run with wasmtime (see "Plugins") | core |
 | `foxygnal-plugin-sdk` | guest side: write plugins in Rust (built for `wasm32-unknown-unknown`) | — |
+| `foxygnal-mpeg2` | MPEG-1/2 video decoder, built for `wasm32-unknown-unknown` for the browser's Video instrument (see "Digital video") | — |
 | `foxygnal` | CLI | all (plugin: cargo feature `plugins`, default on) |
 
 `foxygnal-sdr` holds the device trait, discovery and the drivers. Drivers that need a C library
@@ -387,6 +388,8 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
   - **Image** (`image` probe, frame kind 7, u8 wires only): every whole picture row since the
     last frame, as the raster records themselves (each padded to 4 bytes). See "Decoded
     pictures".
+  - **Video** (`ts` probe, frame kind 8, u8 wires only): every whole transport stream packet
+    since the last frame. Read on a thread of its own, see "Digital video".
 - **Stats** are broadcast twice a second while running: items/s and buffer fill per wire,
   and the share of a core each block spends in `work`. The UI shows them in the wire popover
   and as the *Load* overlay (heat colours on blocks and wires).
@@ -451,8 +454,9 @@ format knows about pictures.
 - A decoder that knows when a picture is cut off (an SSTV transmission that stops) sends its
   last row again with the last-row flag, so sinks and the instrument close the picture.
 
-Video (M14) will probably need a frame-level probe that drops whole frames when behind; see
-the open questions in the roadmap.
+Digital video (M14) doesn't use row records: a demodulator's output is already a compressed
+transport stream, and the browser decodes it (see "Digital video"). Analog TV, whose frames
+the engine draws itself, is still an open question in the roadmap.
 
 ### SSTV decoder
 
@@ -473,6 +477,101 @@ and `out` (text: `event=start/end/lost/cut`, the mode, and the sender's clock er
 - Pixels are the mean frequency over each pixel's time. A scan that runs into a sync or
   separator tone holds its last clean pixel over the final 0.35 ms, which band-limited audio
   smears.
+
+## Digital video (M14)
+
+Digital TV (DVB-T, DVB-S, ISDB-T) delivers an **MPEG transport stream** (ISO/IEC 13818-1),
+and the convention is as plain as for messages: **a TS wire is a `u8` stream of whole
+188-byte packets, each starting with the sync byte 0x47**, with no other framing. A
+demodulator writes the packets its outer decoder (Reed-Solomon) delivers, including those it
+couldn't correct, with `transport_error_indicator` set; readers skip or conceal those. A `.ts`
+file is already in this form, so `file_source` (u8) → `throttle` plays one in real time, and
+`file_sink` records a stream that VLC or ffplay can open.
+
+The engine doesn't demux or decode video: the stream is already compressed, a person watches
+it in a browser that has video decoders, and decoding in the engine would cost a core per
+viewer and turn a few Mbit/s into hundreds. So the engine forwards packets and the browser
+does the rest.
+
+**The `ts` probe** (`server/src/probe/ts.rs`, frame kind 8). Payload: `u32 packets, u8 flags
+(bit 0: packets were lost before these), u8[3] 0`, then the packets, 188 bytes each, padded
+to 4 bytes. It aligns to packets by finding the sync byte at three packet starts in a row,
+then expects one every 188 bytes; a packet without it loses the lock (a gap) and the search
+starts again, so a stream that isn't whole packets still yields its intact ones. Video runs
+at 1–20 Mbit/s (a DVB-T multiplex up to about 32), while a tap can only rely on the newest
+half of the ring (16 KiB for a default `u8` ring) and the shared probe thread polls about 60
+times a second, which keeps up to about 1 MB/s. Rather than larger buffers for every `u8`
+wire (the runtime has one buffer size for all; per-edge sizes would touch the runtime, the
+file format and latency elsewhere), the probe reads its tap on **a thread of its own** that
+polls as often as the measured byte rate needs, every 1–4 ms: about 8 MB/s (64 Mbit/s) at
+the fastest, with no cost to other probes. The probe thread sends what it collected at the
+instrument's frame rate (30 fps). As always it never back-pressures the graph: if it falls
+behind, or more than 4 MB waits for a slow tab, packets are dropped in whole and the frame is
+marked as a gap. A frame dropped on the way to a slow tab shows up as a jump in the frame's
+sequence number, which the instrument also treats as a gap.
+
+**The Video instrument** (`ui/src/lib/instruments/VideoView.svelte`) is offered for u8 wires
+next to Messages and Image. Everything but drawing happens in a worker
+(`ui/src/lib/video/worker.ts`):
+
+- `video/ts.ts` demuxes: PAT and PMT (with CRC check) for the programs and their streams,
+  the SDT for service and provider names, PES reassembly with 33-bit PTS/DTS unwrapping, the
+  PCR, and counters (TEI packets, continuity errors, packets per PID). A PES with a lost or
+  TEI packet is dropped whole. It and `video/nal.ts` (codec strings, key frames, ADTS) have no
+  imports, so `npm test` runs them under node (`ui/tests/video.test.ts`, with streams made by
+  ffmpeg when it is installed).
+- The program is picked by the user, or the first with video. Its video goes to
+  **WebCodecs** for H.264 (`avc1.*` from the SPS, Annex B chunks; decoding starts at an IDR,
+  or an I slice with SPS and PPS for streams that use recovery points) and HEVC (`hvc1.*`,
+  where the browser supports it, checked with `isConfigSupported`); MPEG-1 and MPEG-2 video
+  go to **foxygnal's own decoder compiled to WebAssembly** (below), whose I420 pictures become
+  `VideoFrame`s too. AAC (ADTS) sound goes to a WebCodecs `AudioDecoder` and then to browser
+  audio, when the user switches sound on.
+- Timing: the stream arrives in real time, so the program clock maps to arrival time. The
+  worker keeps the lower envelope of (arrival − PCR), which network jitter can only raise, and a
+  picture is due at its PTS on that clock plus a jitter buffer (300 ms, growing when pictures
+  come out late, shrinking back when they don't). Sound is scheduled on the same clock
+  (`browserAudio.playAt`), so pictures and sound stay together. Without a PCR the first PTS
+  is mapped to its arrival. A jump of more than 2 s (a looped file, a new stream) restarts the
+  clock and drops queued pictures.
+- The page keeps at most 48 decoded pictures and on each animation frame draws the newest
+  one that is due, scaled to fit with its display aspect ratio, and closes the ones it skips.
+- An overlay shows the service, codecs, resolution, measured frame rate, the bit rates of the
+  stream, the video and the sound, dropped pictures, decoder errors, and continuity, TEI and
+  gap counts. A pop-out window runs its own probe and worker, like every instrument.
+
+**MPEG-2 in the browser.** WebCodecs can't decode MPEG-2 video, and most DVB-T and DVB-S
+services use it. `crates/foxygnal-mpeg2` is a small decoder for MPEG-2 main profile (and
+MPEG-1 video) with no dependencies:
+
+- 4:2:0 only (4:2:2 pictures are skipped and counted as errors); I, P and B pictures, frame
+  and field pictures, frame, field, 16×8 and dual-prime prediction, field DCT, both
+  coefficient tables, alternate scan, the non-linear quantiser scale, custom matrices, and
+  mismatch control. Interlaced pictures come out woven, without deinterlacing.
+- Pictures come out in display order. A PES's PTS belongs to the first picture that starts in
+  it; pictures without one get the previous PTS plus a frame period. `reset()` (after a gap)
+  waits for a sequence header and an I picture. A broken slice is concealed from the previous
+  anchor and counted; garbage never panics (tested with random corruption).
+- Tests (`cargo test -p foxygnal-mpeg2`) decode streams made by ffmpeg and compare every
+  picture with ffmpeg's own decoding: worst-frame PSNR is 67–76 dB (only IDCT rounding
+  differs) for progressive and interlaced, SD, 1080 and odd sizes, MPEG-1, alternate scan,
+  non-linear quantiser and custom matrices. ffmpeg can't encode field pictures, so
+  `tests/synthetic.rs` has a tiny encoder that writes them (with field, 16×8 and dual-prime
+  prediction) and checks them against ffmpeg's decoder. The tests skip without ffmpeg.
+- Speed: native about 1000 pictures/s at 720×576 and 235/s at 1080; in Firefox (wasm,
+  measured by the instrument in its worker) about 3 ms per 720×576 picture at 5 Mbit/s and
+  13 ms per 1080i picture at 15 Mbit/s, so HD plays in real time on one core.
+
+`scripts/build-mpeg2-wasm.sh` builds it for `wasm32-unknown-unknown` (paths remapped and
+symbols stripped, so the build is reproducible) and copies the module to
+`ui/src/lib/video/mpeg2.wasm` (about 90 KB), which is committed like the plugin test
+fixtures: building the UI needs no Rust toolchain and the workspace build no wasm target. Run
+it again after changing the crate. The module imports nothing and exports a small C ABI
+(`mp2v_*`, see `ui/src/lib/video/mpeg2.ts`).
+
+Not decoded in the browser: MPEG-1 Layer II sound (MP2, the sound of most DVB services:
+WebCodecs has no decoder for it), AC-3 / E-AC-3, AAC in LATM (DVB-T2), and subtitles and
+teletext. The instrument shows these streams and says so.
 
 ## Recording and playback (M6)
 
@@ -871,7 +970,8 @@ Svelte 5 + Vite + TypeScript, and **Svelte Flow** (`@xyflow/svelte`) for the nod
 Instruments are hand-written canvases, not a charting library: Canvas2D for traces (scope,
 spectrum, constellation), and WebGL2 for the waterfall, whose history lives in a float
 texture used as a ring. A new row is one small upload, and changing the dB range re-colours
-the whole history. Instruments live in a resizable dock under the canvas, are remembered per
+the whole history. Video is decoded in a worker (WebCodecs, or the MPEG-2
+decoder in WebAssembly) and drawn as `VideoFrame`s on a 2D canvas. Instruments live in a resizable dock under the canvas, are remembered per
 graph file (browser storage), and can pop out into their own window (`?popout=<id>`), which
 opens its own engine connection and syncs settings back over a `BroadcastChannel`. In release builds the built UI is embedded in the binary with `rust-embed`
 (`cargo build --release --features embed-ui`), so you ship a single file. Without the feature

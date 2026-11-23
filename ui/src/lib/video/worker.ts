@@ -261,11 +261,16 @@ function wasmPath(): VideoPath {
       }
       needSeq = false;
     }
+    // Decoding happens in push and next, and a picture may come out a call
+    // after the one that decoded it: time every call, per picture out.
+    let t0 = performance.now();
     dec.push(p.data, p.pts);
     for (;;) {
-      const t0 = performance.now();
       const pic = dec.next();
+      decodeSpent += performance.now() - t0;
       if (!pic) break;
+      decodeMs = 0.9 * decodeMs + 0.1 * decodeSpent;
+      decodeSpent = 0;
       v.errors = dec.errors;
       if (pic.pts === null) continue;
       const pts = unwrap.unwrap(pic.pts);
@@ -291,7 +296,7 @@ function wasmPath(): VideoPath {
         v.errors++;
         v.note = `Can't make a video frame: ${(e as Error).message}`;
       }
-      decodeMs = 0.9 * decodeMs + 0.1 * (performance.now() - t0);
+      t0 = performance.now();
     }
   }
 
@@ -316,6 +321,7 @@ function wasmPath(): VideoPath {
 }
 
 let decodeMs = 0;
+let decodeSpent = 0;
 let video: VideoPath | null = null;
 
 // ---- Audio -------------------------------------------------------------------
