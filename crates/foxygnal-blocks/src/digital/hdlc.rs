@@ -114,11 +114,12 @@ enum Format {
     Raw,
 }
 
-pub struct HdlcDeframer {
-    format: Format,
+/// The bit-level half of an HDLC receiver: NRZI decoding, flags, bit
+/// unstuffing and aborts. Feed it line bits; it reports each byte-aligned
+/// frame between two flags (FCS included, not checked). Shared by the HDLC
+/// Deframer and the AIS decoder.
+pub(crate) struct Deframer {
     nrzi: bool,
-    check_fcs: bool,
-    rate: Option<f64>,
     /// Previous line bit (NRZI).
     prev: u8,
     /// Consecutive 1s.
@@ -127,6 +128,103 @@ pub struct HdlcDeframer {
     in_frame: bool,
     buf: Vec<u8>,
     nbits: usize,
+    max: usize,
+}
+
+impl Deframer {
+    /// `max`: the longest frame kept, in bytes, FCS included.
+    pub fn new(nrzi: bool, max: usize) -> Self {
+        Self {
+            nrzi,
+            prev: 0,
+            ones: 0,
+            in_frame: false,
+            buf: vec![0; max + 1],
+            nbits: 0,
+            max,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, b: u8) {
+        if self.nbits >= 8 * self.max + 7 {
+            self.in_frame = false; // too long: wait for the next flag
+            return;
+        }
+        let (byte, bit) = (self.nbits / 8, self.nbits % 8);
+        if bit == 0 {
+            self.buf[byte] = 0;
+        }
+        self.buf[byte] |= b << bit;
+        self.nbits += 1;
+    }
+
+    /// One line bit. When it completes a closing flag after at least `min`
+    /// whole bytes, returns the frame's length in bytes (FCS included); the
+    /// frame is then [`Self::frame`].
+    #[inline]
+    pub fn bit(&mut self, line: u8, min: usize) -> Option<usize> {
+        let line = line & 1;
+        let b = if self.nrzi {
+            let v = u8::from(line == self.prev);
+            self.prev = line;
+            v
+        } else {
+            line
+        };
+        if b == 1 {
+            self.ones += 1;
+            if self.ones >= 7 {
+                self.in_frame = false; // abort, or an idle line
+            } else if self.in_frame {
+                self.push(1);
+            }
+            return None;
+        }
+        let ones = std::mem::replace(&mut self.ones, 0);
+        match ones {
+            6 => {
+                // A flag: the frame (if any) ends, the next one may start.
+                // The flag's first seven bits were collected as data.
+                let done = if self.in_frame {
+                    self.nbits
+                        .checked_sub(7)
+                        .filter(|n| n.is_multiple_of(8) && n / 8 >= min)
+                        .map(|n| n / 8)
+                } else {
+                    None
+                };
+                self.in_frame = true;
+                self.nbits = 0;
+                done
+            }
+            5 => None, // stuffed
+            _ => {
+                if self.in_frame {
+                    self.push(0);
+                }
+                None
+            }
+        }
+    }
+
+    /// The first `len` bytes of the last frame.
+    pub fn frame(&self, len: usize) -> &[u8] {
+        &self.buf[..len]
+    }
+}
+
+/// True if the last two bytes of `frame` are the FCS of the rest.
+pub(crate) fn fcs_ok(frame: &[u8]) -> bool {
+    let len = frame.len() - 2;
+    fcs(&frame[..len]) == (u16::from(frame[len]) | u16::from(frame[len + 1]) << 8)
+}
+
+pub struct HdlcDeframer {
+    format: Format,
+    check_fcs: bool,
+    rate: Option<f64>,
+    deframer: Deframer,
     /// Bits seen so far (the time base of `t=`).
     pos: u64,
     /// Length of the raw frame queued (for its tag).
@@ -143,14 +241,9 @@ impl HdlcDeframer {
                 "raw" => Format::Raw,
                 _ => Format::Ax25,
             },
-            nrzi,
             check_fcs,
             rate: None,
-            prev: 0,
-            ones: 0,
-            in_frame: false,
-            buf: vec![0; MAX_FRAME + 1],
-            nbits: 0,
+            deframer: Deframer::new(nrzi, MAX_FRAME),
             pos: 0,
             raw_len: 0,
             text: String::with_capacity(4 * MAX_FRAME + 256),
@@ -158,78 +251,26 @@ impl HdlcDeframer {
         }
     }
 
-    #[inline]
-    fn push(&mut self, b: u8) {
-        if self.nbits >= 8 * MAX_FRAME + 7 {
-            self.in_frame = false; // too long: wait for the next flag
-            return;
-        }
-        let (byte, bit) = (self.nbits / 8, self.nbits % 8);
-        if bit == 0 {
-            self.buf[byte] = 0;
-        }
-        self.buf[byte] |= b << bit;
-        self.nbits += 1;
-    }
-
     /// One line bit. Returns true when a frame was queued.
     #[inline]
     fn bit(&mut self, line: u8) -> bool {
         self.pos += 1;
-        let line = line & 1;
-        let b = if self.nrzi {
-            let v = u8::from(line == self.prev);
-            self.prev = line;
-            v
-        } else {
-            line
-        };
-        if b == 1 {
-            self.ones += 1;
-            if self.ones >= 7 {
-                self.in_frame = false; // abort, or an idle line
-            } else if self.in_frame {
-                self.push(1);
-            }
-            return false;
-        }
-        let ones = std::mem::replace(&mut self.ones, 0);
-        match ones {
-            6 => {
-                // A flag: the frame (if any) ends, the next one may start.
-                let done = self.in_frame && self.finish();
-                self.in_frame = true;
-                self.nbits = 0;
-                done
-            }
-            5 => false, // stuffed
-            _ => {
-                if self.in_frame {
-                    self.push(0);
-                }
-                false
-            }
+        match self.deframer.bit(line, MIN_FRAME) {
+            Some(n) => self.finish(n),
+            None => false,
         }
     }
 
-    /// The closing flag arrived: check the frame and queue it.
-    fn finish(&mut self) -> bool {
-        // The flag's first seven bits were collected as data.
-        let Some(n) = self.nbits.checked_sub(7) else {
-            return false;
-        };
-        if !n.is_multiple_of(8) || n / 8 < MIN_FRAME {
-            return false;
-        }
-        let len = n / 8 - 2;
-        let got = u16::from(self.buf[len]) | u16::from(self.buf[len + 1]) << 8;
-        let ok = fcs(&self.buf[..len]) == got;
+    /// A frame of `n` bytes (FCS included) arrived: check it and queue it.
+    fn finish(&mut self, n: usize) -> bool {
+        let frame = self.deframer.frame(n);
+        let ok = fcs_ok(frame);
         if !ok && self.check_fcs {
             return false;
         }
-        let data = &self.buf[..len];
+        let data = &frame[..n - 2];
         if self.format == Format::Raw {
-            self.raw_len = len;
+            self.raw_len = data.len();
             self.queue.bytes(data);
             return true;
         }
@@ -245,7 +286,7 @@ impl HdlcDeframer {
             if self.format == Format::Ax25 {
                 out.push_str("type=hdlc ");
             }
-            let _ = write!(out, "len={len} data=");
+            let _ = write!(out, "len={} data=", data.len());
             for b in data {
                 let _ = write!(out, "{b:02x}");
             }

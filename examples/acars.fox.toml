@@ -1,0 +1,68 @@
+# ACARS: the text datalink between aircraft and their airlines (2400 bit/s
+# MSK on AM).
+#
+# Set `freq` to an ACARS channel used in your area. Common ones: 131.550 MHz
+# (worldwide primary, and in North America 129.125, 130.025, 130.450 and
+# 131.125 MHz), 131.525 and 131.725 MHz in Europe, 131.450 MHz in Japan. A
+# busy channel near an airport carries a block every few seconds. Click the
+# wire into `log` and choose Messages:
+#
+#   t=12.345 freq=131.550 mode=2 reg=N12345 ack=NAK label=H1 block=3 msgno=M01A flight=XX0123 text="…"
+#
+#   SDR 1.2 MS/s ──xlate ÷25──▶ 48 kS/s ──AM demod──▶ ACARS ──text──▶ log
+#
+#   foxygnal run examples/acars.fox.toml   (prints the messages: stdout = true)
+#
+# ACARS messages can be personal or confidential: decode only what you may
+# lawfully receive, and don't share what you read.
+
+[vars]
+freq = "131.55M"
+offset = "200k"
+samp_rate = "1.2M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$freq - $offset", sample_rate = "$samp_rate", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "channel"
+kind = "freq_xlating_fir"
+params = { offset = "$offset", cutoff = 5000.0, transition = 4000.0, decimation = 25, window = "hamming" }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "am_demod"
+params = { dc_time = 0.05 }
+ui = { x = 700, y = 120 }
+
+[[block]]
+id = "acars"
+kind = "acars_decoder"
+params = { frequency = "$freq", fix_errors = 2 }
+ui = { x = 1030, y = 120 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 1350, y = 120 }
+
+[[connect]]
+from = "sdr.out"
+to = "channel.in"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.out"
+to = "acars.in"
+
+[[connect]]
+from = "acars.out"
+to = "log.in"

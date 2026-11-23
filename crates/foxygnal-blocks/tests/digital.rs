@@ -409,6 +409,45 @@ fn message_log_consumes_text() {
 }
 
 #[test]
+fn message_log_takes_several_inputs() {
+    let mut fg = Flowgraph::new();
+    let a = fg.add("a", VectorSource::instance(b"one\ntwo\n".to_vec()));
+    let b = fg.add("b", VectorSource::instance(b"three\n".to_vec()));
+    let log = fg.add("log", block("message_log", json!({"inputs": 2})));
+    fg.connect(a, 0, log, 0).unwrap();
+    fg.connect(b, 0, log, 1).unwrap();
+    fg.start().unwrap().wait().unwrap();
+    let err = foxygnal_blocks::registry()
+        .build("message_log", json!({"inputs": 5}).as_object().unwrap())
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("1 to 4"), "{err}");
+}
+
+#[test]
+fn the_ais_and_acars_examples_build_and_configure() {
+    let reg = foxygnal_blocks::registry();
+    for (toml, into, rate) in [
+        (
+            include_str!("../../../examples/ais.fox.toml"),
+            "ais_a.in",
+            48e3,
+        ),
+        (
+            include_str!("../../../examples/acars.fox.toml"),
+            "acars.in",
+            48e3,
+        ),
+    ] {
+        let spec = foxygnal_core::GraphSpec::from_toml(toml).unwrap();
+        let mut fg = Flowgraph::from_spec(&spec, &reg).unwrap();
+        let edges = fg.configure().unwrap();
+        let e = edges.iter().find(|e| e.to == into).unwrap();
+        assert_eq!(e.meta.sample_rate, Some(rate), "{into}");
+    }
+}
+
+#[test]
 fn the_adsb_example_builds_and_configures() {
     // Configuring opens no device, so this touches no hardware.
     let spec = foxygnal_core::GraphSpec::from_toml(include_str!("../../../examples/adsb.fox.toml"))

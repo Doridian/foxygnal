@@ -698,15 +698,22 @@ fn endpoint(mcp: &Mcp, g: &GraphSpec, text: &str, output: bool) -> Result<String
         .get(&b.kind)
         .ok_or_else(|| format!("`{text}`: give the port as `{text}.port`"))?;
     let ports = if output { &d.outputs } else { &d.inputs };
-    match ports.as_slice() {
-        [p] => Ok(format!("{text}.{}", p.name)),
-        ps => Err(format!(
-            "`{text}` has {} {}: say which, e.g. `{text}.{}`",
-            ps.len(),
-            if output { "outputs" } else { "inputs" },
-            ps.first().map_or("port", |p| p.name)
-        )),
+    if let [p] = ports.as_slice() {
+        return Ok(format!("{text}.{}", p.name));
     }
+    // Blocks whose port count is a setting (`inputs = 1`): ask the block as
+    // it would be built with its current settings.
+    if let Ok(inst) = mcp.session.registry().build(&b.kind, &b.params)
+        && let [(name, _)] = (if output { &inst.outputs } else { &inst.inputs }).as_slice()
+    {
+        return Ok(format!("{text}.{name}"));
+    }
+    Err(format!(
+        "`{text}` has {} {}: say which, e.g. `{text}.{}`",
+        ports.len(),
+        if output { "outputs" } else { "inputs" },
+        ports.first().map_or("port", |p| p.name)
+    ))
 }
 
 /// The stream types of an output and an input of `g`, from the blocks as

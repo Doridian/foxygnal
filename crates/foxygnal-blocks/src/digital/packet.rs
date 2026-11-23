@@ -97,18 +97,33 @@ pub fn register(r: &mut Registry) {
             category: "Sinks",
             help: "The end of a decoder's text output (one message per line). Click the wire \
                    into it and choose Messages to read them in the browser; for headless runs \
-                   it can also print every line on the engine's standard output.",
-            inputs: vec![u8_port("in")],
+                   it can also print every line on the engine's standard output. Up to four \
+                   decoders can share one log (in, in1, in2, in3); their lines never mix.",
+            inputs: LOG_PORTS.iter().map(|&name| u8_port(name)).collect(),
             outputs: vec![],
-            params: vec![ParamSpec {
-                name: "stdout",
-                label: "Print to stdout",
-                kind: ParamKind::Bool,
-                default: json!(false),
-                help: "Also write each line to the engine's standard output (the terminal \
-                       of `foxygnal run`).",
-                live: true,
-            }],
+            params: vec![
+                ParamSpec {
+                    name: "stdout",
+                    label: "Print to stdout",
+                    kind: ParamKind::Bool,
+                    default: json!(false),
+                    help: "Also write each line to the engine's standard output (the \
+                           terminal of `foxygnal run`).",
+                    live: true,
+                },
+                ParamSpec {
+                    name: "inputs",
+                    label: "Inputs",
+                    kind: ParamKind::Int {
+                        min: Some(1),
+                        max: Some(LOG_PORTS.len() as i64),
+                    },
+                    default: json!(1),
+                    help: "How many text streams the log takes (connect in, then in1, in2, \
+                           in3).",
+                    live: false,
+                },
+            ],
         },
         build_log,
     );
@@ -364,48 +379,66 @@ fn build_packet(p: &ParamReader<'_>) -> Result<Instance, Error> {
 /// Longest partial line kept back for stdout before it's printed anyway.
 const LINE_MAX: usize = 4096;
 
+/// Input ports of the Message Log.
+const LOG_PORTS: [&str; 4] = ["in", "in1", "in2", "in3"];
+
 pub struct MessageLog {
     stdout: bool,
-    /// The start of a line whose end hasn't arrived yet.
-    partial: Vec<u8>,
+    /// Per input, the start of a line whose end hasn't arrived yet.
+    partial: Vec<Vec<u8>>,
+}
+
+impl MessageLog {
+    /// Print the whole lines of `inp` (after what's left from before).
+    fn print(partial: &mut Vec<u8>, inp: &[u8]) {
+        // Whole lines only, so that inputs and logs don't interleave mid-line.
+        match inp.iter().rposition(|&b| b == b'\n') {
+            Some(end) => {
+                let mut o = std::io::stdout().lock();
+                let _ = o.write_all(partial);
+                let _ = o.write_all(&inp[..=end]);
+                let _ = o.flush();
+                partial.clear();
+                partial.extend_from_slice(&inp[end + 1..]);
+            }
+            None => partial.extend_from_slice(inp),
+        }
+        if partial.len() > LINE_MAX {
+            let mut o = std::io::stdout().lock();
+            let _ = o.write_all(partial);
+            let _ = o.flush();
+            partial.clear();
+        }
+    }
 }
 
 impl Block for MessageLog {
     fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
-        let inp = io.inputs[0].slice::<u8>();
-        let n = inp.len();
-        if n == 0 {
-            return Ok(WorkStatus::Blocked);
-        }
-        if self.stdout {
-            // Print whole lines only, so two logs don't interleave mid-line.
-            match inp.iter().rposition(|&b| b == b'\n') {
-                Some(end) => {
-                    let mut o = std::io::stdout().lock();
-                    let _ = o.write_all(&self.partial);
-                    let _ = o.write_all(&inp[..=end]);
-                    let _ = o.flush();
-                    self.partial.clear();
-                    self.partial.extend_from_slice(&inp[end + 1..]);
-                }
-                None => self.partial.extend_from_slice(inp),
+        let mut any = false;
+        for (i, partial) in self.partial.iter_mut().enumerate() {
+            let inp = io.inputs[i].slice::<u8>();
+            let n = inp.len();
+            if n == 0 {
+                continue;
             }
-            if self.partial.len() > LINE_MAX {
-                let mut o = std::io::stdout().lock();
-                let _ = o.write_all(&self.partial);
-                let _ = o.flush();
-                self.partial.clear();
+            if self.stdout {
+                Self::print(partial, inp);
             }
+            io.consume(i, n);
+            any = true;
         }
-        io.consume(0, n);
-        Ok(WorkStatus::Ok)
+        Ok(if any {
+            WorkStatus::Ok
+        } else {
+            WorkStatus::Blocked
+        })
     }
 
     fn set_param(&mut self, name: &str, value: &serde_json::Value) -> Result<(), Error> {
         match name {
             "stdout" => {
                 self.stdout = value.as_bool().unwrap_or(false);
-                self.partial.clear();
+                self.partial.iter_mut().for_each(Vec::clear);
                 Ok(())
             }
             _ => Err(Error::Other(format!("`{name}` is not a live parameter"))),
@@ -414,12 +447,24 @@ impl Block for MessageLog {
 }
 
 fn build_log(p: &ParamReader<'_>) -> Result<Instance, Error> {
+    let n = p.u64("inputs")?;
+    if !(1..=LOG_PORTS.len() as u64).contains(&n) {
+        return Err(Error::Param {
+            block: "message_log".into(),
+            param: "inputs".into(),
+            msg: format!("must be 1 to {}", LOG_PORTS.len()),
+        });
+    }
+    let n = n as usize;
     Ok(Instance {
         block: Box::new(MessageLog {
             stdout: p.bool("stdout")?,
-            partial: Vec::with_capacity(LINE_MAX),
+            partial: (0..n).map(|_| Vec::with_capacity(LINE_MAX)).collect(),
         }),
-        inputs: vec![("in".into(), StreamType::U8)],
+        inputs: LOG_PORTS[..n]
+            .iter()
+            .map(|&name| (name.into(), StreamType::U8))
+            .collect(),
         outputs: vec![],
     })
 }

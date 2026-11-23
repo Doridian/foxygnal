@@ -1297,8 +1297,8 @@ pub(crate) fn map(cx: &mut Cx<'_>) -> Result<Out, String> {
             return Err("the sub-graph couldn't be flattened".into());
         }
         "adsb_decoder" | "rds_decoder" | "packet_decoder" | "message_log" | "pocsag_decoder"
-        | "flex_decoder" | "aprs_decoder" | "sstv_decoder" | "image_sink" | "dvbs_modulator"
-        | "dvbs_demodulator" => {
+        | "flex_decoder" | "aprs_decoder" | "ais_decoder" | "acars_decoder" | "sstv_decoder"
+        | "image_sink" | "dvbs_modulator" | "dvbs_demodulator" => {
             return Err("a foxygnal decoder with no GNU Radio equivalent".into());
         }
         "fm_stereo" | "ssb_demod" | "fsk_demod" | "psk_demod" => {
@@ -1696,7 +1696,13 @@ const KNOWN: &[KnownPorts] = &[
     ("adsb_decoder", &[("in", F)], &[("out", B)]),
     ("rds_decoder", &[("in", F)], &[("out", B)]),
     ("packet_decoder", &[("in", B)], &[("out", B)]),
-    ("message_log", &[("in", B)], &[]),
+    ("ais_decoder", &[("in", F)], &[("out", B)]),
+    ("acars_decoder", &[("in", F)], &[("out", B)]),
+    (
+        "message_log",
+        &[("in", B), ("in1", B), ("in2", B), ("in3", B)],
+        &[],
+    ),
     ("psk_demod", &[("in", C)], &[("out", B)]),
     ("fsk_demod", &[("in", C)], &[("out", F)]),
     ("ssb_demod", &[("in", C)], &[("out", F)]),

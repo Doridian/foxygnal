@@ -177,9 +177,12 @@ template.
   - [ ] Radiosondes: Vaisala RS41 (GFSK 4800 Bd, Reed-Solomon, positions and PTU) first,
         then Graw DFM and Meteomodem M10/M20
 - **Maritime and aviation**
-  - [ ] AIS (161.975 / 162.025 MHz, GMSK 9600 Bd HDLC; reuses M8's deframer): ship positions
-        and static data, both channels at once
-  - [ ] ACARS (AM, 2400 bit/s MSK) and VDL Mode 2 (D8PSK, 31.5 kBd, AVLC)
+  - [x] AIS (161.975 / 162.025 MHz, GMSK 9600 Bd HDLC; reuses M8's deframer): ship positions
+        and static data, both channels at once (two channel filters into one Message Log, which
+        now takes up to four inputs), text or `!AIVDM` output; "AIS" template
+  - [x] ACARS (AM, 2400 bit/s MSK): coherent MSK, parity and CRC with two-bit repair; "ACARS"
+        template
+  - [ ] VDL Mode 2 (D8PSK, 31.5 kBd, AVLC)
   - [ ] Mode S beyond DF17: Mode A/C, DF4/5/20/21 with Comm-B (BDS 4,0 / 5,0 / 6,0), local
         CPR, error correction; and UAT on 978 MHz (US)
   - [ ] NAVTEX (518 / 490 kHz, SITOR-B 100 Bd FSK) and DSC
