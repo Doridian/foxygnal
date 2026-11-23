@@ -175,7 +175,8 @@ export type ProbeConfig =
   | { kind: 'meter' }
   | { kind: 'audio' }
   | { kind: 'text' }
-  | { kind: 'image' };
+  | { kind: 'image' }
+  | { kind: 'ts' };
 
 /** A recording of a wire in progress, or just ended (`record` event). */
 export interface RecordStatus {

@@ -190,10 +190,18 @@
     {@const s = inst.settings}
     <NumberInput label="Pictures kept" value={s.keep} onchange={(v) => v && v >= 1 && onchange({ settings: { keep: Math.round(v) } })} />
     <p class="hint">Pictures a decoder draws on this wire (an SSTV decoder's <code>image</code> output), row by row. Rows sent before the instrument opened are shown if the wire's buffer still holds them. To keep every picture without a browser, add an Image Sink.</p>
+  {:else if inst.kind === 'video'}
+    {@const s = inst.settings}
+    <label class="check"><input type="checkbox" checked={s.audio} onchange={(e) => onchange({ settings: { audio: e.currentTarget.checked } })} />Sound (AAC)</label>
+    <label class="check"><input type="checkbox" checked={s.info} onchange={(e) => onchange({ settings: { info: e.currentTarget.checked } })} />Stream details over the picture</label>
+    <p class="hint">
+      An MPEG transport stream (188-byte packets) on this wire, such as a DVB demodulator's output or a <code>.ts</code> file, decoded in this browser: H.264 and HEVC
+      with WebCodecs (HEVC where the browser supports it), MPEG-1/2 with a WebAssembly decoder. Pick the program above the picture.
+    </p>
   {:else}
     <p class="hint">RMS, peak and DC over everything since the last update, in dB relative to full scale (±1).</p>
   {/if}
-  {#if inst.kind !== 'meter' && inst.kind !== 'text' && inst.kind !== 'image'}
+  {#if inst.kind !== 'meter' && inst.kind !== 'text' && inst.kind !== 'image' && inst.kind !== 'video'}
     <fieldset>
       <legend>Sample rate</legend>
       <NumberInput

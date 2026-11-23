@@ -4,7 +4,7 @@
 
 import type { EdgeRef, FftWindow, ProbeConfig, ScopeChannel, TriggerMode } from './api';
 
-export type InstrumentKind = 'scope' | 'spectrum' | 'constellation' | 'meter' | 'text' | 'image';
+export type InstrumentKind = 'scope' | 'spectrum' | 'constellation' | 'meter' | 'text' | 'image' | 'video';
 
 export interface ScopeSettings {
   channels: ScopeChannel[];
@@ -58,6 +58,15 @@ export interface ImageSettings {
   pixelated: boolean;
 }
 
+export interface VideoSettings {
+  /** Program number to show; null = the first with video. */
+  program: number | null;
+  /** Play the program's sound (AAC) through browser audio. */
+  audio: boolean;
+  /** Show the stream details over the picture. */
+  info: boolean;
+}
+
 interface Base {
   /** Also the probe id and the badge number on the wire. */
   id: number;
@@ -75,6 +84,7 @@ export type Instrument = Base &
     | { kind: 'meter'; settings: MeterSettings }
     | { kind: 'text'; settings: TextSettings }
     | { kind: 'image'; settings: ImageSettings }
+    | { kind: 'video'; settings: VideoSettings }
   );
 
 export const defaults = {
@@ -106,6 +116,7 @@ export const defaults = {
   meter: (): MeterSettings => ({}),
   text: (): TextSettings => ({ maxLines: 2000, filter: '' }),
   image: (): ImageSettings => ({ keep: 8, pixelated: false }),
+  video: (): VideoSettings => ({ program: null, audio: false, info: true }),
 };
 
 export const KIND_LABELS: Record<InstrumentKind, string> = {
@@ -115,6 +126,7 @@ export const KIND_LABELS: Record<InstrumentKind, string> = {
   meter: 'Level meter',
   text: 'Messages',
   image: 'Image',
+  video: 'Video',
 };
 
 export function title(inst: Instrument): string {
@@ -153,6 +165,8 @@ export function probeConfig(inst: Instrument, width: number, rate: number | null
       return { kind: 'text' };
     case 'image':
       return { kind: 'image' };
+    case 'video':
+      return { kind: 'ts' };
   }
 }
 
@@ -260,6 +274,8 @@ class Instruments {
     else if (kind === 'constellation') inst = { ...base, kind, settings: defaults.constellation() };
     else if (kind === 'text') inst = { ...base, kind, settings: defaults.text(), fps: 10 };
     else if (kind === 'image') inst = { ...base, kind, settings: defaults.image(), fps: 10 };
+    // Packets every 1/30 s keep the jitter buffer short.
+    else if (kind === 'video') inst = { ...base, kind, settings: defaults.video(), fps: 30 };
     else inst = { ...base, kind, settings: defaults.meter(), fps: 15 };
     this.list.push(inst);
     this.save();

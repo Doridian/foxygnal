@@ -83,7 +83,16 @@ export interface ImageFrame {
   rows: ImageRow[];
 }
 
-export type Frame = ScopeFrame | SpectrumFrame | ConstellationFrame | MeterFrame | AudioFrame | TextFrame | ImageFrame;
+export interface TsFrame {
+  kind: 'ts';
+  /** Packets were lost before this frame: by the engine, or frames dropped on the way (seq jumped). */
+  gap: boolean;
+  /** Whole 188-byte transport stream packets. */
+  packets: Uint8Array;
+  seq: number;
+}
+
+export type Frame = ScopeFrame | SpectrumFrame | ConstellationFrame | MeterFrame | AudioFrame | TextFrame | ImageFrame | TsFrame;
 
 const utf8 = new TextDecoder();
 
@@ -166,6 +175,11 @@ export function decodeFrame(buf: ArrayBuffer): { id: number; seq: number; frame:
         at += (16 + len + 3) & ~3;
       }
       return { id, seq, frame: { kind: 'image', gap: (v.getUint8(16) & 1) !== 0, rows } };
+    }
+    case 8: {
+      // n packets of 188 bytes.
+      const n = Math.min(v.getUint32(12, true), Math.floor((buf.byteLength - 20) / 188));
+      return { id, seq, frame: { kind: 'ts', gap: (v.getUint8(16) & 1) !== 0, packets: new Uint8Array(buf, 20, n * 188), seq } };
     }
   }
   return null;

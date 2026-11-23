@@ -267,6 +267,12 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/sstv-wav.fox.toml"),
     },
     Example {
+        name: "ts-video",
+        title: "Video from a TS file",
+        description: "An MPEG transport stream file (digital TV: H.264, HEVC or MPEG-2) played at its mux rate. Set the file and `byte_rate`, run, click the wire and choose Video.",
+        toml: include_str!("../../../examples/ts-video.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",

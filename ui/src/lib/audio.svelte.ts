@@ -82,6 +82,42 @@ class BrowserAudio {
     this.#next.set(id, at + frames / rate);
   }
 
+  /**
+   * Queue audio that should be heard at `due` (ms since the epoch, as
+   * performance.timeOrigin + performance.now()), for sound that goes with
+   * pictures. Frames follow on from each other; the queue only jumps when it
+   * has drifted more than 40 ms from where it should be.
+   */
+  playAt(id: number, samples: Float32Array, channels: 1 | 2, rate: number, due: number) {
+    const ctx = this.#ctx;
+    const frames = Math.floor(samples.length / channels);
+    if (!ctx || !this.#gain || frames === 0 || ctx.state !== 'running') {
+      // No context yet (sound was left on from before): it needs a click.
+      this.blocked = !ctx || ctx.state === 'suspended';
+      return;
+    }
+    const ts = ctx.getOutputTimestamp?.();
+    const nowPerf = performance.timeOrigin + performance.now();
+    // Context time at which `due` happens at the speaker.
+    const want =
+      ts?.contextTime !== undefined && ts.performanceTime !== undefined
+        ? ts.contextTime + (due - performance.timeOrigin - ts.performanceTime) / 1000
+        : ctx.currentTime + (due - nowPerf) / 1000;
+    if (want < ctx.currentTime) return; // too late for this one
+    let at = this.#next.get(id) ?? 0;
+    if (Math.abs(at - want) > 0.04) at = want;
+    const buf = ctx.createBuffer(channels, frames, rate);
+    for (let c = 0; c < channels; c++) {
+      const ch = buf.getChannelData(c);
+      for (let i = 0; i < frames; i++) ch[i] = samples[i * channels + c];
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(this.#gain);
+    src.start(at);
+    this.#next.set(id, at + frames / rate);
+  }
+
   forget(id: number) {
     this.#next.delete(id);
   }
