@@ -27,16 +27,16 @@ Goal: build the example graph by hand in the browser, press Run, see it work, sa
 - [x] Embed UI in the binary (`rust-embed`, `--features embed-ui`)
 - [x] CI: fmt, clippy, tests, UI type-check and build
 
-## M2: See the signal
+## M2: See the signal ✅ (2026-11-22)
 
 Goal: click a wire and watch it.
 
-- [ ] Lossy probe readers, probe thread, binary WS frames
-- [ ] Oscilloscope (trigger modes, I/Q/mag/phase, time/div, cursors)
-- [ ] Spectrum (FFT size, window, averaging, peak hold) and waterfall
-- [ ] Constellation, level meter
-- [ ] Dockable instrument panel with several instruments side by side and pop-out windows
-- [ ] Per-edge throughput, buffer fill, per-block CPU, and a heat-map overlay
+- [x] Lossy probe readers (taps), probe thread, binary WS frames
+- [x] Oscilloscope (trigger modes, I/Q/mag/phase, time/div, cursors)
+- [x] Spectrum (FFT size, window, averaging, peak hold) and waterfall
+- [x] Constellation, level meter
+- [x] Dockable instrument panel with several instruments side by side and pop-out windows
+- [x] Per-edge throughput, buffer fill, per-block CPU, and a heat-map overlay
 
 ## M3: A real DSP toolbox
 

@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { BaseEdge, getBezierPath, useNodesData, type EdgeProps } from '@xyflow/svelte';
+  import { BaseEdge, EdgeLabel, getBezierPath, useNodesData, type EdgeProps } from '@xyflow/svelte';
   import { portType } from './api';
   import type { BlockData } from './graph';
   import { session } from './session.svelte';
   import { indexErrors } from './errors';
+  import { instruments } from './instruments.svelte';
+  import { prefs } from './prefs.svelte';
+  import { fmtRate, heat } from './plot';
 
   let { id, source, target, sourceHandleId, targetHandleId, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, selected }: EdgeProps = $props();
 
@@ -20,16 +23,66 @@
     indexErrors(session.status.errors).edges.get(id) ??
       (type && targetType && type !== targetType ? `${type} → ${targetType}: type mismatch` : undefined),
   );
-  const [path] = $derived(getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition }));
+  const [path, labelX, labelY] = $derived(getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition }));
   const colour = $derived(error ? 'var(--err)' : type ? `var(--t-${type})` : 'var(--muted)');
+  const from = $derived(`${source}.${sourceHandleId}`);
+  const to = $derived(`${target}.${targetHandleId}`);
+  const watchers = $derived(instruments.onEdge(from, to));
+  const stat = $derived(prefs.overlay ? session.stats?.edges.get(`${from}->${to}`) : undefined);
 </script>
 
 {#if selected}
   <path d={path} fill="none" stroke={colour} stroke-width="9" opacity="0.2" />
 {/if}
+{#if stat}
+  <path d={path} fill="none" stroke={heat(stat.fill)} stroke-width="8" opacity="0.28" />
+{/if}
 <BaseEdge
   {id}
   {path}
   style="stroke: {colour}; stroke-width: {selected ? 3 : 2}px;{error ? ' stroke-dasharray: 5 4;' : ''}"
-  aria-label={error ?? `${type ?? ''} wire`}
+  aria-label={error ?? `${type ?? ''} wire${watchers.length ? `, watched by instrument ${watchers.join(', ')}` : ''}`}
 />
+{#if watchers.length || stat}
+  <EdgeLabel x={labelX} y={labelY} transparent>
+    <span class="label">
+      {#each watchers as n (n)}<span class="badge" title="Instrument {n}">{n}</span>{/each}
+      {#if stat}
+        <span class="stat mono" style:border-color={heat(stat.fill)} title="Items per second · buffer fill for {to}"
+          >{fmtRate(stat.rate).replace('S/s', '/s')} · {Math.round(stat.fill * 100)}%</span
+        >
+      {/if}
+    </span>
+  </EdgeLabel>
+{/if}
+
+<style>
+  .label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    pointer-events: none;
+  }
+  .badge {
+    width: 18px;
+    height: 18px;
+    display: grid;
+    place-items: center;
+    box-sizing: border-box;
+    border-radius: 50%;
+    background: var(--bg);
+    border: 2px solid var(--text);
+    color: var(--text);
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .stat {
+    padding: 1px 6px;
+    border: 1px solid;
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+</style>

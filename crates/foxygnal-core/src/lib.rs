@@ -9,11 +9,15 @@ pub mod runtime;
 pub mod sample;
 
 pub use block::{Block, InputPort, OutputPort, WorkIo, WorkStatus};
+pub use buffer::{Tap, TapRead};
 pub use graph::GraphSpec;
 pub use registry::{
     BlockDescriptor, Instance, ParamKind, ParamReader, ParamSpec, Params, PortSpec, Registry,
 };
-pub use runtime::{BlockId, Flowgraph, ParamSender, Running, StopHandle};
+pub use runtime::{
+    BlockCounters, BlockId, EdgeCounters, Flowgraph, GraphCounters, Monitor, ParamSender, Running,
+    StopHandle,
+};
 pub use sample::{Complex32, Sample, StreamType};
 
 #[derive(Debug, thiserror::Error)]

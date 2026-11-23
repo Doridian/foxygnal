@@ -1,8 +1,22 @@
-// The engine session over `/api/ws`: graph sync, run control, status.
+// The engine session over `/api/ws`: graph sync, run control, status, stats
+// and probe frames (binary messages).
 
-import type { ClientCommand, GraphSpec, ServerEvent, Status } from './api';
+import type { ClientCommand, EdgeRef, GraphSpec, ProbeConfig, ServerEvent, Stats, Status } from './api';
+import { decodeFrame, type Frame } from './frames';
 
 export type GraphHandler = (graph: GraphSpec, name: string | null, kind: 'hello' | 'remote') => void;
+export type FrameHandler = (frame: Frame) => void;
+
+interface ProbeEntry {
+  cmd: Extract<ClientCommand, { op: 'probe_set' }>;
+  onFrame: FrameHandler;
+}
+
+/** Stats indexed for the canvas: CPU by block id, wire stats by edge id. */
+export interface StatsIndex {
+  cpu: Map<string, number>;
+  edges: Map<string, Stats['edges'][number]>;
+}
 
 export class Session {
   connected = $state(false);
@@ -11,11 +25,16 @@ export class Session {
   status = $state<Status>({ state: 'stopped', stale: false, errors: [] });
   /** The graph's file name; owned by the editor, shared with other tabs. */
   name = $state<string | null>(null);
+  /** Load of the running graph; `null` when not running. */
+  stats = $state<StatsIndex | null>(null);
+  /** Why a probe can't show anything (by probe id), as the engine reports it. */
+  probeErrors = $state<Record<number, string>>({});
 
   #client = 0;
   #ws: WebSocket | null = null;
   #retry = 500;
   #onGraph: GraphHandler = () => {};
+  #probes = new Map<number, ProbeEntry>();
 
   /** Connect and deliver graphs from the server to `onGraph`. */
   start(onGraph: GraphHandler) {
@@ -26,13 +45,19 @@ export class Session {
   #connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/api/ws`);
+    ws.binaryType = 'arraybuffer';
     this.#ws = ws;
     ws.onopen = () => {
       this.connected = true;
       this.everConnected = true;
       this.#retry = 500;
+      // Probes belong to the connection: set them up again.
+      for (const p of this.#probes.values()) ws.send(JSON.stringify(p.cmd));
     };
-    ws.onmessage = (m) => this.#handle(JSON.parse(m.data) as ServerEvent);
+    ws.onmessage = (m) => {
+      if (m.data instanceof ArrayBuffer) this.#frame(m.data);
+      else this.#handle(JSON.parse(m.data) as ServerEvent);
+    };
     ws.onclose = () => {
       this.connected = false;
       this.#ws = null;
@@ -54,9 +79,42 @@ export class Session {
       case 'status': {
         const { op: _, ...status } = ev;
         this.status = status;
+        if (status.state !== 'running') this.stats = null;
+        break;
+      }
+      case 'stats':
+        if (this.status.state !== 'running') break;
+        this.stats = {
+          cpu: new Map(ev.blocks.map((b) => [b.block, b.cpu])),
+          edges: new Map(ev.edges.map((e) => [`${e.from}->${e.to}`, e])),
+        };
+        break;
+      case 'probe': {
+        const { [ev.id]: _, ...rest } = this.probeErrors;
+        this.probeErrors = ev.error ? { ...rest, [ev.id]: ev.error } : rest;
         break;
       }
     }
+  }
+
+  #frame(buf: ArrayBuffer) {
+    const f = decodeFrame(buf);
+    if (f) this.#probes.get(f.id)?.onFrame(f.frame);
+  }
+
+  /** Watch a wire. Calling it again with the same id changes the probe. */
+  setProbe(id: number, edge: EdgeRef, probe: ProbeConfig, onFrame: FrameHandler, fps = 30) {
+    const cmd = { op: 'probe_set' as const, id, edge, probe, fps };
+    const old = this.#probes.get(id);
+    this.#probes.set(id, { cmd, onFrame });
+    if (!old || JSON.stringify(old.cmd) !== JSON.stringify(cmd)) this.send(cmd);
+  }
+
+  removeProbe(id: number) {
+    if (!this.#probes.delete(id)) return;
+    this.send({ op: 'probe_remove', id });
+    const { [id]: _, ...rest } = this.probeErrors;
+    this.probeErrors = rest;
   }
 
   send(cmd: ClientCommand): boolean {

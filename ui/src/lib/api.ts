@@ -68,12 +68,51 @@ export interface Status {
   errors: ErrorInfo[];
 }
 
+export interface EdgeRef {
+  from: string;
+  to: string;
+}
+
+export interface Stats {
+  blocks: { block: string; cpu: number }[];
+  edges: { from: string; to: string; rate: number; items: number; fill: number }[];
+}
+
+export type ScopeChannel = 'i' | 'q' | 'mag' | 'phase';
+export type TriggerMode = 'auto' | 'normal' | 'single' | 'off';
+export type FftWindow = 'rectangular' | 'hann' | 'hamming' | 'blackman' | 'blackman_harris' | 'flat_top';
+
+/** What the engine computes for a probe (mirrors `probe::ProbeConfig`). */
+export type ProbeConfig =
+  | {
+      kind: 'scope';
+      span: number;
+      points: number;
+      channels: ScopeChannel[];
+      trigger: TriggerMode;
+      slope: 'rising' | 'falling';
+      level: number;
+      trigger_channel: ScopeChannel;
+      pretrigger: number;
+      arm: number;
+    }
+  | { kind: 'spectrum'; fft_size: number; window: FftWindow; average: number; peak_hold: boolean; bins: number; reset: number }
+  | { kind: 'constellation'; points: number }
+  | { kind: 'meter' };
+
 export type ServerEvent =
   | { op: 'hello'; client: number; graph: GraphSpec; name: string | null; version: number; status: Status }
   | { op: 'graph'; graph: GraphSpec; name: string | null; version: number; from: number }
-  | ({ op: 'status' } & Status);
+  | ({ op: 'status' } & Status)
+  | ({ op: 'stats' } & Stats)
+  | { op: 'probe'; id: number; error: string | null };
 
-export type ClientCommand = { op: 'set_graph'; graph: GraphSpec; name?: string | null } | { op: 'run' } | { op: 'stop' };
+export type ClientCommand =
+  | { op: 'set_graph'; graph: GraphSpec; name?: string | null }
+  | { op: 'run' }
+  | { op: 'stop' }
+  | { op: 'probe_set'; id: number; edge: EdgeRef; probe: ProbeConfig; fps?: number }
+  | { op: 'probe_remove'; id: number };
 
 export interface ExampleInfo {
   name: string;

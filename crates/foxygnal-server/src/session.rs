@@ -10,9 +10,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foxygnal_core::graph::BlockSpec;
-use foxygnal_core::{Error, Flowgraph, GraphSpec, ParamKind, ParamSender, Registry, StopHandle};
+use foxygnal_core::{
+    Error, Flowgraph, GraphSpec, Monitor, ParamKind, ParamSender, Registry, StopHandle,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+
+use crate::probe::{self, Hub, ProbeConfig, Stats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,7 +36,8 @@ pub struct ErrorInfo {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// A wire, by its `block.port` endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeRef {
     pub from: String,
     pub to: String,
@@ -94,6 +99,8 @@ pub enum Event {
         from: u64,
     },
     Status(Status),
+    /// Per-block CPU and per-wire throughput of the running graph.
+    Stats(Stats),
 }
 
 /// Client → server messages.
@@ -108,12 +115,30 @@ pub enum Command {
     },
     Run,
     Stop,
+    /// Watch a wire. `id` is chosen by the client; setting an existing id
+    /// changes that probe. Frames arrive as binary messages.
+    ProbeSet {
+        id: u32,
+        edge: EdgeRef,
+        probe: ProbeConfig,
+        /// Frames per second (1…60).
+        #[serde(default = "default_fps")]
+        fps: f32,
+    },
+    ProbeRemove {
+        id: u32,
+    },
+}
+
+fn default_fps() -> f32 {
+    30.0
 }
 
 struct Run {
     id: u64,
     stop: StopHandle,
     params: ParamSender,
+    monitor: Monitor,
     /// The graph as the engine currently has it (live edits applied).
     applied: GraphSpec,
 }
@@ -136,6 +161,7 @@ pub struct Session {
     base_dir: PathBuf,
     inner: Mutex<Inner>,
     events: broadcast::Sender<Arc<str>>,
+    hub: Hub,
 }
 
 fn now_ms() -> u64 {
@@ -146,7 +172,7 @@ fn now_ms() -> u64 {
 
 impl Session {
     pub fn new(registry: Arc<Registry>, base_dir: PathBuf) -> Arc<Self> {
-        Arc::new(Self {
+        let session = Arc::new(Self {
             registry,
             base_dir,
             inner: Mutex::new(Inner {
@@ -161,7 +187,24 @@ impl Session {
                 next_run: 0,
             }),
             events: broadcast::channel(256).0,
-        })
+            hub: Hub::default(),
+        });
+        probe::spawn(Arc::downgrade(&session));
+        session
+    }
+
+    /// Probes of every connected tab.
+    pub fn hub(&self) -> &Hub {
+        &self.hub
+    }
+
+    /// The current run's id and monitor, if running.
+    pub fn monitor(&self) -> Option<(u64, Monitor)> {
+        self.lock().run.as_ref().map(|r| (r.id, r.monitor.clone()))
+    }
+
+    pub(crate) fn emit_stats(&self, stats: Stats) {
+        self.emit(&Event::Stats(stats));
     }
 
     pub fn registry(&self) -> &Registry {
@@ -223,6 +266,13 @@ impl Session {
             Command::SetGraph { graph, name } => self.set_graph(client, graph, name),
             Command::Run => self.run(),
             Command::Stop => self.stop(),
+            Command::ProbeSet {
+                id,
+                edge,
+                probe,
+                fps,
+            } => self.hub.set(client, id, edge, probe, fps),
+            Command::ProbeRemove { id } => self.hub.remove(client, id),
         }
     }
 
@@ -282,6 +332,7 @@ impl Session {
                     id,
                     stop: running.stop_handle(),
                     params: running.param_sender(),
+                    monitor: running.monitor(),
                     applied: graph,
                 });
                 inner.state = RunState::Running;

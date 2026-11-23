@@ -1,5 +1,7 @@
 //! The [`Block`] trait and the I/O view a block sees during `work`.
 
+use std::time::Duration;
+
 use crate::Error;
 use crate::buffer::{Reader, Writer};
 use crate::sample::{Sample, StreamType};
@@ -12,6 +14,10 @@ pub enum WorkStatus {
     /// Nothing could be done (no input / no output space). The scheduler
     /// sleeps until a neighbour signals, and handles end-of-stream.
     Blocked,
+    /// Nothing to do until roughly this much time has passed (a throttle
+    /// waiting for its next item). The scheduler parks for at most this long;
+    /// a neighbour may wake the block earlier. Never sleep inside `work`.
+    Wait(Duration),
     /// The block is finished (e.g. a file source hit EOF).
     Done,
 }

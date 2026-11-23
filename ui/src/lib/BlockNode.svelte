@@ -4,6 +4,8 @@
   import type { BlockData } from './graph';
   import { session } from './session.svelte';
   import { indexErrors } from './errors';
+  import { prefs } from './prefs.svelte';
+  import { heat } from './plot';
 
   let { id, data, selected }: { id: string; data: BlockData; selected?: boolean } = $props();
 
@@ -15,6 +17,7 @@
     data.desc.category === 'Unknown' ? `Unknown block kind \`${data.desc.kind}\`` : indexErrors(session.status.errors).blocks.get(id),
   );
   const running = $derived(session.status.state === 'running');
+  const cpu = $derived(prefs.overlay ? session.stats?.cpu.get(id) : undefined);
 
   const CATEGORY_COLOURS: Record<string, string> = {
     Sources: 'var(--ok)',
@@ -26,11 +29,19 @@
   };
 </script>
 
-<div class="block" class:selected class:error={!!error} style:min-height="{TOP + rows * ROW + 18}px">
+<div
+  class="block"
+  class:selected
+  class:error={!!error}
+  style:min-height="{TOP + rows * ROW + 18}px"
+  style:box-shadow={cpu !== undefined && !selected ? `0 0 0 2px ${heat(Math.min(1, cpu))}` : undefined}
+>
   <header title={data.desc.help}>
     <span class="dot" style:background={CATEGORY_COLOURS[data.desc.category] ?? 'var(--muted)'}></span>
     {data.desc.label}
-    {#if running && !error}<span class="live" title="Running"></span>{/if}
+    {#if cpu !== undefined}
+      <span class="cpu mono" style:color={heat(Math.min(1, cpu))} title="Share of one CPU core spent in this block">{(cpu * 100).toFixed(cpu < 0.1 ? 1 : 0)}%</span>
+    {:else if running && !error}<span class="live" title="Running"></span>{/if}
   </header>
   {#each data.desc.inputs as p, i (p.name)}
     {@const t = portType(p, data.params)}
@@ -96,6 +107,11 @@
     height: 6px;
     border-radius: 50%;
     background: var(--ok);
+  }
+  .cpu {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 500;
   }
   .port {
     position: absolute;

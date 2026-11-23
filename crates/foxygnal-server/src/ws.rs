@@ -1,5 +1,6 @@
 //! `/api/ws`: one WebSocket per browser tab. JSON text frames both ways; see
-//! [`crate::session::Command`] and [`crate::session::Event`].
+//! [`crate::session::Command`] and [`crate::session::Event`]. Probe frames go
+//! to the tab that asked, as binary messages (see [`crate::probe`]).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,8 +10,10 @@ use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::mpsc;
 
 use crate::AppState;
+use crate::probe::{CLIENT_QUEUE, Outgoing};
 use crate::session::{Command, Event};
 
 /// Graphs are small; this is generous.
@@ -32,6 +35,18 @@ fn text(ev: &Event) -> Message {
 
 async fn client(socket: WebSocket, s: Arc<AppState>) {
     let id = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
+    let (out_tx, mut out_rx) = mpsc::channel(CLIENT_QUEUE);
+    s.session.hub().add_client(id, out_tx);
+    session_loop(id, socket, &s, &mut out_rx).await;
+    s.session.hub().remove_client(id);
+}
+
+async fn session_loop(
+    id: u64,
+    socket: WebSocket,
+    s: &AppState,
+    probes: &mut mpsc::Receiver<Outgoing>,
+) {
     let (mut tx, mut rx) = socket.split();
     let (mut events, hello) = s.session.subscribe(id);
     if tx.send(text(&hello)).await.is_err() {
@@ -47,6 +62,15 @@ async fn client(socket: WebSocket, s: Arc<AppState>) {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(_)) => {}
             },
+            Some(out) = probes.recv() => {
+                let msg = match out {
+                    Outgoing::Text(t) => Message::Text(Utf8Bytes::from(t.as_ref())),
+                    Outgoing::Binary(b) => Message::Binary(b.into()),
+                };
+                if tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
             ev = events.recv() => {
                 let msg = match ev {
                     Ok(json) => Message::Text(Utf8Bytes::from(json.as_ref())),

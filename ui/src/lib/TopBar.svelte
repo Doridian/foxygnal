@@ -1,6 +1,7 @@
 <script lang="ts">
   import { session } from './session.svelte';
   import { indexErrors } from './errors';
+  import { prefs, savePrefs } from './prefs.svelte';
 
   let {
     dirty,
@@ -83,6 +84,21 @@
   </div>
 
   <span class="spacer"></span>
+
+  <button
+    class="overlay"
+    class:on={prefs.overlay}
+    aria-pressed={prefs.overlay}
+    title="Show CPU per block and throughput and buffer fill per wire while running"
+    onclick={() => {
+      prefs.overlay = !prefs.overlay;
+      savePrefs();
+    }}
+  >
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"
+      ><path d="M3 20h18M6 16v-5M11 16V7M16 16v-3M21 16V4"></path></svg
+    >Load
+  </button>
 
   {#if st.stale && st.state === 'running'}
     <span class="stale" title="Some changes only take effect after a restart">Restart to apply changes</span>
@@ -183,6 +199,24 @@
   }
   .spacer {
     flex: 1;
+  }
+  .overlay {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .overlay:hover {
+    color: var(--text);
+  }
+  .overlay.on {
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .stale {
     font-size: 12px;

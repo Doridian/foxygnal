@@ -102,10 +102,12 @@ impl Block for Throttle {
         let due = (start.elapsed().as_secs_f64() * self.rate) as u64;
         let allowed = due.saturating_sub(self.passed) as usize;
         if allowed == 0 {
-            // Sleep until roughly one item is due (capped to stay responsive).
-            let wait = Duration::from_secs_f64((1.0 / self.rate).min(0.01));
-            std::thread::sleep(wait);
-            return Ok(WorkStatus::Ok);
+            // Park until an item is due: at least 1 ms, so slow rates pass
+            // items in small batches instead of waking per item, and at most
+            // 10 ms to stay responsive.
+            return Ok(WorkStatus::Wait(Duration::from_secs_f64(
+                (1.0 / self.rate).clamp(0.001, 0.01),
+            )));
         }
         let n = pass_through(io, allowed);
         self.passed += n as u64;

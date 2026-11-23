@@ -245,3 +245,76 @@ fn a_rejected_live_param_stops_the_graph_with_an_error() {
     let err = running.wait().expect_err("waveform is not live");
     assert_eq!(err.block(), Some("tone"));
 }
+
+/// A throttled tone: the monitor's tap sees the samples and the counters see
+/// roughly the throttle's rate, and a throttle that is waiting isn't "busy".
+#[test]
+fn monitor_taps_and_counts_a_running_graph() {
+    let spec = GraphSpec::from_toml(
+        r#"
+        [[block]]
+        id = "src"
+        kind = "signal_source"
+        params = { type = "f32", waveform = "square", frequency = 1000.0, amplitude = 0.5, sample_rate = 48000.0 }
+
+        [[block]]
+        id = "thr"
+        kind = "throttle"
+        params = { type = "f32", sample_rate = 48000.0 }
+
+        [[block]]
+        id = "null"
+        kind = "null_sink"
+        params = { type = "f32" }
+
+        [[connect]]
+        from = "src.out"
+        to = "thr.in"
+
+        [[connect]]
+        from = "thr.out"
+        to = "null.in"
+        "#,
+    )
+    .unwrap();
+    let fg = Flowgraph::from_spec(&spec, &foxygnal_blocks::registry()).unwrap();
+    let running = fg.start().unwrap();
+    let mon = running.monitor();
+    assert!(mon.tap("thr", "nope").is_none());
+    let (ty, tap) = mon.tap("thr", "0").expect("tap by index");
+    assert_eq!(ty, foxygnal_core::StreamType::F32);
+
+    let before = mon.stats();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let after = mon.stats();
+
+    let mut buf = vec![0u8; 4 * 1024];
+    let got = tap.read(tap.written().saturating_sub(1024), &mut buf);
+    assert!(got.items > 0);
+    let samples: Vec<f32> = buf[..got.items * 4]
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert!(
+        samples.iter().all(|v| (v.abs() - 0.5).abs() < 1e-6),
+        "a ±0.5 square wave"
+    );
+
+    let edge = |c: &foxygnal_core::GraphCounters| {
+        c.edges
+            .iter()
+            .find(|e| e.from == "thr.out" && e.to == "null.in")
+            .unwrap()
+            .written
+    };
+    let rate = (edge(&after) - edge(&before)) as f64 / 0.3;
+    assert!((30_000.0..70_000.0).contains(&rate), "rate {rate}");
+    let busy = |c: &foxygnal_core::GraphCounters| {
+        c.blocks.iter().find(|b| b.block == "thr").unwrap().busy_ns
+    };
+    let load = (busy(&after) - busy(&before)) as f64 / 0.3e9;
+    assert!(load < 0.5, "an idle throttle isn't busy ({load})");
+
+    running.stop();
+    running.wait().unwrap();
+}

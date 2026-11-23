@@ -1,0 +1,16 @@
+[package]
+name = "foxygnal-dsp"
+description = "DSP math shared by foxygnal blocks and probes: windows, FFT spectra"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+num-complex = "0.4.6"
+rustfft = "6.4.1"
+serde = { version = "1.0.229", features = ["derive"] }
+
+[lints]
+workspace = true

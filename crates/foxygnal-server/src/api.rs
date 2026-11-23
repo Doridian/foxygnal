@@ -83,12 +83,20 @@ struct Example {
     toml: &'static str,
 }
 
-const EXAMPLES: &[Example] = &[Example {
-    name: "noisy-tone",
-    title: "Tone + noise → file",
-    description: "A 1 kHz tone plus noise, throttled to real time, two seconds written to disk. No hardware needed.",
-    toml: include_str!("../../../examples/noisy-tone.fox.toml"),
-}];
+const EXAMPLES: &[Example] = &[
+    Example {
+        name: "two-tones",
+        title: "Two tones + noise → instruments",
+        description: "Runs until stopped. Click a wire to watch it on a scope, spectrum, waterfall or constellation.",
+        toml: include_str!("../../../examples/two-tones.fox.toml"),
+    },
+    Example {
+        name: "noisy-tone",
+        title: "Tone + noise → file",
+        description: "A 1 kHz tone plus noise, throttled to real time, two seconds written to disk. No hardware needed.",
+        toml: include_str!("../../../examples/noisy-tone.fox.toml"),
+    },
+];
 
 #[derive(Serialize)]
 pub struct ExampleInfo {

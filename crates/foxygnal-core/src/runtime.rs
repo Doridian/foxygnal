@@ -6,16 +6,16 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::Error;
 use crate::block::{InputPort, OutputPort, WorkIo, WorkStatus};
-use crate::buffer::{self, Reader};
+use crate::buffer::{self, Reader, Tap};
 use crate::graph::GraphSpec;
 use crate::registry::{Instance, Registry};
+use crate::{Error, StreamType};
 
 type ParamMsg = (String, serde_json::Value);
 
@@ -171,14 +171,31 @@ impl Flowgraph {
             .map(|n| n.inst.inputs.iter().map(|_| None).collect())
             .collect();
         let mut outputs: Vec<Vec<OutputPort>> = Vec::with_capacity(self.nodes.len());
+        let mut taps = Vec::new();
+        let mut edge_stats = Vec::new();
         for (ni, n) in self.nodes.iter().enumerate() {
             let mut ports = Vec::new();
-            for (pi, (_, ty)) in n.inst.outputs.iter().enumerate() {
+            for (pi, (pname, ty)) in n.inst.outputs.iter().enumerate() {
                 let dests: Vec<_> = self.edges.iter().filter(|e| e.from == (ni, pi)).collect();
                 let (writer, readers) = buffer::channel(ty.item_size(), cap, dests.len());
-                for (e, r) in dests.into_iter().zip(readers) {
+                let tap = writer.tap();
+                for (reader, (e, r)) in dests.into_iter().zip(readers).enumerate() {
                     inputs[e.to.0][e.to.1] = Some(r);
+                    let dst = &self.nodes[e.to.0];
+                    edge_stats.push(EdgeTap {
+                        from: format!("{}.{pname}", n.name),
+                        to: format!("{}.{}", dst.name, dst.inst.inputs[e.to.1].0),
+                        tap: tap.clone(),
+                        reader,
+                    });
                 }
+                taps.push(OutputTap {
+                    block: n.name.clone(),
+                    port: pname.clone(),
+                    index: pi,
+                    ty: *ty,
+                    tap,
+                });
                 ports.push(OutputPort { ty: *ty, writer });
             }
             outputs.push(ports);
@@ -188,6 +205,7 @@ impl Flowgraph {
         let mut handles = Vec::new();
         let mut names = Vec::new();
         let mut param_txs = Vec::new();
+        let mut busy = Vec::new();
         for ((node, ins), outs) in self.nodes.into_iter().zip(inputs).zip(outputs) {
             let ins: Vec<InputPort> = node
                 .inst
@@ -199,14 +217,16 @@ impl Flowgraph {
             let stop = stop.clone();
             let name = node.name.clone();
             let (ptx, prx) = mpsc::channel::<ParamMsg>();
+            let busy_ns = Arc::new(AtomicU64::new(0));
             names.push(name.clone());
             param_txs.push(ptx);
+            busy.push(busy_ns.clone());
             let h = std::thread::Builder::new()
                 .name(format!("fox:{name}"))
                 .spawn(move || {
                     // A panicking block must stop the rest of the graph too.
                     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_block(node.inst, ins, outs, &prx, &stop)
+                        run_block(node.inst, ins, outs, &prx, &stop, &busy_ns)
                     }))
                     .unwrap_or(Err(Error::Panic));
                     if r.is_err() {
@@ -220,11 +240,19 @@ impl Flowgraph {
                 .map_err(Error::Io)?;
             handles.push(h);
         }
+        let monitor = Monitor {
+            inner: Arc::new(MonitorInner {
+                blocks: names.iter().cloned().zip(busy).collect(),
+                outputs: taps,
+                edges: edge_stats,
+            }),
+        };
         Ok(Running {
             handles,
             names,
             param_txs,
             stop,
+            monitor,
         })
     }
 }
@@ -251,6 +279,7 @@ fn run_block(
     mut outputs: Vec<OutputPort>,
     params: &mpsc::Receiver<ParamMsg>,
     stop: &AtomicBool,
+    busy_ns: &AtomicU64,
 ) -> Result<(), Error> {
     for i in &inputs {
         if let Some(r) = &i.reader {
@@ -280,10 +309,14 @@ fn run_block(
             inputs: &mut inputs,
             outputs: &mut outputs,
         };
-        match inst.block.work(&mut io) {
+        let t0 = Instant::now();
+        let status = inst.block.work(&mut io);
+        busy_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        match status {
             Err(e) => break Err(e),
             Ok(WorkStatus::Ok) => {}
             Ok(WorkStatus::Done) => break Ok(()),
+            Ok(WorkStatus::Wait(d)) => std::thread::park_timeout(d.min(IDLE_PARK)),
             Ok(WorkStatus::Blocked) => {
                 // Upstream ended and we can't make progress: we're done too.
                 if inputs.iter().any(InputPort::exhausted) {
@@ -310,6 +343,105 @@ pub struct Running {
     names: Vec<String>,
     param_txs: Vec<mpsc::Sender<ParamMsg>>,
     stop: Arc<AtomicBool>,
+    monitor: Monitor,
+}
+
+struct OutputTap {
+    block: String,
+    port: String,
+    index: usize,
+    ty: StreamType,
+    tap: Tap,
+}
+
+struct EdgeTap {
+    from: String,
+    to: String,
+    tap: Tap,
+    reader: usize,
+}
+
+struct MonitorInner {
+    blocks: Vec<(String, Arc<AtomicU64>)>,
+    outputs: Vec<OutputTap>,
+    edges: Vec<EdgeTap>,
+}
+
+/// Cloneable read-only view of a running graph for probes and statistics.
+/// Nothing here can slow the graph down: taps are lossy and counters are
+/// plain atomics.
+#[derive(Clone)]
+pub struct Monitor {
+    inner: Arc<MonitorInner>,
+}
+
+/// Raw counters of one block, see [`Monitor::stats`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockCounters {
+    pub block: String,
+    /// Total time spent inside `work`, in nanoseconds.
+    pub busy_ns: u64,
+}
+
+/// Raw counters of one connection, see [`Monitor::stats`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeCounters {
+    /// `block.port` of the output.
+    pub from: String,
+    /// `block.port` of the input.
+    pub to: String,
+    /// Items the output has produced so far.
+    pub written: u64,
+    /// Items waiting in the buffer for this input.
+    pub backlog: usize,
+    pub capacity: usize,
+}
+
+/// A snapshot of every counter. Rates come from comparing two snapshots.
+#[derive(Debug, Clone, Default)]
+pub struct GraphCounters {
+    pub blocks: Vec<BlockCounters>,
+    pub edges: Vec<EdgeCounters>,
+}
+
+impl Monitor {
+    /// A lossy tap on output `port` (a name or an index) of `block`.
+    pub fn tap(&self, block: &str, port: &str) -> Option<(StreamType, Tap)> {
+        let outs = || self.inner.outputs.iter().filter(|o| o.block == block);
+        outs()
+            .find(|o| o.port == port)
+            .or_else(|| {
+                let i = port.parse::<usize>().ok()?;
+                outs().find(|o| o.index == i)
+            })
+            .map(|o| (o.ty, o.tap.clone()))
+    }
+
+    pub fn stats(&self) -> GraphCounters {
+        GraphCounters {
+            blocks: self
+                .inner
+                .blocks
+                .iter()
+                .map(|(block, busy)| BlockCounters {
+                    block: block.clone(),
+                    busy_ns: busy.load(Ordering::Relaxed),
+                })
+                .collect(),
+            edges: self
+                .inner
+                .edges
+                .iter()
+                .map(|e| EdgeCounters {
+                    from: e.from.clone(),
+                    to: e.to.clone(),
+                    written: e.tap.written() as u64,
+                    backlog: e.tap.backlog(e.reader),
+                    capacity: e.tap.capacity(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Cloneable handle that delivers live parameter changes to running blocks.
@@ -360,6 +492,11 @@ impl Running {
             stop: self.stop.clone(),
             threads: self.handles.iter().map(|h| h.thread().clone()).collect(),
         }
+    }
+
+    /// Taps and counters for probes and statistics.
+    pub fn monitor(&self) -> Monitor {
+        self.monitor.clone()
     }
 
     pub fn param_sender(&self) -> ParamSender {

@@ -187,3 +187,103 @@ async fn live_edits_apply_and_other_edits_mark_the_run_stale() {
     assert_eq!(st["state"], "stopped");
     assert_eq!(st["stale"], false);
 }
+
+/// Probes attach to wires of the running graph and stream binary frames to
+/// the tab that asked; a probe on a wire that isn't running says why; stats
+/// arrive for everyone.
+#[tokio::test(flavor = "multi_thread")]
+async fn probes_stream_frames_and_stats_flow() {
+    use foxygnal_server::probe::Outgoing;
+    use foxygnal_server::session::Command;
+
+    let s = session();
+    s.set_graph(1, graph(RUNNING_TONE), None);
+    let (mut events, _) = s.subscribe(7);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    s.hub().add_client(7, tx);
+    let cmd = |json: serde_json::Value| serde_json::from_value::<Command>(json).unwrap();
+    s.handle(
+        7,
+        cmd(serde_json::json!({
+            "op": "probe_set", "id": 3,
+            "edge": {"from": "gain.out", "to": "throttle.in"},
+            "probe": {"kind": "scope", "span": 480, "points": 240},
+        })),
+    );
+    s.handle(
+        7,
+        cmd(serde_json::json!({
+            "op": "probe_set", "id": 4,
+            "edge": {"from": "nope.out", "to": "sink.in"},
+            "probe": {"kind": "meter"},
+        })),
+    );
+    s.run();
+
+    let mut scope_frames = 0;
+    let mut missing_error = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while scope_frames < 3 || missing_error.is_none() {
+        let msg = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("probe output in time")
+            .unwrap();
+        match msg {
+            Outgoing::Binary(b) => {
+                let id = u32::from_le_bytes(b[0..4].try_into().unwrap());
+                assert_eq!(id, 3);
+                assert_eq!(b[8], 1, "scope frame");
+                let span = u32::from_le_bytes(b[12..16].try_into().unwrap());
+                assert_eq!(span, 480);
+                scope_frames += 1;
+            }
+            Outgoing::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                assert_eq!(v["op"], "probe");
+                if v["id"] == 4 {
+                    missing_error = v["error"].as_str().map(str::to_owned);
+                }
+            }
+        }
+    }
+    assert!(
+        missing_error
+            .unwrap()
+            .contains("isn't in the running graph")
+    );
+
+    // Stats are broadcast with per-wire rates and per-block CPU.
+    let stats = loop {
+        let ev = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("stats in time")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&ev).unwrap();
+        if v["op"] == "stats" {
+            break v;
+        }
+    };
+    let edge = stats["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["from"] == "throttle.out")
+        .expect("throttle edge");
+    let rate = edge["rate"].as_f64().unwrap();
+    assert!(
+        (20_000.0..80_000.0).contains(&rate),
+        "about 48 kS/s, got {rate}"
+    );
+    assert!(
+        stats["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["block"] == "tone")
+    );
+
+    s.hub().remove_client(7);
+    tokio::time::timeout(Duration::from_secs(5), s.stop_and_wait())
+        .await
+        .expect("graph stops");
+}

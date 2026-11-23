@@ -14,8 +14,9 @@ Think GNU Radio Companion, but:
 - **See your signal anywhere.** Click any wire to attach an oscilloscope, spectrum, waterfall
   or constellation view while the graph runs, with no rewiring and no restart.
 
-> Status: **M1.** Build, run, edit live and save graphs from the browser. Ten basic blocks;
-> instruments (scope, spectrum) come next. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> Status: **M2.** Build, run, edit live and save graphs from the browser, and click any wire
+> to watch it on a scope, spectrum, waterfall, constellation or level meter. Ten basic
+> blocks; a real DSP toolbox comes next. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
 

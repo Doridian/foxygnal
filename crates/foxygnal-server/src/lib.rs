@@ -2,6 +2,7 @@
 //! The protocol is described in docs/ARCHITECTURE.md ("Server API").
 
 mod api;
+pub mod probe;
 mod security;
 pub mod session;
 mod ws;

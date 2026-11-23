@@ -1,21 +1,20 @@
 <script lang="ts">
   import { portType } from './api';
-  import { typeOf, type BlockNode, type Wire } from './graph';
+  import type { BlockNode, Wire } from './graph';
   import { indexErrors } from './errors';
   import ParamField from './ParamField.svelte';
+  import WireInfo from './WireInfo.svelte';
   import { session } from './session.svelte';
 
   let {
     node,
     edge,
-    nodes,
     onparam,
     onrename,
     ondelete,
   }: {
     node: BlockNode | undefined;
     edge: Wire | undefined;
-    nodes: BlockNode[];
     onparam: (id: string, name: string, value: unknown) => void;
     onrename: (from: string, to: string) => string | null;
     ondelete: () => void;
@@ -31,10 +30,6 @@
     renameProblem = to === node.id ? null : onrename(node.id, to);
     if (renameProblem) e.currentTarget.value = node.id;
   }
-
-  const edgeType = $derived(
-    edge ? typeOf(nodes.find((n) => n.id === edge.source), edge.sourceHandle, 'outputs') : null,
-  );
 </script>
 
 <aside class="inspector" aria-label="Inspector">
@@ -78,13 +73,13 @@
     {#if errs.edges.get(edge.id)}
       <div class="errbox" role="alert">{errs.edges.get(edge.id)}</div>
     {/if}
-    <div class="ports">
-      <span class="muted">Type</span><span class="mono" style:color="var(--t-{edgeType})">{edgeType ?? '?'}</span>
+    <div>
+      <WireInfo edge={{ from: `${edge.source}.${edge.sourceHandle}`, to: `${edge.target}.${edge.targetHandle}` }} />
     </div>
     <button class="danger" onclick={ondelete}>Delete wire</button>
   {:else}
     <div class="empty">
-      <p>Select a block to edit its parameters, or a wire to see what it carries.</p>
+      <p>Select a block to edit its parameters, or click a wire to see what it carries and watch it with a scope or spectrum.</p>
       <dl class="keys">
         <dt><kbd>/</kbd></dt><dd>search blocks</dd>
         <dt><kbd>Space</kbd></dt><dd>run / stop</dd>

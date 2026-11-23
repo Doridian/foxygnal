@@ -8,6 +8,10 @@
   import TopBar from './TopBar.svelte';
   import StartPage from './StartPage.svelte';
   import FileDialog from './FileDialog.svelte';
+  import Dock from './Dock.svelte';
+  import WireInfo from './WireInfo.svelte';
+  import { graphView } from './graphview.svelte';
+  import { instruments } from './instruments.svelte';
   import { emptyGraph, fetchBlocks, fetchExample, openFile, parseToml, renderToml, saveFile, type BlockDescriptor, type GraphSpec } from './api';
   import { ID_RE, baseForCopy, baseForKind, edgeId, freshId, fromSpec, rejectReason, toSpec, type BlockNode, type Wire } from './graph';
   import { session } from './session.svelte';
@@ -52,6 +56,19 @@
   const showStart = $derived(ready && nodes.length === 0 && !blankChosen);
   const running = $derived(session.status.state === 'running');
 
+  // Instruments see the graph as the engine will run it.
+  $effect(() => {
+    graphView.spec = toSpec(nodes, edges);
+  });
+  $effect(() => {
+    graphView.catalog = catalog;
+  });
+
+  instruments.startMain();
+
+  /** The wire popover: which wire, and where on the canvas. */
+  let wireMenu = $state<{ edge: { from: string; to: string }; x: number; y: number } | null>(null);
+
   // ---- Engine sync --------------------------------------------------------
 
   let pendingGraph: Parameters<typeof onGraph> | null = null;
@@ -89,6 +106,7 @@
       return;
     }
     session.name = name;
+    instruments.useGraph(name);
     synced = load(graph);
     if (!helloSeen) {
       saved = synced;
@@ -163,6 +181,7 @@
   /** Load a whole new graph as a local, undoable edit. */
   function replaceGraph(g: GraphSpec, name: string | null) {
     commit();
+    instruments.useGraph(name, 'fresh');
     undoStack.push(synced);
     redoStack = [];
     synced = load(g, new Set());
@@ -218,6 +237,7 @@
     try {
       await saveFile(name, JSON.parse(json));
       saved = json;
+      instruments.useGraph(name, 'carry');
       session.name = name;
       synced = json;
       session.setGraph(JSON.parse(json), name);
@@ -378,6 +398,16 @@
     addBlock(desc, { x: p.x - 85, y: p.y - 15 });
   }
 
+  // ---- Wires and instruments -----------------------------------------------
+
+  function onedgeclick({ edge, event }: { edge: Wire; event: MouseEvent }) {
+    const r = canvas?.getBoundingClientRect();
+    if (!r) return;
+    const x = Math.min(Math.max(8, event.clientX - r.left - 125), r.width - 266);
+    const y = Math.min(event.clientY - r.top + 12, r.height - 290);
+    wireMenu = { edge: { from: `${edge.source}.${edge.sourceHandle}`, to: `${edge.target}.${edge.targetHandle}` }, x, y: Math.max(8, y) };
+  }
+
   // ---- Run & keyboard ------------------------------------------------------
 
   function run() {
@@ -393,6 +423,7 @@
   function onkeydown(e: KeyboardEvent) {
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
+    if (e.key === 'Escape') wireMenu = null;
     if (dialog) return;
     if (mod && key === 's') {
       e.preventDefault();
@@ -460,6 +491,9 @@
       {onbeforeconnect}
       {onconnect}
       {onconnectend}
+      {onedgeclick}
+      onpaneclick={() => (wireMenu = null)}
+      onnodeclick={() => (wireMenu = null)}
       minZoom={0.2}
       maxZoom={2.5}
     >
@@ -469,8 +503,15 @@
     {#if showStart}
       <StartPage onexample={loadExample} onfile={open} onblank={() => (blankChosen = true)} />
     {/if}
+    {#if wireMenu}
+      <div class="wiremenu" role="dialog" aria-label="Wire {wireMenu.edge.from} to {wireMenu.edge.to}" style:left="{wireMenu.x}px" style:top="{wireMenu.y}px">
+        <div class="wiretitle mono">{wireMenu.edge.from} → {wireMenu.edge.to}</div>
+        <WireInfo edge={wireMenu.edge} onwatch={() => (wireMenu = null)} />
+      </div>
+    {/if}
   </main>
-  <Inspector node={selectedNode} edge={selectedEdge} {nodes} onparam={setParam} onrename={rename} ondelete={deleteSelection} />
+  <Inspector node={selectedNode} edge={selectedEdge} onparam={setParam} onrename={rename} ondelete={deleteSelection} />
+  <Dock />
 </div>
 
 <input bind:this={fileInput} type="file" accept=".toml,.fox.toml" hidden onchange={onfile} />
@@ -489,7 +530,7 @@
 <style>
   .shell {
     display: grid;
-    grid-template: 'top top top' auto 'pal canvas insp' 1fr / 220px 1fr 300px;
+    grid-template: 'top top top' auto 'pal canvas insp' minmax(0, 1fr) 'dock dock dock' auto / 220px 1fr 300px;
     height: 100%;
   }
   .top {
@@ -507,9 +548,25 @@
     min-width: 0;
     min-height: 0;
   }
+  .wiremenu {
+    position: absolute;
+    z-index: 15;
+    width: 250px;
+    box-sizing: border-box;
+    padding: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  }
+  .wiretitle {
+    margin-bottom: 10px;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
   @media (max-width: 900px) {
     .shell {
-      grid-template: 'top' auto 'canvas' 1fr 'insp' minmax(0, 40%) / 1fr;
+      grid-template: 'top' auto 'canvas' 1fr 'insp' minmax(0, 30%) 'dock' auto / 1fr;
     }
     .shell > :global(.palette) {
       display: none;
