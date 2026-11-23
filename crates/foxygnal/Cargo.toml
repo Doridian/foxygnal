@@ -20,6 +20,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [features]
 # Ship the browser UI inside the binary. Build it first: `cd ui && npm run build`.
 embed-ui = ["foxygnal-server/embed-ui"]
+# Audio sink/source blocks (cpal). Needs the ALSA headers on Linux.
+audio = ["foxygnal-blocks/audio"]
 
 [lints]
 workspace = true

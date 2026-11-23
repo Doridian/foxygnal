@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, OnceLock};
 use std::thread::Thread;
 
+use crate::tag::{TAG_QUEUE, Tag, TagQueue};
+
 /// Default buffer capacity in items.
 pub const DEFAULT_CAPACITY: usize = 1 << 15;
 
@@ -26,6 +28,8 @@ struct ReaderState {
     /// The reader block has terminated and will never read again.
     done: AtomicBool,
     thread: OnceLock<Thread>,
+    /// Tags on their way to this reader.
+    tags: TagQueue,
 }
 
 struct Ring {
@@ -82,6 +86,7 @@ pub fn channel(item_size: usize, capacity: usize, readers: usize) -> (Writer, Ve
                 read: AtomicUsize::new(0),
                 done: AtomicBool::new(false),
                 thread: OnceLock::new(),
+                tags: TagQueue::new(TAG_QUEUE),
             })
             .collect(),
     });
@@ -91,12 +96,14 @@ pub fn channel(item_size: usize, capacity: usize, readers: usize) -> (Writer, Ve
             idx,
         })
         .collect();
-    (Writer { ring }, rs)
+    (Writer { ring, staged: 0 }, rs)
 }
 
 /// The unique write end of a ring. Not `Clone`: `&mut self` guarantees exclusivity.
 pub struct Writer {
     ring: Arc<Ring>,
+    /// Items written by [`Self::stage`] but not yet published.
+    staged: usize,
 }
 
 impl Writer {
@@ -115,7 +122,7 @@ impl Writer {
             return &mut [];
         }
         let r = &*self.ring;
-        let written = r.written.load(Ordering::Relaxed);
+        let written = r.written.load(Ordering::Relaxed) + self.staged;
         let free = r.capacity - (written - r.min_read());
         let start = written % r.capacity;
         let n = free.min(r.capacity - start);
@@ -129,8 +136,37 @@ impl Writer {
         }
     }
 
-    /// Publish `items` items previously written into [`Self::slice_mut`].
+    /// Publish `items` items previously written into [`Self::slice_mut`]
+    /// (and everything staged before them).
     pub fn commit(&mut self, items: usize) {
+        self.stage(items);
+        self.flush();
+    }
+
+    /// Count `items` as written without publishing them yet, so tags for
+    /// them can be pushed first. [`Self::flush`] publishes.
+    pub fn stage(&mut self, items: usize) {
+        self.staged += items;
+    }
+
+    /// Stream index of the next item [`Self::slice_mut`] hands out.
+    pub fn position(&self) -> u64 {
+        (self.ring.written.load(Ordering::Relaxed) + self.staged) as u64
+    }
+
+    /// Send a tag to every reader. Push tags before publishing the items
+    /// they point at; offsets should not go backwards.
+    pub fn push_tag(&mut self, tag: &Tag) {
+        for rd in self.ring.readers.iter() {
+            if !rd.done.load(Ordering::Relaxed) {
+                rd.tags.push(tag.clone());
+            }
+        }
+    }
+
+    /// Publish staged items and wake readers.
+    pub fn flush(&mut self) {
+        let items = std::mem::take(&mut self.staged);
         if items == 0 {
             return;
         }
@@ -157,8 +193,9 @@ impl Writer {
         }
     }
 
-    /// Mark end of stream and wake readers.
-    pub fn finish(&self) {
+    /// Mark end of stream and wake readers. Staged items are published first.
+    pub fn finish(&mut self) {
+        self.flush();
         self.ring.writer_done.store(true, Ordering::Release);
         for rd in self.ring.readers.iter() {
             if let Some(t) = rd.thread.get() {
@@ -192,6 +229,26 @@ impl Reader {
     /// Register the calling thread to be woken when new data arrives.
     pub fn register_thread(&self) {
         let _ = self.state().thread.set(std::thread::current());
+    }
+
+    /// Stream index of the next item to read.
+    pub fn position(&self) -> u64 {
+        self.state().read.load(Ordering::Relaxed) as u64
+    }
+
+    /// Items published so far (Acquire: tags pushed before them are visible).
+    pub fn written(&self) -> u64 {
+        self.ring.written.load(Ordering::Acquire) as u64
+    }
+
+    /// The next tag sent to this reader, if any.
+    pub fn pop_tag(&mut self) -> Option<Tag> {
+        self.state().tags.pop()
+    }
+
+    /// Tags dropped because this reader's queue was full.
+    pub fn dropped_tags(&self) -> usize {
+        self.state().tags.dropped()
     }
 
     /// Contiguous readable region, in bytes.

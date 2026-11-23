@@ -1,0 +1,64 @@
+# Broadcast FM receiver: an IQ recording in, mono audio out.
+#
+# The source is a raw c32 recording (GNU Radio / SDR++ "raw" IQ, float32 I/Q
+# interleaved) made at 2.4 MS/s centred on 100 MHz. Set the source's `path`
+# and the variables below to match yours: `station` is the frequency to tune.
+#
+#   2.4 MS/s ──xlate ÷10──▶ 240 kS/s ──FM demod──▶ audio ──resample──▶ 48 kS/s
+#
+# Audio goes to fm-audio.wav (mono, 48 kS/s). To listen live instead, build
+# with `--features audio` and swap the WAV sink for an `audio_sink`; it paces
+# the graph in real time on its own, so no throttle is needed.
+#   foxygnal run examples/fm-receiver.fox.toml
+
+[vars]
+samp_rate = "2.4M"
+center = "100M"
+station = "100.3M"
+audio_rate = "48k"
+
+[[block]]
+id = "iq"
+kind = "file_source"
+params = { type = "c32", path = "fm-recording.c32", sample_rate = "$samp_rate", center_freq = "$center" }
+ui = { x = 40, y = 120 }
+
+[[block]]
+id = "channel"
+kind = "freq_xlating_fir"
+params = { offset = "$station - $center", cutoff = 100000.0, transition = 40000.0, decimation = 10, window = "hamming" }
+ui = { x = 290, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "fm_demod"
+params = { deviation = 75000.0, deemphasis = "50us" }
+ui = { x = 540, y = 120 }
+
+[[block]]
+id = "resample"
+kind = "rational_resampler"
+params = { type = "f32", output_rate = "$audio_rate" }
+ui = { x = 790, y = 120 }
+
+[[block]]
+id = "audio"
+kind = "wav_sink"
+params = { type = "f32", path = "fm-audio.wav", format = "pcm16" }
+ui = { x = 1040, y = 120 }
+
+[[connect]]
+from = "iq.out"
+to = "channel.in"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.out"
+to = "resample.in"
+
+[[connect]]
+from = "resample.out"
+to = "audio.in"

@@ -6,6 +6,15 @@
   {#each toasts as t (t.id)}
     <div class="toast {t.kind}" role={t.kind === 'error' ? 'alert' : 'status'}>
       <span>{t.message}</span>
+      {#each t.actions as a (a.label)}
+        <button
+          class="action"
+          onclick={() => {
+            dismiss(t.id);
+            a.run();
+          }}>{a.label}</button
+        >
+      {/each}
       <button aria-label="Dismiss" onclick={() => dismiss(t.id)}>×</button>
     </div>
   {/each}
@@ -41,7 +50,21 @@
   .toast span {
     flex: 1;
   }
-  button {
+  button.action {
+    align-self: center;
+    flex: none;
+    padding: 4px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--text);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  button.action:hover {
+    border-color: var(--accent);
+  }
+  button:not(.action) {
     border: 0;
     background: transparent;
     color: var(--muted);

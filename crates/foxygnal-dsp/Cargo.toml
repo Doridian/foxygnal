@@ -1,6 +1,6 @@
 [package]
 name = "foxygnal-dsp"
-description = "DSP math shared by foxygnal blocks and probes: windows, FFT spectra"
+description = "DSP math shared by foxygnal blocks and probes: windows, FFT spectra, FIR design, resamplers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

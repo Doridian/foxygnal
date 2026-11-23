@@ -23,7 +23,7 @@ frames of a few KB each.
 |---|---|---|
 | `foxygnal-core` | `StreamType`/`Sample`, ring buffers, `Block` trait, `Registry`, `GraphSpec`, runtime | — |
 | `foxygnal-blocks` | standard blocks + `registry()` | core |
-| `foxygnal-dsp` | DSP math shared by blocks and probes: windows, FFT power spectra (later filter design, resamplers) | — |
+| `foxygnal-dsp` | DSP math shared by blocks and probes: windows, FFT power spectra, FIR design and responses, polyphase resampler, rotator | — |
 | `foxygnal-server` | REST + WebSocket API, probes and instruments, static UI | core, dsp |
 | `foxygnal` | CLI | all |
 
@@ -61,16 +61,32 @@ code.
 
 ### Planned block API additions
 
-- **Stream metadata propagation (M3).** At build time each block receives upstream metadata
-  (sample rate, centre frequency, …) and declares its output metadata. A decimate-by-4 block
-  divides the rate by 4, and a throttle picks up the rate from upstream. Users stop typing the
-  same sample rate everywhere, and the UI can label every wire with its rate.
+- **Stream metadata (M3, done).** `StreamMeta { sample_rate, center_freq }` (both optional).
+  After wiring and before `start`, the runtime calls `Block::configure(&mut Configure)` on
+  every block in upstream-first order. `cx.inputs` holds each input's metadata, and
+  `cx.outputs` starts as the merge of the inputs (each field from the first input that has
+  it), so most blocks implement nothing. A source sets its rate (`cx.set_rate`), a
+  decimate-by-4 block divides it, and a throttle at rate 0 takes it from upstream
+  (`cx.input_rate(0)?` gives a readable error if nothing upstream sets one). Building and
+  configuring must have **no side effects**: files and devices open in `start()`. The
+  server builds and configures the graph on every edit and sends `meta {edges, error}`, which
+  the UI uses for rate labels on wires and instrument axes.
 - **Live parameters (M1, done).** Parameters flagged `live` (frequency, gain, cutoff…) can
   change while running. The runtime delivers them to `Block::set_param` through a per-block
   queue drained before `work`. Any other change marks the run *stale*: it applies on the next
   run. (Later: rebuild only the affected block.)
-- **Tags (M3).** Sample-indexed key/value annotations (`rx_time`, `freq` after a retune,
-  `burst_start`), carried alongside the ring buffer.
+- **Tags (M3, done).** Sample-indexed key/value annotations (`rx_time`, `freq` after a retune,
+  `burst_start`), carried alongside the ring buffer (`core/src/tag.rs`). Each read cursor has
+  a small lock-free SPSC tag queue. A block tags an item with `OutputPort::add_tag(index, key,
+  value)` (index into its `slice_mut`); values are bool/int/float/`Arc<str>`, so forwarding a
+  tag never allocates. Items a block `produce`s are *staged* and published when `work`
+  returns, after their tags, and before each `work` the runtime snapshots every input (items
+  published so far plus all their tags). A block therefore always sees an item's tags together
+  with the item: `InputPort::tags()` / `tags_in(n)`. By default the runtime passes every tag on
+  a consumed input item to every output, scaling its offset by produced/consumed for that call
+  (right for 1:1 blocks, decimators and interpolators). Blocks that reorder, delay or drop items
+  return `TagPropagation::Manual` from `Block::tag_propagation` and forward tags themselves.
+  A full queue drops new tags rather than block (`InputPort::dropped_tags`).
 
 ## Buffers
 
@@ -127,20 +143,26 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
 - **Stats** are broadcast twice a second while running: items/s and buffer fill per wire,
   and the share of a core each block spends in `work`. The UI shows them in the wire popover
   and as the *Load* overlay (heat colours on blocks and wires).
-- The sample rate on axes is guessed from the nearest upstream block with a `sample_rate`
-  parameter, or set per instrument. Stream metadata (M3) will make it exact.
+- The sample rate (and centre frequency, for absolute spectrum axes) comes from stream
+  metadata, or can be set per instrument.
 
 ## Server API
 
 REST:
 
 - `GET /api/health`: name and version
-- `GET /api/blocks`: block descriptors
+- `GET /api/blocks`: block descriptors, plus graph files usable as blocks (see "Graph files")
+- A block descriptor with `"response": true` belongs to a block
+  registered with `Registry::register_with_response` (filters, resamplers)
+- `POST /api/blocks/{kind}/response` `{params, sample_rate}` → `{freqs, db, taps}`: the magnitude
+  response the block would have at that input rate (400 with a readable message for invalid
+  params). The inspector draws it for any block whose descriptor says `response`
 - `GET/PUT /api/graph`: current graph as `GraphSpec` JSON; `GET /api/graph.toml`
 - `POST /api/toml/parse`, `POST /api/toml/render`: convert for upload/download
 - `GET /api/examples`, `GET /api/examples/{name}`: bundled example graphs
 - `GET /api/files`, `GET/PUT /api/files/{name}`: `.fox.toml` files in `--project-dir`
-  (plain file names only). Relative `path` parameters also resolve against that directory.
+  (plain file names only). Relative `path` parameters and `graph:` blocks also resolve
+  against that directory. `GET` falls back to the bundled sub-graph library.
 
 WebSocket `/api/ws`, one per browser tab:
 
@@ -148,7 +170,9 @@ WebSocket `/api/ws`, one per browser tab:
   (the whole graph; the server diffs it, pushes changed live params and marks other changes
   stale), `run`, `stop`, `probe_set {id, edge {from, to}, probe {kind, …options}, fps}` (the
   client picks `id`; sending it again changes the probe) and `probe_remove {id}`. Server:
-  `hello` (full snapshot on connect or after lag), `graph {graph, name, version, from}`,
+  `hello` (full snapshot on connect or after lag, including `meta`),
+  `graph {graph, name, version, from}`, `meta {edges [{from, to, sample_rate?, center_freq?}],
+  error?}` after every graph change,
   `status {state, started_at, stale, errors[]}`, where each error names a `block`, an
   `edge {from, to}`, or neither, `stats {blocks[], edges[]}`, and, to the probe's tab only,
   `probe {id, error}` when a probe can't show anything (wire not running, wrong type) or
@@ -174,9 +198,79 @@ Collaborative editing is a non-goal for now.
 
 `*.fox.toml`: `[[block]]` entries (`id`, `kind`, `params`, and editor-only `ui` such as
 position) plus `[[connect]]` entries (`from = "block.port"`, where the port is a name or an
-index). The format is plain, diff-friendly and hand-editable (see `examples/`). Planned:
-hierarchical blocks (a graph used as a block, with exposed params and ports), and graph-level
-variables (`$samp_rate`) referenced from params.
+index). The format is plain, diff-friendly and hand-editable (see `examples/`).
+
+### Variables and expressions (M3, done)
+
+```toml
+[vars]
+samp_rate = "2.4M"          # a number, or an expression
+cutoff = "$samp_rate / 10"  # may use other vars, in any order
+
+[[block]]
+id = "lp"
+kind = "gain"
+params = { gain = "$cutoff * 2" }
+```
+
+Float and int params may be strings holding an expression (`core/src/expr.rs`): numbers with
+an optional SI prefix and unit word as the UI accepts them (`2.4M`, `100 kHz`, `-30 dB`),
+`$name`, `+ - * /`, unary minus and parentheses; nothing else. Strings in other param kinds
+are left alone. Int params must come out whole. Loops between variables are an error that
+shows the chain. The file keeps the text as written; resolving happens before building.
+
+### Hierarchical blocks (M3, done)
+
+Any graph file can be used as a block. It declares its ports with `[export]`; its `[vars]`
+become the block's parameters:
+
+```toml
+# fm-demod.fox.toml
+[vars]
+quad_rate = 480000
+[export]
+label = "FM demod"          # optional palette label (default: the file name)
+help = "Narrowband FM."     # optional
+[[export.input]]
+name = "in"
+to = "lp.in"                # or a list: to = ["lp.in", "agc.in"]
+[[export.output]]
+name = "out"
+from = "demod.out"
+```
+
+The parent uses it as `kind = "graph:fm-demod.fox.toml"` with params overriding the child's
+vars (evaluated in the parent's scope, so `quad_rate = "$samp_rate / 5"` works). Variables
+whose value refers to other variables are *derived*: they aren't offered as params, though a
+hand-written override still applies. Params the child doesn't have are ignored, as for any
+block. Sub-graph names are plain file names, resolved in the project directory (the
+directory of the graph for `foxygnal run`); a few bundled sub-graphs
+(`server/src/graphs.rs` `LIBRARY`, e.g. `tone-and-noise.fox.toml` used by the
+`hier-tones` example) are found when the project has no file of that name.
+
+`core::resolve::resolve(spec, registry, loader)` turns a graph into a flat one: vars and
+expressions evaluated, every hierarchical block replaced by its blocks renamed
+`parent_id/inner_id` (so `/` is not allowed in block ids), its exported ports wired through.
+The runtime never sees hierarchy (`Flowgraph::from_spec` resolves vars without a loader,
+`from_spec_with` takes a `GraphLoader`, `from_resolved` builds a resolved graph). A graph
+that contains itself, directly or not, is an error naming the chain (and nesting stops at
+16). Errors inside name the inner block (`block \`fm/lp\`, parameter …`). Port types come
+from the inner blocks; stream metadata flows through like anywhere else.
+
+Each resolved connection remembers the top-level connection it came from, so the server
+reports everything the way the user drew it (`server/src/graphs.rs` `EdgeMap`): metadata
+and stats of the wire `fm.out → sink.in` (not `fm/demod.out → sink.in`), wires inside a
+hierarchical block left out, its blocks' CPU summed into it, probes on its wires bound to
+the inner output that feeds them, and errors pinned to it with the inner detail in front
+(`lp: parameter …`). Live params compare *resolved* graphs, so changing a variable or a
+hierarchical block's param live-applies wherever it reaches only live params, and marks the
+run stale otherwise.
+
+`GET /api/blocks` also lists every graph file with exported ports as a block in category
+*Graphs* (`resolve::describe`: ports typed from the inner blocks; one float param per
+non-derived variable, `live` when changing it only changes live params inside). Files that
+don't resolve are left out. Not done yet: watching inner wires of a hierarchical block,
+units/help per variable, and string (path) variables.
 
 ## Security
 

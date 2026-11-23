@@ -287,3 +287,89 @@ async fn probes_stream_frames_and_stats_flow() {
         .await
         .expect("graph stops");
 }
+
+/// Every graph change comes with the stream metadata of each wire.
+#[tokio::test]
+async fn graph_changes_carry_stream_metadata() {
+    let s = session();
+    let (mut events, _) = s.subscribe(9);
+    s.set_graph(1, graph(RUNNING_TONE), None);
+    let meta = loop {
+        let v: serde_json::Value = serde_json::from_str(&events.recv().await.unwrap()).unwrap();
+        if v["op"] == "meta" {
+            break v;
+        }
+    };
+    let edges = meta["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 3);
+    assert!(edges.iter().all(|e| e["sample_rate"] == 48000.0), "{meta}");
+    let hello = serde_json::to_value(s.snapshot(9)).unwrap();
+    assert_eq!(hello["meta"]["edges"].as_array().unwrap().len(), 3);
+}
+
+/// The catalog flags blocks with a frequency-response preview, and the
+/// preview endpoint designs the filter at the given input rate.
+#[tokio::test]
+async fn filter_response_preview() {
+    let cfg = config(None);
+    let call = |req: Request<Body>| async {
+        let resp = router(&cfg, session()).oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, body)
+    };
+    let post = |kind: &str, body: serde_json::Value| {
+        Request::post(format!("/api/blocks/{kind}/response"))
+            .header(header::HOST, "127.0.0.1:7355")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    let (s, body) = call(
+        get("/api/blocks", "127.0.0.1:7355")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let cat: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let find = |kind: &str| {
+        cat.as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["kind"] == kind)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(find("fir_filter")["response"], true);
+    assert!(find("add").get("response").is_none());
+
+    let (s, body) = call(post(
+        "fir_filter",
+        serde_json::json!({"params": {"cutoff": 3000.0}, "sample_rate": 48000.0}),
+    ))
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let r: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        r["freqs"].as_array().unwrap().len(),
+        r["db"].as_array().unwrap().len()
+    );
+    assert!(r["taps"].as_u64().unwrap() > 1);
+
+    let (s, body) = call(post(
+        "fir_filter",
+        serde_json::json!({"params": {"cutoff": 30000.0}, "sample_rate": 48000.0}),
+    ))
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(String::from_utf8_lossy(&body).contains("24 kHz"));
+
+    let (s, _) = call(post("add", serde_json::json!({"sample_rate": 48000.0}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = call(post("fir_filter", serde_json::json!({"sample_rate": 0.0}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}

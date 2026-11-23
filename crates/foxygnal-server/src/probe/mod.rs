@@ -24,6 +24,7 @@ use foxygnal_core::{GraphCounters, Monitor, StreamType};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::graphs::EdgeMap;
 use crate::session::{EdgeRef, Session};
 pub use constellation::ConstellationOptions;
 pub use scope::ScopeOptions;
@@ -167,7 +168,7 @@ impl Hub {
     }
 
     /// Poll every probe; send the frames that are due.
-    fn tick(&self, run: Option<(u64, &Monitor)>, now: Instant) {
+    fn tick(&self, run: Option<(u64, &Monitor, &EdgeMap)>, now: Instant) {
         let mut h = self.lock();
         let HubInner { clients, probes } = &mut *h;
         let mut buf = Vec::new();
@@ -177,10 +178,10 @@ impl Hub {
                     p.bound = None;
                     p.error = None;
                 }
-                Some((run_id, mon)) if p.bound.as_ref().is_none_or(|b| b.run != run_id) => {
+                Some((run_id, mon, map)) if p.bound.as_ref().is_none_or(|b| b.run != run_id) => {
                     p.bound = None;
                     p.error = None;
-                    match bind(mon, &p.edge, &p.config) {
+                    match bind(mon, map, &p.edge, &p.config) {
                         Ok((src, inst)) => {
                             p.bound = Some(Bound {
                                 run: run_id,
@@ -233,6 +234,7 @@ impl Hub {
 
 fn bind(
     mon: &Monitor,
+    map: &EdgeMap,
     edge: &EdgeRef,
     config: &ProbeConfig,
 ) -> Result<(Source, Box<dyn Instrument>), String> {
@@ -242,7 +244,8 @@ fn bind(
             edge.from, edge.to
         )
     };
-    let (block, port) = edge.from.rsplit_once('.').ok_or_else(missing)?;
+    // A wire out of a hierarchical block is fed by a block inside it.
+    let (block, port) = map.source(edge).rsplit_once('.').ok_or_else(missing)?;
     let (ty, tap) = mon.tap(block, port).ok_or_else(missing)?;
     let inst = config.build(ty)?;
     Ok((Source::new(tap, ty), inst))
@@ -328,14 +331,19 @@ pub(crate) fn spawn(session: Weak<Session>) {
                 let Some(s) = session.upgrade() else { return };
                 let run = s.monitor();
                 let now = Instant::now();
-                s.hub().tick(run.as_ref().map(|(id, m)| (*id, m)), now);
+                s.hub()
+                    .tick(run.as_ref().map(|(id, m, map)| (*id, m, &**map)), now);
                 match &run {
                     None => last = None,
-                    Some((id, mon)) => match &last {
+                    Some((id, mon, map)) => match &last {
                         Some((lid, prev, at)) if lid == id => {
                             if now.duration_since(*at) >= STATS_EVERY {
                                 let counters = mon.stats();
-                                s.emit_stats(stats(prev, &counters, now.duration_since(*at)));
+                                s.emit_stats(map.stats(stats(
+                                    prev,
+                                    &counters,
+                                    now.duration_since(*at),
+                                )));
                                 last = Some((*id, counters, now));
                             }
                         }

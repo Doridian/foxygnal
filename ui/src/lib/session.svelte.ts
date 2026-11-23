@@ -1,7 +1,8 @@
 // The engine session over `/api/ws`: graph sync, run control, status, stats
 // and probe frames (binary messages).
 
-import type { ClientCommand, EdgeRef, GraphSpec, ProbeConfig, ServerEvent, Stats, Status } from './api';
+import type { ClientCommand, EdgeRef, ErrorInfo, GraphSpec, Meta, ProbeConfig, ServerEvent, Stats, Status } from './api';
+import { graphView } from './graphview.svelte';
 import { decodeFrame, type Frame } from './frames';
 
 export type GraphHandler = (graph: GraphSpec, name: string | null, kind: 'hello' | 'remote') => void;
@@ -27,6 +28,8 @@ export class Session {
   name = $state<string | null>(null);
   /** Load of the running graph; `null` when not running. */
   stats = $state<StatsIndex | null>(null);
+  /** Why the graph doesn't build or configure, as of the last edit. */
+  metaError = $state<ErrorInfo | null>(null);
   /** Why a probe can't show anything (by probe id), as the engine reports it. */
   probeErrors = $state<Record<number, string>>({});
 
@@ -71,6 +74,7 @@ export class Session {
       case 'hello':
         this.#client = ev.client;
         this.status = ev.status;
+        this.#meta(ev.meta);
         this.#onGraph(ev.graph, ev.name, 'hello');
         break;
       case 'graph':
@@ -82,6 +86,9 @@ export class Session {
         if (status.state !== 'running') this.stats = null;
         break;
       }
+      case 'meta':
+        this.#meta(ev);
+        break;
       case 'stats':
         if (this.status.state !== 'running') break;
         this.stats = {
@@ -95,6 +102,11 @@ export class Session {
         break;
       }
     }
+  }
+
+  #meta(m: Meta) {
+    this.metaError = m.error ?? null;
+    graphView.meta = new Map(m.edges.map((e) => [e.from, { sample_rate: e.sample_rate, center_freq: e.center_freq }]));
   }
 
   #frame(buf: ArrayBuffer) {

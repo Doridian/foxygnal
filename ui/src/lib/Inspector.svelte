@@ -1,8 +1,12 @@
 <script lang="ts">
-  import { portType } from './api';
+  import type { ComponentProps } from 'svelte';
+  import { GRAPH_KIND, portType } from './api';
   import type { BlockNode, Wire } from './graph';
   import { indexErrors } from './errors';
+  import type { Scope } from './expr';
+  import GraphSettings from './GraphSettings.svelte';
   import ParamField from './ParamField.svelte';
+  import ResponsePlot from './ResponsePlot.svelte';
   import WireInfo from './WireInfo.svelte';
   import { session } from './session.svelte';
 
@@ -12,16 +16,27 @@
     onparam,
     onrename,
     ondelete,
+    scope,
+    settings,
+    onopengraph,
   }: {
     node: BlockNode | undefined;
     edge: Wire | undefined;
     onparam: (id: string, name: string, value: unknown) => void;
     onrename: (from: string, to: string) => string | null;
     ondelete: () => void;
+    /** Graph variables, for params written as expressions. */
+    scope: Scope;
+    /** Variables and exports, edited when nothing is selected. */
+    settings: Omit<ComponentProps<typeof GraphSettings>, 'error'>;
+    /** Open a graph file (a hierarchical block's). */
+    onopengraph: (name: string) => void;
   } = $props();
 
   const running = $derived(session.status.state === 'running');
   const errs = $derived(indexErrors(session.status.errors));
+  /** Why the graph doesn't build right now (variables, sub-graphs…), from the engine. */
+  const buildError = $derived(session.metaError);
   let renameProblem = $state<string | null>(null);
 
   function rename(e: Event & { currentTarget: HTMLInputElement }) {
@@ -45,6 +60,11 @@
       </div>
       {#if errs.blocks.get(node.id)}
         <div class="errbox" role="alert">{errs.blocks.get(node.id)}</div>
+      {:else if buildError?.block === node.id}
+        <div class="errbox" role="alert">{buildError.message}</div>
+      {/if}
+      {#if d.kind.startsWith(GRAPH_KIND)}
+        <button class="open" onclick={() => onopengraph(d.kind.slice(GRAPH_KIND.length))}>Open {d.kind.slice(GRAPH_KIND.length)}</button>
       {/if}
       <div class="field">
         <label class="small muted" for="block-id">Block id</label>
@@ -52,8 +72,11 @@
         {#if renameProblem}<p class="problem">{renameProblem}</p>{/if}
       </div>
       {#each d.params as p (p.name)}
-        <ParamField spec={p} value={node.data.params[p.name] ?? p.default} {running} onchange={(v) => onparam(node.id, p.name, v)} />
+        <ParamField spec={p} value={node.data.params[p.name] ?? p.default} {running} {scope} onchange={(v) => onparam(node.id, p.name, v)} />
       {/each}
+      {#if d.response}
+        <ResponsePlot id={node.id} desc={d} params={node.data.params} {scope} />
+      {/if}
       {#if d.inputs.length || d.outputs.length}
         <div class="ports">
           {#each d.inputs as p (p.name)}
@@ -78,6 +101,7 @@
     </div>
     <button class="danger" onclick={ondelete}>Delete wire</button>
   {:else}
+    <GraphSettings {...settings} error={buildError && !buildError.block && !buildError.edge ? buildError.message : null} />
     <div class="empty">
       <p>Select a block to edit its parameters, or click a wire to see what it carries and watch it with a scope or spectrum.</p>
       <dl class="keys">
@@ -148,7 +172,8 @@
     gap: 4px 10px;
     font-size: 12px;
   }
-  .danger {
+  .danger,
+  .open {
     align-self: flex-start;
   }
   .empty {

@@ -1,4 +1,4 @@
-use foxygnal_blocks::testing::{VectorSink, VectorSource};
+use foxygnal_blocks::testing::{Collected, VectorSink, VectorSource};
 use foxygnal_core::{Flowgraph, GraphSpec, Params};
 use serde_json::json;
 
@@ -139,7 +139,12 @@ fn errors_name_the_block_or_edge() {
         "#,
     );
     assert_eq!(err.block(), Some("tone"), "{err}");
-    assert_eq!(err.detail(), "parameter `frequency`: expected a number");
+    // Strings in number params are expressions (`"$samp_rate / 2"`).
+    assert!(
+        err.detail()
+            .starts_with("parameter `frequency`: `loud` isn't a number"),
+        "{err}"
+    );
 
     // Unconnected input: attributed to the block that owns it.
     let err = build(
@@ -317,4 +322,139 @@ fn monitor_taps_and_counts_a_running_graph() {
 
     running.stop();
     running.wait().unwrap();
+}
+
+/// The source's rate flows downstream; a throttle at 0 takes it from there.
+#[test]
+fn stream_metadata_propagates() {
+    let toml = |src_rate: &str| {
+        format!(
+            r#"
+            [[block]]
+            id = "src"
+            kind = "file_source"
+            params = {{ type = "c32", path = "does-not-exist.c32", sample_rate = {src_rate}, center_freq = 100e6 }}
+            [[block]]
+            id = "thr"
+            kind = "throttle"
+            params = {{ type = "c32" }}
+            [[block]]
+            id = "sink"
+            kind = "null_sink"
+            params = {{ type = "c32" }}
+            [[connect]]
+            from = "src.out"
+            to = "thr.in"
+            [[connect]]
+            from = "thr.out"
+            to = "sink.in"
+            "#
+        )
+    };
+    let reg = foxygnal_blocks::registry();
+    // Building and configuring opens no files.
+    let mut fg =
+        Flowgraph::from_spec(&GraphSpec::from_toml(&toml("2.4e6")).unwrap(), &reg).unwrap();
+    let meta = fg.configure().unwrap();
+    assert_eq!(meta.len(), 2);
+    for m in &meta {
+        assert_eq!(m.meta.sample_rate, Some(2.4e6), "{}", m.to);
+        assert_eq!(m.meta.center_freq, Some(100e6));
+    }
+    assert_eq!(meta[1].from, "thr.out");
+
+    // Nothing sets a rate: the throttle says so, by name.
+    let mut fg = Flowgraph::from_spec(&GraphSpec::from_toml(&toml("0")).unwrap(), &reg).unwrap();
+    let err = fg.configure().unwrap_err();
+    assert_eq!(err.block(), Some("thr"));
+    assert!(err.to_string().contains("sample rate"), "{err}");
+}
+
+/// Keeps one item in `n`; relies on the runtime to pass tags on.
+struct KeepOneIn(usize);
+
+impl foxygnal_core::Block for KeepOneIn {
+    fn work(
+        &mut self,
+        io: &mut foxygnal_core::WorkIo<'_>,
+    ) -> Result<foxygnal_core::WorkStatus, foxygnal_core::Error> {
+        let (inp, out) = io.in_out::<f32, f32>(0, 0);
+        let k = (inp.len() / self.0).min(out.len());
+        if k == 0 {
+            return Ok(foxygnal_core::WorkStatus::Blocked);
+        }
+        for (o, i) in out.iter_mut().zip(inp.iter().step_by(self.0)) {
+            *o = *i;
+        }
+        io.consume(0, k * self.0);
+        io.produce(0, k);
+        Ok(foxygnal_core::WorkStatus::Ok)
+    }
+}
+
+#[test]
+fn tags_flow_through_blocks_and_scale_with_the_rate() {
+    use foxygnal_core::{Instance, StreamType, Tag, TagValue};
+    let reg = foxygnal_blocks::registry();
+    // Small buffers: tags must stay with their items across wrap-arounds.
+    // Even, so the decimator never sees a 1-item slice at the wrap point.
+    let mut fg = Flowgraph::new().with_buffer_capacity(14);
+    let n = 2_000;
+    let tags = vec![
+        Tag::new(0, "start", true),
+        Tag::new(10, "freq", 100e6),
+        Tag::new(11, "burst", 3i64),
+        Tag::new(1_501, "label", "hello"),
+    ];
+    let src = fg.add(
+        "src",
+        VectorSource::with_tags((0..n).map(|i| i as f32).collect(), tags),
+    );
+    let gain = fg.add(
+        "gain",
+        reg.build("gain", &params(json!({"type": "f32", "gain": 1.0})))
+            .unwrap(),
+    );
+    let dec = fg.add(
+        "dec",
+        Instance {
+            block: Box::new(KeepOneIn(2)),
+            inputs: vec![("in".into(), StreamType::F32)],
+            outputs: vec![("out".into(), StreamType::F32)],
+        },
+    );
+    let (full, _, full_tags) = VectorSink::<f32>::with_tags();
+    let full = fg.add("full", full);
+    let (half, half_data, half_tags) = VectorSink::<f32>::with_tags();
+    let half = fg.add("half", half);
+    fg.connect(src, 0, gain, 0).unwrap();
+    fg.connect(gain, 0, full, 0).unwrap();
+    fg.connect(gain, 0, dec, 0).unwrap();
+    fg.connect(dec, 0, half, 0).unwrap();
+    fg.start().unwrap().wait().unwrap();
+
+    let offs = |t: &Collected<Tag>| -> Vec<(u64, String)> {
+        t.lock()
+            .unwrap()
+            .iter()
+            .map(|t| (t.offset, t.key.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        offs(&full_tags),
+        [(0, "start"), (10, "freq"), (11, "burst"), (1501, "label")]
+            .map(|(o, k)| (o, k.to_string()))
+    );
+    assert_eq!(
+        full_tags.lock().unwrap()[3].value,
+        TagValue::Str("hello".into())
+    );
+    // Decimated by 2: offsets halve (rounding down), and each tag's item is
+    // the kept item covering it.
+    let half_offs = offs(&half_tags);
+    assert_eq!(
+        half_offs,
+        [(0, "start"), (5, "freq"), (5, "burst"), (750, "label")].map(|(o, k)| (o, k.to_string()))
+    );
+    assert_eq!(half_data.lock().unwrap()[750], 1500.0);
 }

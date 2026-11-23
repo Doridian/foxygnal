@@ -15,7 +15,7 @@
     input?: HTMLInputElement;
   } = $props();
 
-  const ORDER = ['Sources', 'Filters', 'Demodulators', 'Math', 'Flow', 'Sinks'];
+  const ORDER = ['Sources', 'Filters', 'Resamplers', 'Demodulators', 'Level', 'Math', 'Converters', 'Flow', 'Sinks', 'Graphs'];
 
   const matches = $derived.by(() => {
     const q = search.trim().toLowerCase();

@@ -3,8 +3,8 @@
 use std::f64::consts::TAU;
 
 use foxygnal_core::{
-    Block, BlockDescriptor, Complex32, Error, Instance, ParamKind, ParamReader, ParamSpec,
-    PortSpec, Registry, StreamType, WorkIo, WorkStatus,
+    Block, BlockDescriptor, Complex32, Configure, Error, Instance, ParamKind, ParamReader,
+    ParamSpec, PortSpec, Registry, StreamType, WorkIo, WorkStatus,
 };
 use serde_json::json;
 
@@ -140,6 +140,11 @@ impl SignalSource {
 }
 
 impl Block for SignalSource {
+    fn configure(&mut self, cx: &mut Configure<'_>) -> Result<(), Error> {
+        cx.set_rate(self.sample_rate);
+        Ok(())
+    }
+
     fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
         let n = match self.ty {
             StreamType::C32 => {

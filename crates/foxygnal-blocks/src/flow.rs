@@ -3,8 +3,8 @@
 use std::time::{Duration, Instant};
 
 use foxygnal_core::{
-    Block, BlockDescriptor, Error, Instance, ParamKind, ParamReader, ParamSpec, PortSpec, Registry,
-    WorkIo, WorkStatus,
+    Block, BlockDescriptor, Configure, Error, Instance, ParamKind, ParamReader, ParamSpec,
+    PortSpec, Registry, WorkIo, WorkStatus,
 };
 use serde_json::json;
 
@@ -26,7 +26,12 @@ pub fn register(r: &mut Registry) {
                 name: "out",
                 ty: None,
             }],
-            params: vec![params::any_type(), params::sample_rate()],
+            params: vec![
+                params::any_type(),
+                params::optional_rate(
+                    "Items per second. 0 = the stream's own rate, from upstream.",
+                ),
+            ],
         },
         build_throttle,
     );
@@ -97,6 +102,18 @@ pub struct Throttle {
 }
 
 impl Block for Throttle {
+    fn configure(&mut self, cx: &mut Configure<'_>) -> Result<(), Error> {
+        if self.rate > 0.0 {
+            // A raw source may not know its rate: the throttle tells downstream.
+            if cx.inputs[0].sample_rate.is_none() {
+                cx.set_rate(self.rate);
+            }
+        } else {
+            self.rate = cx.input_rate(0)?;
+        }
+        Ok(())
+    }
+
     fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
         let start = *self.start.get_or_insert_with(Instant::now);
         let due = (start.elapsed().as_secs_f64() * self.rate) as u64;

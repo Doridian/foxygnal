@@ -6,6 +6,7 @@
   import { indexErrors } from './errors';
   import { instruments } from './instruments.svelte';
   import { prefs } from './prefs.svelte';
+  import { graphView } from './graphview.svelte';
   import { fmtRate, heat } from './plot';
 
   let { id, source, target, sourceHandleId, targetHandleId, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, selected }: EdgeProps = $props();
@@ -28,6 +29,7 @@
   const from = $derived(`${source}.${sourceHandleId}`);
   const to = $derived(`${target}.${targetHandleId}`);
   const watchers = $derived(instruments.onEdge(from, to));
+  const rate = $derived(graphView.rateOf(from));
   const stat = $derived(prefs.overlay ? session.stats?.edges.get(`${from}->${to}`) : undefined);
 </script>
 
@@ -43,10 +45,11 @@
   style="stroke: {colour}; stroke-width: {selected ? 3 : 2}px;{error ? ' stroke-dasharray: 5 4;' : ''}"
   aria-label={error ?? `${type ?? ''} wire${watchers.length ? `, watched by instrument ${watchers.join(', ')}` : ''}`}
 />
-{#if watchers.length || stat}
+{#if watchers.length || stat || rate}
   <EdgeLabel x={labelX} y={labelY} transparent>
     <span class="label">
       {#each watchers as n (n)}<span class="badge" title="Instrument {n}">{n}</span>{/each}
+      {#if rate && !stat}<span class="rate mono" title="Sample rate">{fmtRate(rate)}</span>{/if}
       {#if stat}
         <span class="stat mono" style:border-color={heat(stat.fill)} title="Items per second · buffer fill for {to}"
           >{fmtRate(stat.rate).replace('S/s', '/s')} · {Math.round(stat.fill * 100)}%</span
@@ -75,6 +78,15 @@
     color: var(--text);
     font-size: 10px;
     font-weight: 700;
+  }
+  .rate {
+    padding: 0 4px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
+    color: var(--muted);
+    font-size: 10px;
+    white-space: nowrap;
+    transform: translateY(-11px);
   }
   .stat {
     padding: 1px 6px;

@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 use crate::block::{InputPort, OutputPort, WorkIo, WorkStatus};
 use crate::buffer::{self, Reader, Tap};
 use crate::graph::GraphSpec;
+use crate::meta::{Configure, StreamMeta};
 use crate::registry::{Instance, Registry};
+use crate::resolve::{GraphLoader, NoLoader, resolve};
+use crate::tag::TagPropagation;
 use crate::{Error, StreamType};
 
 type ParamMsg = (String, serde_json::Value);
@@ -40,6 +43,19 @@ pub struct Flowgraph {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     buffer_capacity: Option<usize>,
+    /// Output metadata per node and port, once configured.
+    meta: Option<Vec<Vec<StreamMeta>>>,
+}
+
+/// The metadata of one connection, see [`Flowgraph::configure`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct EdgeMeta {
+    /// `block.port` of the output.
+    pub from: String,
+    /// `block.port` of the input.
+    pub to: String,
+    #[serde(flatten)]
+    pub meta: StreamMeta,
 }
 
 impl Flowgraph {
@@ -106,7 +122,24 @@ impl Flowgraph {
     }
 
     /// Build a flowgraph from a serialized spec using the given registry.
+    /// Variables and expressions are evaluated; hierarchical blocks are an
+    /// error (use [`Self::from_spec_with`]).
     pub fn from_spec(spec: &GraphSpec, registry: &Registry) -> Result<Self, Error> {
+        Self::from_spec_with(spec, registry, &NoLoader)
+    }
+
+    /// [`Self::from_spec`], loading sub-graphs of hierarchical blocks with
+    /// `loader`.
+    pub fn from_spec_with(
+        spec: &GraphSpec,
+        registry: &Registry,
+        loader: &dyn GraphLoader,
+    ) -> Result<Self, Error> {
+        Self::from_resolved(&resolve(spec, registry, loader)?.graph, registry)
+    }
+
+    /// Build from a graph already passed through [`crate::resolve()`].
+    pub fn from_resolved(spec: &GraphSpec, registry: &Registry) -> Result<Self, Error> {
         let mut fg = Self::new();
         let mut ids = HashMap::new();
         for b in &spec.blocks {
@@ -149,8 +182,94 @@ impl Flowgraph {
         Ok(fg)
     }
 
+    /// Work out every stream's metadata: call [`crate::Block::configure`] on
+    /// each block, upstream first. Unconnected inputs count as unknown.
+    /// Idempotent; [`Self::start`] calls it if needed.
+    pub fn configure(&mut self) -> Result<Vec<EdgeMeta>, Error> {
+        if self.meta.is_none() {
+            let order = self.topo_order()?;
+            let mut out: Vec<Vec<StreamMeta>> = self
+                .nodes
+                .iter()
+                .map(|n| vec![StreamMeta::default(); n.inst.outputs.len()])
+                .collect();
+            for ni in order {
+                let inputs: Vec<StreamMeta> = (0..self.nodes[ni].inst.inputs.len())
+                    .map(|pi| {
+                        self.edges
+                            .iter()
+                            .find(|e| e.to == (ni, pi))
+                            .map(|e| out[e.from.0][e.from.1])
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                let node = &mut self.nodes[ni];
+                let mut outputs = vec![StreamMeta::merge(&inputs); node.inst.outputs.len()];
+                node.inst
+                    .block
+                    .configure(&mut Configure {
+                        inputs: &inputs,
+                        outputs: &mut outputs,
+                    })
+                    .map_err(|e| match e {
+                        e @ (Error::Block { .. } | Error::Param { .. }) => e,
+                        e => Error::Block {
+                            block: node.name.clone(),
+                            source: Box::new(e),
+                        },
+                    })?;
+                out[ni] = outputs;
+            }
+            self.meta = Some(out);
+        }
+        let meta = self.meta.as_ref().expect("configured above");
+        Ok(self
+            .edges
+            .iter()
+            .map(|e| {
+                let (src, dst) = (&self.nodes[e.from.0], &self.nodes[e.to.0]);
+                EdgeMeta {
+                    from: format!("{}.{}", src.name, src.inst.outputs[e.from.1].0),
+                    to: format!("{}.{}", dst.name, dst.inst.inputs[e.to.1].0),
+                    meta: meta[e.from.0][e.from.1],
+                }
+            })
+            .collect())
+    }
+
+    /// Nodes ordered so every block comes after the blocks feeding it.
+    fn topo_order(&self) -> Result<Vec<usize>, Error> {
+        let n = self.nodes.len();
+        let mut indegree = vec![0usize; n];
+        for e in &self.edges {
+            indegree[e.to.0] += 1;
+        }
+        let mut ready: Vec<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
+        let mut order = Vec::with_capacity(n);
+        while let Some(i) = ready.pop() {
+            order.push(i);
+            for e in self.edges.iter().filter(|e| e.from.0 == i) {
+                indegree[e.to.0] -= 1;
+                if indegree[e.to.0] == 0 {
+                    ready.push(e.to.0);
+                }
+            }
+        }
+        if order.len() < n {
+            let stuck: Vec<&str> = (0..n)
+                .filter(|&i| indegree[i] > 0)
+                .map(|i| self.nodes[i].name.as_str())
+                .collect();
+            return Err(Error::Graph(format!(
+                "the graph has a loop through {}; streams must flow one way",
+                stuck.join(", ")
+            )));
+        }
+        Ok(order)
+    }
+
     /// Allocate buffers and spawn one thread per block.
-    pub fn start(self) -> Result<Running, Error> {
+    pub fn start(mut self) -> Result<Running, Error> {
         let cap = self.buffer_capacity.unwrap_or(buffer::DEFAULT_CAPACITY);
 
         // Every input must be connected.
@@ -164,6 +283,7 @@ impl Flowgraph {
                 }
             }
         }
+        self.configure()?;
 
         let mut inputs: Vec<Vec<Option<Reader>>> = self
             .nodes
@@ -212,7 +332,7 @@ impl Flowgraph {
                 .inputs
                 .iter()
                 .zip(ins)
-                .map(|((_, ty), reader)| InputPort { ty: *ty, reader })
+                .map(|((_, ty), reader)| InputPort::new(*ty, reader))
                 .collect();
             let stop = stop.clone();
             let name = node.name.clone();
@@ -273,6 +393,38 @@ fn resolve_port(
 
 const IDLE_PARK: Duration = Duration::from_millis(50);
 
+/// Ports per block whose tags the runtime passes on automatically.
+const MAX_TAG_PORTS: usize = 16;
+
+/// Pass tags on consumed input items to every output, scaling offsets by the
+/// items produced per item consumed in this `work` call.
+fn propagate_tags(
+    inputs: &[InputPort],
+    outputs: &mut [OutputPort],
+    in_before: &[u64; MAX_TAG_PORTS],
+    out_before: &[u64; MAX_TAG_PORTS],
+) {
+    if outputs.is_empty() {
+        return;
+    }
+    for (input, &start) in inputs.iter().zip(in_before) {
+        let consumed = input.position() - start;
+        if consumed == 0 {
+            continue;
+        }
+        // `tags()` starts at the new read position; consumed tags sit before it.
+        for tag in input.consumed_tags(start) {
+            let rel = tag.offset - start;
+            for (o, &ostart) in outputs.iter_mut().zip(out_before) {
+                let produced = o.position() - ostart;
+                let mut t = tag.clone();
+                t.offset = ostart + rel * produced / consumed;
+                o.push_tag(&t);
+            }
+        }
+    }
+}
+
 fn run_block(
     mut inst: Instance,
     mut inputs: Vec<InputPort>,
@@ -305,6 +457,18 @@ fn run_block(
         if let Some(e) = failed {
             break Err(e);
         }
+        for i in &mut inputs {
+            i.sync();
+        }
+        // Positions before `work`, for passing tags on (fixed-size: no allocation).
+        let mut in_before = [0u64; MAX_TAG_PORTS];
+        let mut out_before = [0u64; MAX_TAG_PORTS];
+        for (b, i) in in_before.iter_mut().zip(&inputs) {
+            *b = i.position();
+        }
+        for (b, o) in out_before.iter_mut().zip(&outputs) {
+            *b = o.position();
+        }
         let mut io = WorkIo {
             inputs: &mut inputs,
             outputs: &mut outputs,
@@ -312,6 +476,16 @@ fn run_block(
         let t0 = Instant::now();
         let status = inst.block.work(&mut io);
         busy_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if inst.block.tag_propagation() == TagPropagation::AllToAll {
+            propagate_tags(&inputs, &mut outputs, &in_before, &out_before);
+        }
+        for i in &mut inputs {
+            i.prune_tags();
+        }
+        // Publish after tags, so readers see an item's tags with the item.
+        for o in &mut outputs {
+            o.flush();
+        }
         match status {
             Err(e) => break Err(e),
             Ok(WorkStatus::Ok) => {}

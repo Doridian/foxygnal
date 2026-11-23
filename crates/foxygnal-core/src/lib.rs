@@ -3,22 +3,30 @@
 
 pub mod block;
 pub mod buffer;
+pub mod expr;
 pub mod graph;
+pub mod meta;
 pub mod registry;
+pub mod resolve;
 pub mod runtime;
 pub mod sample;
+pub mod tag;
 
 pub use block::{Block, InputPort, OutputPort, WorkIo, WorkStatus};
 pub use buffer::{Tap, TapRead};
 pub use graph::GraphSpec;
+pub use meta::{Configure, StreamMeta};
 pub use registry::{
-    BlockDescriptor, Instance, ParamKind, ParamReader, ParamSpec, Params, PortSpec, Registry,
+    BlockDescriptor, CatalogEntry, FrequencyResponse, Instance, ParamKind, ParamReader, ParamSpec,
+    Params, PortSpec, Registry, ResponseFn,
 };
+pub use resolve::{DirLoader, GraphLoader, NoLoader, Resolved, resolve};
 pub use runtime::{
-    BlockCounters, BlockId, EdgeCounters, Flowgraph, GraphCounters, Monitor, ParamSender, Running,
-    StopHandle,
+    BlockCounters, BlockId, EdgeCounters, EdgeMeta, Flowgraph, GraphCounters, Monitor, ParamSender,
+    Running, StopHandle,
 };
 pub use sample::{Complex32, Sample, StreamType};
+pub use tag::{Tag, TagPropagation, TagValue};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -2,6 +2,7 @@
 //! The protocol is described in docs/ARCHITECTURE.md ("Server API").
 
 mod api;
+pub mod graphs;
 pub mod probe;
 mod security;
 pub mod session;
@@ -61,6 +62,7 @@ pub fn router(cfg: &Config, session: Arc<Session>) -> Router {
     let api = Router::new()
         .route("/health", get(api::health))
         .route("/blocks", get(api::blocks))
+        .route("/blocks/{kind}/response", post(api::block_response))
         .route("/graph", get(api::get_graph).put(api::put_graph))
         .route("/graph.toml", get(api::get_graph_toml))
         .route("/toml/parse", post(api::parse_toml))

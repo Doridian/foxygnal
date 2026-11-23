@@ -42,14 +42,14 @@ Goal: click a wire and watch it.
 
 Goal: build an FM broadcast receiver from a recording, with audio out.
 
-- [ ] Stream metadata propagation (sample rate, centre frequency) and rate labels on wires
-- [ ] Tags
-- [ ] FIR filters with a visual designer (low/high/band-pass, frequency response preview)
-- [ ] Rational resampler, decimator/interpolator, frequency-translating FIR
-- [ ] AGC, AM/FM/SSB demodulators, squelch
-- [ ] Audio sink/source (`cpal`), WAV and SigMF file source/sink
-- [ ] Type converters, offered for auto-insertion when the user connects mismatched ports
-- [ ] Graph variables (`$samp_rate`) and hierarchical blocks
+- [x] Stream metadata propagation (sample rate, centre frequency) and rate labels on wires
+- [x] Tags
+- [x] FIR filters with a visual designer (low/high/band-pass, frequency response preview)
+- [x] Rational resampler, decimator/interpolator, frequency-translating FIR
+- [x] AGC, AM/FM/SSB demodulators, squelch
+- [x] Audio sink/source (`cpal`), WAV and SigMF file source/sink
+- [x] Type converters, offered for auto-insertion when the user connects mismatched ports
+- [x] Graph variables (`$samp_rate`) and hierarchical blocks
 
 ## M4: Hardware
 

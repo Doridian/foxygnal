@@ -31,6 +31,16 @@ export interface BlockDescriptor {
   inputs: PortSpec[];
   outputs: PortSpec[];
   params: ParamSpec[];
+  /** The block can preview its frequency response (`fetchResponse`). */
+  response?: boolean;
+}
+
+/** A filter's magnitude response (`POST /api/blocks/{kind}/response`). */
+export interface FrequencyResponse {
+  /** Hz, increasing. */
+  freqs: number[];
+  db: number[];
+  taps: number;
 }
 
 export interface BlockSpec {
@@ -45,11 +55,25 @@ export interface ConnectionSpec {
   to: string;
 }
 
-/** A graph as stored in `.fox.toml` (`[[block]]`, `[[connect]]`). */
+/** `[export]`: the ports (and palette text) of a graph used as a block. */
+export interface Exports {
+  label?: string;
+  help?: string;
+  input?: { name: string; to: string | string[] }[];
+  output?: { name: string; from: string }[];
+}
+
+/** A graph as stored in `.fox.toml` (`[vars]`, `[export]`, `[[block]]`, `[[connect]]`). */
 export interface GraphSpec {
+  /** Graph variables: numbers or expressions, referenced as `$name`. */
+  vars?: Record<string, number | string>;
+  export?: Exports;
   block: BlockSpec[];
   connect: ConnectionSpec[];
 }
+
+/** Block kinds that are graph files: `graph:fm-demod.fox.toml`. */
+export const GRAPH_KIND = 'graph:';
 
 export const emptyGraph = (): GraphSpec => ({ block: [], connect: [] });
 
@@ -71,6 +95,17 @@ export interface Status {
 export interface EdgeRef {
   from: string;
   to: string;
+}
+
+export interface StreamMeta {
+  sample_rate?: number;
+  center_freq?: number;
+}
+
+/** Stream metadata of every wire (`meta` event and `hello`). */
+export interface Meta {
+  edges: ({ from: string; to: string } & StreamMeta)[];
+  error?: ErrorInfo;
 }
 
 export interface Stats {
@@ -101,10 +136,11 @@ export type ProbeConfig =
   | { kind: 'meter' };
 
 export type ServerEvent =
-  | { op: 'hello'; client: number; graph: GraphSpec; name: string | null; version: number; status: Status }
+  | { op: 'hello'; client: number; graph: GraphSpec; name: string | null; version: number; status: Status; meta: Meta }
   | { op: 'graph'; graph: GraphSpec; name: string | null; version: number; from: number }
   | ({ op: 'status' } & Status)
   | ({ op: 'stats' } & Stats)
+  | ({ op: 'meta' } & Meta)
   | { op: 'probe'; id: number; error: string | null };
 
 export type ClientCommand =
@@ -144,6 +180,9 @@ export const saveFile = (name: string, g: GraphSpec) =>
   call<string>('PUT', `/api/files/${encodeURIComponent(name)}`, json(g), 'application/json');
 export const parseToml = (text: string) => call<GraphSpec>('POST', '/api/toml/parse', text, 'text/plain');
 export const renderToml = (g: GraphSpec) => call<string>('POST', '/api/toml/render', json(g), 'application/json');
+/** The frequency response a block would have with `params` at input rate `sample_rate`. */
+export const fetchResponse = (kind: string, params: Record<string, unknown>, sample_rate: number) =>
+  call<FrequencyResponse>('POST', `/api/blocks/${encodeURIComponent(kind)}/response`, json({ params, sample_rate }), 'application/json');
 
 /** A port's concrete type: fixed by the descriptor, else taken from the `type` param. */
 export function portType(p: PortSpec, params: Record<string, unknown>): StreamType {

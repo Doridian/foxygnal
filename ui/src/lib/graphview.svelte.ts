@@ -1,7 +1,7 @@
 // The graph and block catalog as instruments see them. The editor keeps this
 // up to date; a pop-out window fills it from its own session.
 
-import { emptyGraph, portType, type BlockDescriptor, type EdgeRef, type GraphSpec, type StreamType } from './api';
+import { emptyGraph, portType, type BlockDescriptor, type EdgeRef, type GraphSpec, type StreamMeta, type StreamType } from './api';
 
 class GraphView {
   spec = $state.raw<GraphSpec>(emptyGraph());
@@ -21,29 +21,19 @@ class GraphView {
     return p && b ? portType(p, b.params) : null;
   }
 
-  /**
-   * The sample rate on a wire, guessed from the nearest upstream block with a
-   * `sample_rate` parameter. Stream metadata (M3) will make this exact.
-   */
-  guessRate(endpoint: string): { rate: number; block: string } | null {
-    const seen = new Set<string>();
-    let frontier = [endpoint.slice(0, endpoint.lastIndexOf('.'))];
-    while (frontier.length) {
-      const next: string[] = [];
-      for (const id of frontier) {
-        if (seen.has(id)) continue;
-        seen.add(id);
-        const b = this.spec.block.find((b) => b.id === id);
-        const r = b?.params.sample_rate;
-        if (typeof r === 'number' && r > 0) return { rate: r, block: id };
-        for (const c of this.spec.connect) {
-          if (c.to.slice(0, c.to.lastIndexOf('.')) === id) next.push(c.from.slice(0, c.from.lastIndexOf('.')));
-        }
-      }
-      frontier = next;
-    }
-    return null;
+  /** Stream metadata by output endpoint (`block.port`), as the engine worked it out. */
+  meta = $state.raw(new Map<string, StreamMeta>());
+
+  /** The sample rate an output carries, if known. */
+  rateOf(endpoint: string): number | null {
+    return this.meta.get(endpoint)?.sample_rate ?? null;
   }
+
+  /** The RF frequency 0 Hz corresponds to on an output, if known. */
+  centerOf(endpoint: string): number | null {
+    return this.meta.get(endpoint)?.center_freq ?? null;
+  }
+
 }
 
 export const graphView = new GraphView();

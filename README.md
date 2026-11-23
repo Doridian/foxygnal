@@ -34,6 +34,15 @@ cargo build --release
 cargo build --release --features embed-ui
 ```
 
+**Audio** (sound card sink and source) is behind the `audio` cargo feature, off by default
+because on Linux it needs the ALSA headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel`
+on Fedora, `alsa-lib` on Arch). A plain `cargo build` needs no C libraries.
+
+```sh
+cargo run -p foxygnal --features audio -- serve
+cargo build --release --features audio,embed-ui
+```
+
 `serve` options: `--project-dir DIR` is where the browser opens and saves `.fox.toml` files
 (default: the current directory). `--allow-remote` permits a non-loopback `--bind` and
 prints a URL with a random access token; put a TLS reverse proxy in front.

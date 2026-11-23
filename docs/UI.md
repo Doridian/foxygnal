@@ -30,14 +30,21 @@ Sketch: <https://claude.ai/artifact/4Yfp1PBSy1oBjfevL9daHW> (private until share
    and a "show details" toggle.
 4. **Numbers are human.** Inputs accept `2.4M`, `100k`, `-30dB` and display with SI prefixes.
    Sliders appear for params that have min/max.
-5. **Live where possible.** Params that can change while running show a small live dot and
+   Number fields also take `$name` or an expression (`$samp_rate / 10`) using the graph's
+   variables, and show the resolved value underneath (`ui/src/lib/expr.ts` mirrors the
+   engine's evaluator). With nothing selected, the inspector edits the graph's
+   **Variables** (renaming one renames its `$references`) and, under *Use as a block*, its
+   exported ports.
+5. **Graphs are blocks.** Saved graphs with exported ports appear in the palette under
+   *Graphs*. Double-click such a block (or use *Open* in the inspector) to edit its file.
+6. **Live where possible.** Params that can change while running show a small live dot and
    apply instantly. Others show "applies on restart".
-6. **Instruments are first-class.** They dock at the bottom, can split side by side, pop out
+7. **Instruments are first-class.** They dock at the bottom, can split side by side, pop out
    into their own browser window (for a second monitor), and remember their settings per
    graph file.
-7. **Fast to drive.** `/` searches blocks, `Space` runs/stops, `Del` deletes, `Ctrl+Z`
+8. **Fast to drive.** `/` searches blocks, `Space` runs/stops, `Del` deletes, `Ctrl+Z`
    undoes, and `F` fits the view.
-8. **Empty state teaches.** A new graph offers templates ("Tone + noise → scope", "FM
+9. **Empty state teaches.** A new graph offers templates ("Tone + noise → scope", "FM
    receiver from file", "RTL-SDR spectrum") instead of a blank page.
 
 ## Visual language

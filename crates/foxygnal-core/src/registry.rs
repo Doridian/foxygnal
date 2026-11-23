@@ -127,9 +127,36 @@ pub struct Instance {
 
 pub type Factory = fn(&ParamReader<'_>) -> Result<Instance, Error>;
 
+/// A filter's magnitude response, for previews in the UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct FrequencyResponse {
+    /// Frequencies in Hz, increasing.
+    pub freqs: Vec<f64>,
+    /// Gain at each frequency, in dB.
+    pub db: Vec<f32>,
+    /// Number of taps the design has.
+    pub taps: usize,
+}
+
+/// Computes the frequency response a block would have with these parameters
+/// at this input sample rate. Pure, like a factory: no side effects.
+pub type ResponseFn = fn(&ParamReader<'_>, f64) -> Result<FrequencyResponse, Error>;
+
 struct Entry {
     descriptor: BlockDescriptor,
     factory: Factory,
+    response: Option<ResponseFn>,
+}
+
+/// A descriptor as the catalog API serves it: the descriptor plus what the
+/// registry knows about the block beyond it.
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogEntry<'a> {
+    #[serde(flatten)]
+    pub descriptor: &'a BlockDescriptor,
+    /// The block can preview its frequency response ([`Registry::response`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub response: bool,
 }
 
 #[derive(Default)]
@@ -143,12 +170,32 @@ impl Registry {
     }
 
     pub fn register(&mut self, descriptor: BlockDescriptor, factory: Factory) {
+        self.insert(descriptor, factory, None);
+    }
+
+    /// Register a block that can also preview its frequency response.
+    pub fn register_with_response(
+        &mut self,
+        descriptor: BlockDescriptor,
+        factory: Factory,
+        response: ResponseFn,
+    ) {
+        self.insert(descriptor, factory, Some(response));
+    }
+
+    fn insert(
+        &mut self,
+        descriptor: BlockDescriptor,
+        factory: Factory,
+        response: Option<ResponseFn>,
+    ) {
         let kind = descriptor.kind;
         let prev = self.entries.insert(
             kind,
             Entry {
                 descriptor,
                 factory,
+                response,
             },
         );
         assert!(prev.is_none(), "block kind `{kind}` registered twice");
@@ -156,6 +203,39 @@ impl Registry {
 
     pub fn descriptors(&self) -> impl Iterator<Item = &BlockDescriptor> {
         self.entries.values().map(|e| &e.descriptor)
+    }
+
+    /// Every block, as the catalog API serves it.
+    pub fn catalog(&self) -> impl Iterator<Item = CatalogEntry<'_>> {
+        self.entries.values().map(|e| CatalogEntry {
+            descriptor: &e.descriptor,
+            response: e.response.is_some(),
+        })
+    }
+
+    /// The frequency response a block of `kind` would have with `params` at
+    /// input rate `sample_rate`. `Ok(None)` if the block has no preview.
+    pub fn response(
+        &self,
+        kind: &str,
+        params: &Params,
+        sample_rate: f64,
+    ) -> Result<Option<FrequencyResponse>, Error> {
+        let e = self
+            .entries
+            .get(kind)
+            .ok_or_else(|| Error::UnknownBlock(kind.to_owned()))?;
+        let Some(f) = e.response else {
+            return Ok(None);
+        };
+        f(
+            &ParamReader {
+                spec: &e.descriptor,
+                values: params,
+            },
+            sample_rate,
+        )
+        .map(Some)
     }
 
     pub fn get(&self, kind: &str) -> Option<&BlockDescriptor> {
@@ -182,6 +262,12 @@ pub struct ParamReader<'a> {
 }
 
 impl ParamReader<'_> {
+    /// Whether this block kind has a parameter called `name` (for factories
+    /// shared by several kinds).
+    pub fn has(&self, name: &str) -> bool {
+        self.spec.params.iter().any(|p| p.name == name)
+    }
+
     fn raw(&self, name: &str) -> Result<&Value, Error> {
         if let Some(v) = self.values.get(name) {
             return Ok(v);

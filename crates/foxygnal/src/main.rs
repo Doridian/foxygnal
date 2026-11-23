@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use foxygnal_core::{Flowgraph, GraphSpec};
+use foxygnal_core::{DirLoader, Flowgraph, GraphSpec};
 use foxygnal_server::{Security, Ui};
 
 #[derive(Parser)]
@@ -96,7 +96,9 @@ async fn main() -> anyhow::Result<()> {
             let text = std::fs::read_to_string(&graph)
                 .with_context(|| format!("reading {}", graph.display()))?;
             let spec = GraphSpec::from_toml(&text)?;
-            let running = Flowgraph::from_spec(&spec, &registry)?.start()?;
+            // Sub-graphs (`graph:NAME.fox.toml`) sit next to the graph file.
+            let dir = graph.parent().map(PathBuf::from).unwrap_or_default();
+            let running = Flowgraph::from_spec_with(&spec, &registry, &DirLoader(dir))?.start()?;
             let stop = running.stop_handle();
             tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;

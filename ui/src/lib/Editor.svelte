@@ -12,8 +12,9 @@
   import WireInfo from './WireInfo.svelte';
   import { graphView } from './graphview.svelte';
   import { instruments } from './instruments.svelte';
-  import { emptyGraph, fetchBlocks, fetchExample, openFile, parseToml, renderToml, saveFile, type BlockDescriptor, type GraphSpec } from './api';
-  import { ID_RE, baseForCopy, baseForKind, edgeId, freshId, fromSpec, rejectReason, toSpec, type BlockNode, type Wire } from './graph';
+  import { GRAPH_KIND, emptyGraph, fetchBlocks, fetchExample, openFile, parseToml, renderToml, saveFile, type BlockDescriptor, type Exports, type GraphSpec } from './api';
+  import { ID_RE, baseForCopy, baseForKind, convertersFor, edgeId, extrasOf, freshId, fromSpec, rejectReason, toSpec, typeOf, type BlockNode, type GraphExtras, type Wire } from './graph';
+  import { renameRef, resolveVars } from './expr';
   import { session } from './session.svelte';
   import { toast } from './toast.svelte';
 
@@ -28,6 +29,9 @@
 
   let nodes = $state.raw<BlockNode[]>([]);
   let edges = $state.raw<Wire[]>([]);
+  /** Graph variables and exports. */
+  let extras = $state.raw<GraphExtras>({});
+  const vars = $derived(resolveVars(extras.vars ?? {}));
 
   /** Normalized JSON of the graph as last exchanged with the engine. */
   let synced = '';
@@ -49,7 +53,7 @@
   let redoStack: string[] = [];
   let clipboard: GraphSpec | null = null;
 
-  const specJson = $derived(JSON.stringify(toSpec(nodes, edges)));
+  const specJson = $derived(JSON.stringify(toSpec(nodes, edges, extras)));
   const dirty = $derived(specJson !== saved);
   const selectedNode = $derived(nodes.find((n) => n.selected));
   const selectedEdge = $derived(selectedNode ? undefined : edges.find((e) => e.selected));
@@ -58,7 +62,7 @@
 
   // Instruments see the graph as the engine will run it.
   $effect(() => {
-    graphView.spec = toSpec(nodes, edges);
+    graphView.spec = toSpec(nodes, edges, extras);
   });
   $effect(() => {
     graphView.catalog = catalog;
@@ -80,6 +84,19 @@
     })
     .catch((e) => (loadError = String(e.message ?? e)));
 
+  /** Fetch descriptors again (graph files used as blocks change when saved). */
+  async function refreshBlocks() {
+    try {
+      descriptors = await fetchBlocks();
+      nodes = nodes.map((n) => {
+        const desc = catalog.get(n.data.desc.kind);
+        return desc && desc !== n.data.desc ? { ...n, data: { ...n.data, desc } } : n;
+      });
+    } catch {
+      // Keep the old catalog.
+    }
+  }
+
   session.start(onGraph);
 
   function selectedIds() {
@@ -91,7 +108,8 @@
     const r = fromSpec(g, catalog, selected);
     nodes = r.nodes;
     edges = r.edges;
-    return JSON.stringify(toSpec(r.nodes, r.edges));
+    extras = extrasOf(g);
+    return JSON.stringify(toSpec(r.nodes, r.edges, extras));
   }
 
   function onGraph(graph: GraphSpec, name: string | null, kind: 'hello' | 'remote') {
@@ -216,7 +234,9 @@
     dialog = null;
     if (!confirmDiscard()) return;
     try {
-      replaceGraph(await openFile(name), name);
+      const g = await openFile(name);
+      await refreshBlocks();
+      replaceGraph(g, name);
     } catch (e) {
       toast(`Couldn't open ${name}: ${(e as Error).message}`, 'error');
     }
@@ -242,6 +262,8 @@
       synced = json;
       session.setGraph(JSON.parse(json), name);
       toast(`Saved ${name}`);
+      // It may be a sub-graph that other graphs use as a block.
+      refreshBlocks();
     } catch (e) {
       toast(`Couldn't save ${name}: ${(e as Error).message}`, 'error');
     }
@@ -302,6 +324,33 @@
 
   function setParam(id: string, name: string, value: unknown) {
     nodes = nodes.map((n) => (n.id === id ? { ...n, data: { ...n.data, params: { ...n.data.params, [name]: value } } } : n));
+  }
+
+  function setVars(v: Record<string, number | string>) {
+    extras = { ...extras, vars: v };
+  }
+
+  /** Rename a variable and every `$reference` to it. */
+  function renameVar(from: string, to: string) {
+    const re = (v: unknown) => (typeof v === 'string' ? renameRef(v, from, to) : v);
+    const v = Object.fromEntries(Object.entries(extras.vars ?? {}).map(([k, x]) => [k === from ? to : k, re(x) as number | string]));
+    extras = { ...extras, vars: v };
+    nodes = nodes.map((n) =>
+      Object.values(n.data.params).some((x) => typeof x === 'string' && x.includes(`$${from}`))
+        ? { ...n, data: { ...n.data, params: Object.fromEntries(Object.entries(n.data.params).map(([k, x]) => [k, re(x)])) } }
+        : n,
+    );
+  }
+
+  function setExports(ex: Exports) {
+    extras = { ...extras, export: ex };
+  }
+
+  /** Double-clicking a hierarchical block opens its graph file. */
+  function ondblclick(e: MouseEvent) {
+    const id = (e.target as HTMLElement | null)?.closest('.svelte-flow__node')?.getAttribute('data-id');
+    const kind = nodes.find((n) => n.id === id)?.data.desc.kind;
+    if (kind?.startsWith(GRAPH_KIND)) open(kind.slice(GRAPH_KIND.length));
   }
 
   function rename(from: string, to: string): string | null {
@@ -379,9 +428,40 @@
   const onconnectend: OnConnectEnd = (_e, state) => {
     if (state.isValid !== false || !state.toHandle || !state.fromHandle) return;
     const [s, t] = state.fromHandle.type === 'source' ? [state.fromHandle, state.toHandle] : [state.toHandle, state.fromHandle];
-    const reason = rejectReason({ source: s.nodeId, sourceHandle: s.id ?? null, target: t.nodeId, targetHandle: t.id ?? null }, nodes);
-    if (reason) toast(reason, 'error');
+    const c: Connection = { source: s.nodeId, sourceHandle: s.id ?? null, target: t.nodeId, targetHandle: t.id ?? null };
+    const reason = rejectReason(c, nodes);
+    if (!reason) return;
+    // A type mismatch a converter block can bridge: offer to insert it.
+    const from = typeOf(nodes.find((n) => n.id === c.source), c.sourceHandle, 'outputs');
+    const to = typeOf(nodes.find((n) => n.id === c.target), c.targetHandle, 'inputs');
+    const convs = from && to && from !== to ? convertersFor(from, to, descriptors) : [];
+    toast(reason, 'error', convs.map((d) => ({ label: `Insert ${d.label}`, run: () => insertConverter(d, c) })));
   };
+
+  /** Put converter `desc` on the wire `c` wanted to be, as one undoable edit. */
+  function insertConverter(desc: BlockDescriptor, c: Connection) {
+    const src = nodes.find((n) => n.id === c.source);
+    const dst = nodes.find((n) => n.id === c.target);
+    if (!src || !dst) return toast('The blocks to connect are gone.', 'error');
+    commit();
+    const id = freshId(baseForKind(desc.kind), new Set(nodes.map((n) => n.id)));
+    const params = Object.fromEntries(desc.params.map((p) => [p.name, p.default]));
+    const position = { x: (src.position.x + dst.position.x) / 2, y: (src.position.y + dst.position.y) / 2 };
+    const node: BlockNode = { id, type: 'block', position, selected: true, data: { desc, params } };
+    const wires: Connection[] = [
+      { source: c.source, sourceHandle: c.sourceHandle, target: id, targetHandle: desc.inputs[0].name },
+      { source: id, sourceHandle: desc.outputs[0].name, target: c.target, targetHandle: c.targetHandle },
+    ];
+    const next = [...deselected(nodes), node];
+    const bad = wires.map((w) => rejectReason(w, next)).find((r) => r);
+    if (bad) return toast(bad, 'error');
+    nodes = next;
+    // The converter's wire replaces any wire already into the target input.
+    edges = [
+      ...deselected(edges).filter((e) => e.target !== c.target || e.targetHandle !== c.targetHandle),
+      ...wires.map(onbeforeconnect),
+    ];
+  }
 
   function ondragover(e: DragEvent) {
     if (e.dataTransfer?.types.includes('application/x-foxygnal-block')) {
@@ -478,7 +558,7 @@
     <TopBar {dirty} blocks={nodes.length} onrun={run} onstop={() => session.stop()} {actions} />
   </div>
   <Palette catalog={descriptors} {loadError} onadd={(d) => addBlock(d)} bind:search bind:input={searchInput} />
-  <main class="canvas" bind:this={canvas} {ondragover} {ondrop}>
+  <main class="canvas" bind:this={canvas} {ondragover} {ondrop} {ondblclick}>
     <SvelteFlow
       bind:nodes
       bind:edges
@@ -510,7 +590,16 @@
       </div>
     {/if}
   </main>
-  <Inspector node={selectedNode} edge={selectedEdge} onparam={setParam} onrename={rename} ondelete={deleteSelection} />
+  <Inspector
+    node={selectedNode}
+    edge={selectedEdge}
+    onparam={setParam}
+    onrename={rename}
+    ondelete={deleteSelection}
+    scope={vars.values}
+    settings={{ vars: extras.vars ?? {}, exports: extras.export ?? {}, nodes, resolved: vars, onvars: setVars, onrenamevar: renameVar, onexports: setExports }}
+    onopengraph={open}
+  />
   <Dock />
 </div>
 

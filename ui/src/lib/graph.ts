@@ -2,7 +2,7 @@
 // connection rules with human-readable rejection reasons.
 
 import type { Connection, Edge, Node } from '@xyflow/svelte';
-import { portType, type BlockDescriptor, type GraphSpec, type StreamType } from './api';
+import { GRAPH_KIND, portType, type BlockDescriptor, type GraphSpec, type StreamType } from './api';
 
 export type BlockData = { desc: BlockDescriptor; params: Record<string, unknown> };
 export type BlockNode = Node<BlockData, 'block'>;
@@ -23,6 +23,13 @@ function resolvePort(endpoint: string, nodes: Map<string, BlockNode>, dir: 'inpu
   const ports = nodes.get(block)?.data.desc[dir] ?? [];
   const byIndex = /^\d+$/.test(port) ? ports[Number(port)] : undefined;
   return { block, port: ports.some((p) => p.name === port) ? port : (byIndex?.name ?? port) };
+}
+
+/** The graph-level parts of a spec: variables and exports. */
+export type GraphExtras = Pick<GraphSpec, 'vars' | 'export'>;
+
+export function extrasOf(g: GraphSpec): GraphExtras {
+  return { vars: g.vars, export: g.export };
 }
 
 export function fromSpec(g: GraphSpec, catalog: Map<string, BlockDescriptor>, selected = new Set<string>()) {
@@ -46,8 +53,11 @@ export function fromSpec(g: GraphSpec, catalog: Map<string, BlockDescriptor>, se
   return { nodes, edges };
 }
 
-export function toSpec(nodes: BlockNode[], edges: Wire[]): GraphSpec {
+export function toSpec(nodes: BlockNode[], edges: Wire[], extras: GraphExtras = {}): GraphSpec {
+  const ex = extras.export;
   return {
+    ...(extras.vars && Object.keys(extras.vars).length ? { vars: extras.vars } : {}),
+    ...(ex && (ex.label || ex.help || ex.input?.length || ex.output?.length) ? { export: ex } : {}),
     block: nodes.map((n) => ({
       id: n.id,
       kind: n.data.desc.kind,
@@ -77,8 +87,25 @@ export function rejectReason(c: Connection, nodes: BlockNode[]): string | null {
   return null;
 }
 
+/**
+ * Converter blocks that turn `from` into `to`: category "Converters", one
+ * input and one output, both with fixed types. Offered when a connection is
+ * rejected for a type mismatch.
+ */
+export function convertersFor(from: StreamType, to: StreamType, catalog: Iterable<BlockDescriptor>): BlockDescriptor[] {
+  return [...catalog].filter(
+    (d) =>
+      d.category === 'Converters' &&
+      d.inputs.length === 1 &&
+      d.outputs.length === 1 &&
+      d.inputs[0].type === from &&
+      d.outputs[0].type === to,
+  );
+}
+
 /** Id stem for a new block of `kind`: `signal_source` → `signal`. */
-export const baseForKind = (kind: string) => kind.replace(/_(source|sink)$/, '');
+export const baseForKind = (kind: string) =>
+  kind.startsWith(GRAPH_KIND) ? kind.slice(GRAPH_KIND.length).replace(/\.fox\.toml$/, '') : kind.replace(/_(source|sink)$/, '');
 
 /** Id stem for a copy of block `id`: `gain_3` → `gain`. */
 export const baseForCopy = (id: string) => id.replace(/_\d+$/, '');

@@ -4,14 +4,15 @@
   import type { EdgeRef } from './api';
   import { graphView } from './graphview.svelte';
   import { instruments, type InstrumentKind, type SpectrumSettings } from './instruments.svelte';
-  import { fmtRate } from './plot';
+  import { fmtHz, fmtRate } from './plot';
   import { session } from './session.svelte';
   import WatchButtons from './instruments/WatchButtons.svelte';
 
   let { edge, onwatch }: { edge: EdgeRef; onwatch?: (id: number) => void } = $props();
 
   const type = $derived(graphView.outputType(edge.from));
-  const guessed = $derived(graphView.guessRate(edge.from));
+  const rate = $derived(graphView.rateOf(edge.from));
+  const center = $derived(graphView.centerOf(edge.from));
   const stat = $derived(session.stats?.edges.get(`${edge.from}->${edge.to}`));
   const cpuOf = (endpoint: string) => session.stats?.cpu.get(endpoint.slice(0, endpoint.lastIndexOf('.')));
 
@@ -23,7 +24,8 @@
 
 <div class="facts">
   <span class="muted">Type</span><span class="mono" style:color="var(--t-{type})">{type ?? '?'}</span>
-  <span class="muted">Rate</span><span class="mono" title={guessed ? `From ${guessed.block}'s sample_rate` : undefined}>{guessed ? fmtRate(guessed.rate) : '—'}</span>
+  <span class="muted">Rate</span><span class="mono" title={rate ? undefined : 'Nothing upstream sets a sample rate'}>{rate ? fmtRate(rate) : 'unknown'}</span>
+  {#if center !== null}<span class="muted">Centre</span><span class="mono">{fmtHz(center)}</span>{/if}
   {#if stat}
     <span class="muted">Flow</span><span class="mono">{fmtRate(stat.rate).replace('S/s', '/s')}</span>
     <span class="muted">Buffer</span><span class="mono" title="Items waiting for {edge.to}. Near 100% means that block is the bottleneck.">{Math.round(stat.fill * 100)}% full</span>

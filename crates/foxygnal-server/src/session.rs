@@ -4,18 +4,18 @@
 //! One session per server. Several tabs share it: edits are broadcast and the
 //! last write wins.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use foxygnal_core::graph::BlockSpec;
+use foxygnal_core::resolve::{Resolved, diff_params};
 use foxygnal_core::{
-    Error, Flowgraph, GraphSpec, Monitor, ParamKind, ParamSender, Registry, StopHandle,
+    EdgeMeta, Error, Flowgraph, GraphSpec, Monitor, ParamKind, ParamSender, Registry, StopHandle,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use crate::graphs::{EdgeMap, ProjectGraphs};
 use crate::probe::{self, Hub, ProbeConfig, Stats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -90,6 +90,7 @@ pub enum Event {
         name: Option<String>,
         version: u64,
         status: Status,
+        meta: Meta,
     },
     Graph {
         graph: GraphSpec,
@@ -101,6 +102,19 @@ pub enum Event {
     Status(Status),
     /// Per-block CPU and per-wire throughput of the running graph.
     Stats(Stats),
+    /// Stream metadata of every wire, worked out after each graph change.
+    Meta(Meta),
+}
+
+/// Sample rate and centre frequency on every wire. Computed by building and
+/// configuring the graph without running it.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Meta {
+    pub edges: Vec<EdgeMeta>,
+    /// Why metadata couldn't be worked out (the graph doesn't build yet, or a
+    /// block needs a rate nothing provides). `None` when all is well.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorInfo>,
 }
 
 /// Client → server messages.
@@ -139,8 +153,21 @@ struct Run {
     stop: StopHandle,
     params: ParamSender,
     monitor: Monitor,
-    /// The graph as the engine currently has it (live edits applied).
+    /// The resolved (flattened) graph as the engine currently has it, live
+    /// edits applied.
     applied: GraphSpec,
+    /// From the running graph's wires and blocks to the graph as drawn.
+    map: Arc<EdgeMap>,
+}
+
+/// A graph resolved, built and configured, ready to start.
+struct Built {
+    fg: Flowgraph,
+    /// The resolved graph.
+    graph: GraphSpec,
+    /// Edge metadata as drawn.
+    edges: Vec<EdgeMeta>,
+    map: EdgeMap,
 }
 
 struct Inner {
@@ -153,12 +180,15 @@ struct Inner {
     errors: Vec<ErrorInfo>,
     run: Option<Run>,
     next_run: u64,
+    meta: Meta,
 }
 
 pub struct Session {
     registry: Arc<Registry>,
     /// Relative `path` parameters resolve against this directory.
     base_dir: PathBuf,
+    /// Where `graph:NAME.fox.toml` blocks come from (the same directory).
+    graphs: ProjectGraphs,
     inner: Mutex<Inner>,
     events: broadcast::Sender<Arc<str>>,
     hub: Hub,
@@ -174,6 +204,9 @@ impl Session {
     pub fn new(registry: Arc<Registry>, base_dir: PathBuf) -> Arc<Self> {
         let session = Arc::new(Self {
             registry,
+            graphs: ProjectGraphs {
+                dir: base_dir.clone(),
+            },
             base_dir,
             inner: Mutex::new(Inner {
                 graph: GraphSpec::default(),
@@ -185,6 +218,7 @@ impl Session {
                 errors: Vec::new(),
                 run: None,
                 next_run: 0,
+                meta: Meta::default(),
             }),
             events: broadcast::channel(256).0,
             hub: Hub::default(),
@@ -198,9 +232,13 @@ impl Session {
         &self.hub
     }
 
-    /// The current run's id and monitor, if running.
-    pub fn monitor(&self) -> Option<(u64, Monitor)> {
-        self.lock().run.as_ref().map(|r| (r.id, r.monitor.clone()))
+    /// The current run's id and monitor, and how its wires map to the graph
+    /// as drawn, if running.
+    pub fn monitor(&self) -> Option<(u64, Monitor, Arc<EdgeMap>)> {
+        self.lock()
+            .run
+            .as_ref()
+            .map(|r| (r.id, r.monitor.clone(), r.map.clone()))
     }
 
     pub(crate) fn emit_stats(&self, stats: Stats) {
@@ -209,6 +247,11 @@ impl Session {
 
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// Graph files in the project directory (and the bundled library).
+    pub fn graphs(&self) -> &ProjectGraphs {
+        &self.graphs
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -250,6 +293,40 @@ impl Session {
             name: inner.name.clone(),
             version: inner.version,
             status: Self::status(inner),
+            meta: inner.meta.clone(),
+        }
+    }
+
+    /// Resolve variables and sub-graphs, build and configure `graph`.
+    /// Errors are pinned to the graph as drawn.
+    fn build(&self, graph: &GraphSpec) -> Result<Built, ErrorInfo> {
+        let mut r: Resolved = foxygnal_core::resolve(graph, &self.registry, &self.graphs)
+            .map_err(|e| EdgeMap::default().error(&e))?;
+        r.graph = self.resolve_paths(&r.graph);
+        let mut map = EdgeMap::new(&r);
+        let mut fg =
+            Flowgraph::from_resolved(&r.graph, &self.registry).map_err(|e| map.error(&e))?;
+        let edges = fg.configure().map_err(|e| map.error(&e))?;
+        map.add_meta(&r, &edges);
+        Ok(Built {
+            fg,
+            edges: map.meta(edges),
+            graph: r.graph,
+            map,
+        })
+    }
+
+    /// Stream metadata of a build.
+    fn meta_of(built: &Result<Built, ErrorInfo>) -> Meta {
+        match built {
+            Ok(b) => Meta {
+                edges: b.edges.clone(),
+                error: None,
+            },
+            Err(e) => Meta {
+                edges: Vec::new(),
+                error: Some(e.clone()),
+            },
         }
     }
 
@@ -279,15 +356,22 @@ impl Session {
     /// Replace the graph. While running, changed live parameters apply
     /// immediately; any other change marks the run as stale.
     pub fn set_graph(&self, client: u64, graph: GraphSpec, name: Option<String>) {
+        let built = self.build(&graph);
         let mut inner = self.lock();
         let stale_before = inner.stale;
-        let all_live = match &mut inner.run {
-            Some(run) => apply_live(&self.registry, run, &graph),
-            None => true,
+        let all_live = match (&mut inner.run, &built) {
+            (Some(run), Ok(b)) => apply_live(&self.registry, run, &b.graph),
+            (Some(_), Err(_)) => false,
+            (None, _) => true,
         };
         if !all_live {
             inner.stale = true;
         }
+        let meta = Self::meta_of(&built);
+        let meta_changed = meta.edges != inner.meta.edges
+            || meta.error.as_ref().map(|e| &e.message)
+                != inner.meta.error.as_ref().map(|e| &e.message);
+        inner.meta = meta;
         inner.graph = graph;
         inner.name = name;
         inner.version += 1;
@@ -307,6 +391,9 @@ impl Session {
         if inner.stale != stale_before || inner.run.is_none() {
             self.emit(&Event::Status(Self::status(&inner)));
         }
+        if meta_changed {
+            self.emit(&Event::Meta(inner.meta.clone()));
+        }
     }
 
     pub fn run(self: &Arc<Self>) {
@@ -316,16 +403,20 @@ impl Session {
         }
         inner.errors.clear();
         inner.stale = false;
-        let graph = inner.graph.clone();
-        let started = Flowgraph::from_spec(&self.resolve_paths(&graph), &self.registry)
-            .and_then(|fg| fg.start());
+        let started = self.build(&inner.graph).and_then(|b| {
+            let map = Arc::new(b.map);
+            match b.fg.start() {
+                Ok(running) => Ok((running, b.graph, map)),
+                Err(e) => Err(map.error(&e)),
+            }
+        });
         match started {
             Err(e) => {
                 inner.state = RunState::Error;
                 inner.started_at = None;
-                inner.errors = vec![ErrorInfo::from(&e)];
+                inner.errors = vec![e];
             }
-            Ok(running) => {
+            Ok((running, graph, map)) => {
                 let id = inner.next_run;
                 inner.next_run += 1;
                 inner.run = Some(Run {
@@ -334,6 +425,7 @@ impl Session {
                     params: running.param_sender(),
                     monitor: running.monitor(),
                     applied: graph,
+                    map,
                 });
                 inner.state = RunState::Running;
                 inner.started_at = Some(now_ms());
@@ -379,14 +471,14 @@ impl Session {
         if inner.run.as_ref().is_none_or(|r| r.id != id) {
             return;
         }
-        inner.run = None;
+        let Some(run) = inner.run.take() else { return };
         inner.stale = false;
         inner.started_at = None;
         match result {
             Ok(()) => inner.state = RunState::Stopped,
             Err(e) => {
                 inner.state = RunState::Error;
-                inner.errors = vec![ErrorInfo::from(&e)];
+                inner.errors = vec![run.map.error(&e)];
             }
         }
         self.emit(&Event::Status(Self::status(&inner)));
@@ -407,55 +499,23 @@ impl Session {
     }
 }
 
-/// Block ids with kinds, and connections: what a running graph can't change.
-type Topology<'a> = (BTreeSet<(&'a str, &'a str)>, BTreeSet<(&'a str, &'a str)>);
-
-fn topology(g: &GraphSpec) -> Topology<'_> {
-    (
-        g.blocks
-            .iter()
-            .map(|b| (b.id.as_str(), b.kind.as_str()))
-            .collect(),
-        g.connections
-            .iter()
-            .map(|c| (c.from.as_str(), c.to.as_str()))
-            .collect(),
-    )
-}
-
-/// Push changed live params of `new` into the running graph. Returns false if
-/// anything else changed (a restart is needed for it to take effect).
+/// Push changed live params of `new` (resolved) into the running graph.
+/// Returns false if anything else changed (a restart is needed for it to take
+/// effect). Comparing resolved graphs means a changed variable reaches every
+/// param that uses it.
 fn apply_live(registry: &Registry, run: &mut Run, new: &GraphSpec) -> bool {
-    if topology(&run.applied) != topology(new) {
+    let Some(changes) = diff_params(registry, &run.applied, new) else {
         return false;
-    }
+    };
     let mut all_applied = true;
-    for nb in &new.blocks {
-        let Some(ob) = run.applied.blocks.iter_mut().find(|b| b.id == nb.id) else {
-            return false;
-        };
-        let Some(desc) = registry.get(&nb.kind) else {
-            return false;
-        };
-        for spec in &desc.params {
-            let old = param_or_default(ob, spec.name, &spec.default);
-            let new = param_or_default(nb, spec.name, &spec.default);
-            if old == new {
-                continue;
+    for c in changes {
+        if c.live && run.params.send(&c.block, c.param, c.value.clone()).is_ok() {
+            if let Some(b) = run.applied.blocks.iter_mut().find(|b| b.id == c.block) {
+                b.params.insert(c.param.to_owned(), c.value);
             }
-            let ok = spec.live
-                && spec.check(&new).is_ok()
-                && run.params.send(&nb.id, spec.name, new.clone()).is_ok();
-            if ok {
-                ob.params.insert(spec.name.to_owned(), new);
-            } else {
-                all_applied = false;
-            }
+        } else {
+            all_applied = false;
         }
     }
     all_applied
-}
-
-fn param_or_default(b: &BlockSpec, name: &str, default: &serde_json::Value) -> serde_json::Value {
-    b.params.get(name).unwrap_or(default).clone()
 }

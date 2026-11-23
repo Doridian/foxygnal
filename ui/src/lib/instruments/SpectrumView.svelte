@@ -8,12 +8,15 @@
     settings,
     frame,
     rate,
+    center = null,
     colour,
     onwidth,
   }: {
     settings: SpectrumSettings;
     frame: SpectrumFrame | null;
     rate: number | null;
+    /** RF frequency of 0 Hz, for absolute frequency labels. */
+    center?: number | null;
     colour: string;
     onwidth: (px: number) => void;
   } = $props();
@@ -70,7 +73,8 @@
   /** Frequency at fraction `fx` of the width (Hz, or cycles/sample without a rate). */
   function freqAt(fx: number): number {
     const fs = rate ?? 1;
-    return frame && !frame.complex ? fx * (fs / 2) : (fx - 0.5) * fs;
+    const f = frame && !frame.complex ? fx * (fs / 2) : (fx - 0.5) * fs;
+    return rate && center !== null ? f + center : f;
   }
 
   const fmtF = (f: number) => (rate ? fmtHz(f) : `${fmtNum(f)} cyc/smp`);

@@ -22,8 +22,9 @@
 
   const type = $derived(graphView.outputType(inst.edge.from));
   const colour = $derived(typeColour(type));
-  const guessed = $derived(graphView.guessRate(inst.edge.from));
-  const rate = $derived(inst.rate ?? guessed?.rate ?? null);
+  const streamRate = $derived(graphView.rateOf(inst.edge.from));
+  const rate = $derived(inst.rate ?? streamRate);
+  const center = $derived(graphView.centerOf(inst.edge.from));
   const running = $derived(session.status.state === 'running');
   const onGraph = $derived(graphView.hasEdge(inst.edge));
   const error = $derived(session.probeErrors[inst.id]);
@@ -179,7 +180,7 @@
         onchange={(p) => change({ settings: p })}
       />
     {:else if inst.kind === 'spectrum'}
-      <SpectrumView settings={inst.settings} frame={frame?.kind === 'spectrum' ? frame : null} {rate} {colour} {onwidth} />
+      <SpectrumView settings={inst.settings} frame={frame?.kind === 'spectrum' ? frame : null} {rate} {center} {colour} {onwidth} />
     {:else if inst.kind === 'constellation'}
       <ConstellationView settings={inst.settings} frame={frame?.kind === 'constellation' ? frame : null} {colour} />
     {:else}
@@ -191,7 +192,7 @@
   </div>
   {#if settingsOpen}
     <div class="popover" role="dialog" aria-label="{title(inst)} settings">
-      <InstrumentSettings {inst} {type} {rate} {guessed} {frame} onchange={change} />
+      <InstrumentSettings {inst} {type} {rate} {streamRate} {frame} onchange={change} />
     </div>
   {/if}
 </section>

@@ -57,3 +57,20 @@ pub fn float(
         live: false,
     }
 }
+
+/// A sample rate that may be left at 0 to take the rate from upstream (or to
+/// say "unknown" on a source).
+pub fn optional_rate(help: &'static str) -> ParamSpec {
+    ParamSpec {
+        name: "sample_rate",
+        label: "Sample rate",
+        kind: ParamKind::Float {
+            min: Some(0.0),
+            max: None,
+            unit: Some("S/s"),
+        },
+        default: json!(0.0),
+        help,
+        live: false,
+    }
+}

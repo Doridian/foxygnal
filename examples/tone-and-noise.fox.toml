@@ -1,0 +1,42 @@
+# A sub-graph: a complex tone plus noise, used as a block by hier-tones.fox.toml.
+# Its [vars] are the block's parameters; [export] says which ports it has.
+
+[vars]
+rate = 48000.0
+freq = 1000.0
+amplitude = 0.5
+noise = 0.03
+
+[export]
+label = "Tone + noise"
+help = "A complex sine tone plus Gaussian noise (a sub-graph: double-click to open it)."
+
+[[export.output]]
+name = "out"
+from = "sum.out"
+
+[[block]]
+id = "tone"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = "$freq", amplitude = "$amplitude", sample_rate = "$rate" }
+ui = { x = 40, y = 40 }
+
+[[block]]
+id = "noise"
+kind = "noise_source"
+params = { type = "c32", amplitude = "$noise" }
+ui = { x = 40, y = 200 }
+
+[[block]]
+id = "sum"
+kind = "add"
+params = { type = "c32" }
+ui = { x = 300, y = 120 }
+
+[[connect]]
+from = "tone.out"
+to = "sum.a"
+
+[[connect]]
+from = "noise.out"
+to = "sum.b"

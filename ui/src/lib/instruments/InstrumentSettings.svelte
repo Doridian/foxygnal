@@ -10,15 +10,16 @@
     inst,
     type,
     rate,
-    guessed,
+    streamRate,
     frame,
     onchange,
   }: {
     inst: Instrument;
     type: StreamType | null;
-    /** The rate in use (set by hand or guessed). */
+    /** The rate in use (set by hand, else the stream's). */
     rate: number | null;
-    guessed: { rate: number; block: string } | null;
+    /** The stream's own rate, from the engine. */
+    streamRate: number | null;
     frame: Frame | null;
     onchange: (patch: { rate?: number | null; settings?: Record<string, unknown> }) => void;
   } = $props();
@@ -192,7 +193,7 @@
         unit="S/s"
         allowEmpty
         value={inst.rate}
-        placeholder={guessed ? `${fmtRate(guessed.rate)} (from ${guessed.block})` : 'unknown: set it for time and Hz axes'}
+        placeholder={streamRate ? `${fmtRate(streamRate)} (from the graph)` : 'unknown: set it for time and Hz axes'}
         onchange={(v) => onchange({ rate: v && v > 0 ? v : null })}
       />
       <p class="hint">{inst.rate ? 'Set by hand. Clear it to use the graph’s rate.' : rate ? 'Taken from the graph.' : 'Axes show samples until a rate is known.'}</p>

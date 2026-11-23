@@ -1,5 +1,5 @@
-//! REST endpoints: graph get/put (JSON and TOML), bundled examples, and the
-//! server-side project directory.
+//! REST endpoints: the block catalog and filter previews, graph get/put
+//! (JSON and TOML), bundled examples, and the server-side project directory.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,8 +9,8 @@ use axum::Json;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use foxygnal_core::{BlockDescriptor, GraphSpec};
-use serde::Serialize;
+use foxygnal_core::{FrequencyResponse, GraphSpec, Params};
+use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
@@ -42,8 +42,76 @@ pub async fn health() -> Json<Health> {
     })
 }
 
-pub async fn blocks(State(s): State<Arc<AppState>>) -> Json<Vec<BlockDescriptor>> {
-    Json(s.session.registry().descriptors().cloned().collect())
+/// Block kinds for the palette: built in (with their `response` flag), and
+/// graph files with exports.
+pub async fn blocks(
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let session = s.session.clone();
+    let all = tokio::task::spawn_blocking(move || {
+        let reg = session.registry();
+        let to_json = |v: Result<serde_json::Value, _>| v.expect("descriptors serialize");
+        let mut all: Vec<serde_json::Value> = reg
+            .catalog()
+            .map(|e| to_json(serde_json::to_value(e)))
+            .collect();
+        all.extend(
+            session
+                .graphs()
+                .descriptors(reg)
+                .into_iter()
+                .map(|g| to_json(serde_json::to_value(g))),
+        );
+        all
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(all))
+}
+
+#[derive(Deserialize)]
+pub struct ResponseRequest {
+    #[serde(default)]
+    params: Params,
+    /// The block's input sample rate.
+    sample_rate: f64,
+}
+
+/// The frequency response a block (whose descriptor says `response: true`)
+/// would have with these parameters at this input rate, for the inspector's
+/// filter preview.
+pub async fn block_response(
+    State(s): State<Arc<AppState>>,
+    UrlPath(kind): UrlPath<String>,
+    Json(req): Json<ResponseRequest>,
+) -> Result<Json<FrequencyResponse>, ApiError> {
+    if !(req.sample_rate > 0.0 && req.sample_rate.is_finite()) {
+        return Err(bad_request("sample_rate must be a positive number"));
+    }
+    if s.session.registry().get(&kind).is_none() {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("unknown block kind `{kind}`"),
+        ));
+    }
+    // Long filters take a while to evaluate: keep it off the async workers.
+    let session = s.session.clone();
+    let kind2 = kind.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        session
+            .registry()
+            .response(&kind2, &req.params, req.sample_rate)
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match result {
+        Ok(Some(r)) => Ok(Json(r)),
+        Ok(None) => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("`{kind}` has no frequency response"),
+        )),
+        Err(e) => Err(bad_request(e.detail())),
+    }
 }
 
 pub async fn get_graph(State(s): State<Arc<AppState>>) -> Json<GraphSpec> {
@@ -89,6 +157,18 @@ const EXAMPLES: &[Example] = &[
         title: "Two tones + noise → instruments",
         description: "Runs until stopped. Click a wire to watch it on a scope, spectrum, waterfall or constellation.",
         toml: include_str!("../../../examples/two-tones.fox.toml"),
+    },
+    Example {
+        name: "fm-receiver",
+        title: "FM broadcast receiver",
+        description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",
+        toml: include_str!("../../../examples/fm-receiver.fox.toml"),
+    },
+    Example {
+        name: "hier-tones",
+        title: "Variables + sub-graphs",
+        description: "Two copies of a tone + noise sub-graph, tuned from graph variables. Change `base` while it runs.",
+        toml: include_str!("../../../examples/hier-tones.fox.toml"),
     },
     Example {
         name: "noisy-tone",
@@ -191,9 +271,13 @@ pub async fn get_file(
     UrlPath(name): UrlPath<String>,
 ) -> Result<Json<GraphSpec>, ApiError> {
     let path = project_file(&s.project_dir, &name)?;
-    let text = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| ApiError(StatusCode::NOT_FOUND, format!("{name}: {e}")))?;
+    let text = match tokio::fs::read_to_string(&path).await {
+        Ok(t) => t,
+        // Bundled sub-graphs open like project files (and save into it).
+        Err(e) => crate::graphs::library(&name)
+            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("{name}: {e}")))?
+            .to_owned(),
+    };
     GraphSpec::from_toml(&text)
         .map(Json)
         .map_err(|e| bad_request(format!("{name}: {e}")))
@@ -237,6 +321,9 @@ mod tests {
     fn examples_parse() {
         for e in EXAMPLES {
             GraphSpec::from_toml(e.toml).unwrap_or_else(|err| panic!("{}: {err}", e.name));
+        }
+        for (name, toml) in crate::graphs::LIBRARY {
+            GraphSpec::from_toml(toml).unwrap_or_else(|err| panic!("{name}: {err}"));
         }
     }
 }
