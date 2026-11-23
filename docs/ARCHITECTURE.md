@@ -30,6 +30,7 @@ frames of a few KB each.
 | `foxygnal-plugin` | block plugins: WebAssembly components run with wasmtime (see "Plugins") | core |
 | `foxygnal-plugin-sdk` | guest side: write plugins in Rust (built for `wasm32-unknown-unknown`) | — |
 | `foxygnal-mpeg2` | MPEG-1/2 video decoder, built for `wasm32-unknown-unknown` for the browser's Video instrument (see "Digital video") | — |
+| `foxygnal-mp2` | MPEG audio Layer I/II (MP2) decoder, built for `wasm32-unknown-unknown` for the same instrument | — |
 | `foxygnal` | CLI | all (plugin: cargo feature `plugins`, default on) |
 
 `foxygnal-sdr` holds the device trait, discovery and the drivers. Drivers that need a C library
@@ -526,8 +527,11 @@ next to Messages and Image. Everything but drawing happens in a worker
   or an I slice with SPS and PPS for streams that use recovery points) and HEVC (`hvc1.*`,
   where the browser supports it, checked with `isConfigSupported`); MPEG-1 and MPEG-2 video
   go to **foxygnal's own decoder compiled to WebAssembly** (below), whose I420 pictures become
-  `VideoFrame`s too. AAC (ADTS) sound goes to a WebCodecs `AudioDecoder` and then to browser
-  audio, when the user switches sound on.
+  `VideoFrame`s too. Sound plays when the user switches it on: AAC (ADTS) through a WebCodecs
+  `AudioDecoder`, MPEG audio Layer I and II (MP1/MP2, stream types 0x03 and 0x04) through
+  foxygnal's own decoder in WebAssembly (below), both to browser audio. The track is the
+  program's first one in PMT order that can be decoded (there is no track choice yet); the
+  overlay counts decoded sound frames and errors.
 - Timing: the stream arrives in real time, so the program clock maps to arrival time. The
   worker keeps the lower envelope of (arrival − PCR), which network jitter can only raise, and a
   picture is due at its PTS on that clock plus a jitter buffer (300 ms, growing when pictures
@@ -563,16 +567,41 @@ MPEG-1 video) with no dependencies:
   measured by the instrument in its worker) about 3 ms per 720×576 picture at 5 Mbit/s and
   13 ms per 1080i picture at 15 Mbit/s, so HD plays in real time on one core.
 
-`scripts/build-mpeg2-wasm.sh` builds it for `wasm32-unknown-unknown` (paths remapped and
-symbols stripped, so the build is reproducible) and copies the module to
-`ui/src/lib/video/mpeg2.wasm` (about 90 KB), which is committed like the plugin test
-fixtures: building the UI needs no Rust toolchain and the workspace build no wasm target. Run
-it again after changing the crate. The module imports nothing and exports a small C ABI
-(`mp2v_*`, see `ui/src/lib/video/mpeg2.ts`).
+**MP2 in the browser.** WebCodecs has no decoder for MPEG audio Layer II either, the sound of
+most DVB services. `crates/foxygnal-mp2` is a small one, `no_std` and without dependencies:
 
-Not decoded in the browser: MPEG-1 Layer II sound (MP2, the sound of most DVB services:
-WebCodecs has no decoder for it), AC-3 / E-AC-3, AAC in LATM (DVB-T2), and subtitles and
-teletext. The instrument shows these streams and says so.
+- Layers I and II at every MPEG-1 (32, 44.1, 48 kHz), MPEG-2 (16, 22.05, 24 kHz) and
+  MPEG-2.5 (8, 11.025, 12 kHz) rate and bit rate; mono, stereo, joint (intensity) stereo and
+  dual channel (played as left and right); the CRC is checked when a frame has one, and a
+  frame that fails it plays as silence and is counted. Not decoded: Layer III (the overlay
+  says so) and free format, and MPEG-2's multichannel extension (its stereo base plays).
+- The synthesis filter bank is the standard's: a 64×32 matrix and the 512-tap window, in
+  `f32`, about 0.05 ms per 48 kHz stereo frame (24 ms of sound) natively. Tables that need
+  `cos` are computed when a decoder is made, so `core` is enough.
+- `Stream` takes elementary stream bytes in any pieces, finds the frame grid (a frame counts
+  only once the next one follows where its header says, until sync is found), and gives each
+  frame the PTS of the PES it starts in, or the previous frame's plus its length. It is one
+  fixed-size struct (about 50 KB) and allocates nothing.
+- Tests (`cargo test -p foxygnal-mp2`) compare with ffmpeg's float decoder: tones ffmpeg
+  encodes (every rate it can encode, mono and stereo, 8 to 384 kbit/s) at 119–124 dB SNR, and
+  252 random streams the test writes itself, which cover what ffmpeg's encoder never writes
+  (joint stereo at every bound, dual channel, Layer I, CRCs, MPEG-2.5, every bit rate), at
+  108 dB or better (the largest difference 0.3 of a 16-bit step; streams quieter than
+  −54 dBFS are held to their absolute error instead). Small streams in
+  `tests/data`, with ffmpeg's decoding beside them, keep the comparison going without ffmpeg.
+
+`scripts/build-mpeg2-wasm.sh` builds both crates for `wasm32-unknown-unknown` (paths
+remapped and symbols stripped, so the build is reproducible) and copies the modules to
+`ui/src/lib/video/mpeg2.wasm` (about 90 KB) and `ui/src/lib/video/mp2.wasm` (about 34 KB,
+15 KB compressed), which are committed like the plugin test fixtures: building the UI needs
+no Rust toolchain and the workspace build no wasm target. Run it again after changing a
+crate. The modules import nothing and export small C ABIs (`mp2v_*` and `mp2a_*`, see
+`ui/src/lib/video/mpeg2.ts` and `mp2.ts`). The worker loads the sound decoder only when sound
+is switched on for an MPEG audio stream. `npm test` runs `mp2.ts` with the committed module
+under node, on the crate's fixtures and on a TS with two MP2 tracks made by ffmpeg.
+
+Not decoded in the browser: MPEG audio Layer III, AC-3 / E-AC-3, AAC in LATM (DVB-T2), and
+subtitles and teletext. The instrument shows these streams and says so.
 
 ## DVB-S and the DVB FEC chain (M14)
 

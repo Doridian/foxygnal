@@ -902,6 +902,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxygnal-mp2"
+version = "0.1.0"
+
+[[package]]
 name = "foxygnal-mpeg2"
 version = "0.1.0"
 

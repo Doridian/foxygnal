@@ -240,6 +240,7 @@
             {codecName(a.codec)}{a.lang ? ` (${a.lang})` : ''}
             {#if a.rate}· {a.rate / 1000} kHz{a.channels ? ` · ${a.channels} ch` : ''}{/if}
             · {fmtRate(a.bitrate)}
+            {#if a.decoder}<br />{a.decoder === 'wasm' ? 'WebAssembly' : a.decoder} · {a.frames} frames{a.errors ? ` · ${a.errors} errors` : ''}{/if}
             {#if a.note}<br /><span class="warn">{a.note}</span>{/if}
           </dd>
         {/if}
