@@ -174,7 +174,8 @@ export type ProbeConfig =
   | { kind: 'constellation'; points: number }
   | { kind: 'meter' }
   | { kind: 'audio' }
-  | { kind: 'text' };
+  | { kind: 'text' }
+  | { kind: 'image' };
 
 /** A recording of a wire in progress, or just ended (`record` event). */
 export interface RecordStatus {
@@ -322,7 +323,11 @@ export const deleteRecording = (name: string) => call<string>('DELETE', `/api/re
 export const fetchResponse = (kind: string, params: Record<string, unknown>, sample_rate: number) =>
   call<FrequencyResponse>('POST', `/api/blocks/${encodeURIComponent(kind)}/response`, json({ params, sample_rate }), 'application/json');
 
-/** A port's concrete type: fixed by the descriptor, else taken from the `type` param. */
-export function portType(p: PortSpec, params: Record<string, unknown>): StreamType {
-  return p.type ?? ((params.type as StreamType) || 'c32');
+/**
+ * A port's concrete type: fixed by the descriptor, else taken from the `type` param, else that
+ * param's default (a graph file may leave it out).
+ */
+export function portType(p: PortSpec, params: Record<string, unknown>, desc?: BlockDescriptor): StreamType {
+  const fallback = desc?.params.find((q) => q.name === 'type')?.default as StreamType | undefined;
+  return p.type ?? ((params.type as StreamType) || fallback || 'c32');
 }

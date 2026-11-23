@@ -250,6 +250,18 @@ const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/aprs.fox.toml"),
     },
     Example {
+        name: "sstv",
+        title: "SSTV pictures",
+        description: "An SDR at 145.8 MHz (the ISS during ARISS events) → FM demod → SSTV decoder (Robot, Martin, Scottie, PD) → the Image instrument and PNG files. Needs a real receiver.",
+        toml: include_str!("../../../examples/sstv.fox.toml"),
+    },
+    Example {
+        name: "sstv-wav",
+        title: "SSTV from a recording",
+        description: "A WAV file of SSTV audio → SSTV decoder → the Image instrument and PNG files. Choose the file in `wav`.",
+        toml: include_str!("../../../examples/sstv-wav.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",

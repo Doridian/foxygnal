@@ -12,6 +12,7 @@
 
 mod audio;
 mod constellation;
+mod image;
 mod meter;
 mod scope;
 mod source;
@@ -46,6 +47,9 @@ pub enum ProbeConfig {
     Audio {},
     /// The lines of a `u8` wire carrying UTF-8 text (decoded messages).
     Text {},
+    /// The picture rows of a `u8` wire carrying raster records (decoded
+    /// pictures).
+    Image {},
 }
 
 impl ProbeConfig {
@@ -57,6 +61,7 @@ impl ProbeConfig {
             Self::Meter {} => 4,
             Self::Audio {} => 5,
             Self::Text {} => 6,
+            Self::Image {} => 7,
         }
     }
 
@@ -81,6 +86,13 @@ impl ProbeConfig {
                 ));
             }
             Self::Text {} => Box::new(text::Text::new()),
+            Self::Image {} if ty != StreamType::U8 => {
+                return Err(format!(
+                    "Pictures need a picture (u8) wire, such as an SSTV decoder's `image` \
+                     output; this one carries {ty}."
+                ));
+            }
+            Self::Image {} => Box::new(image::Image::new()),
         })
     }
 }

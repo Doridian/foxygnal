@@ -186,10 +186,14 @@
     {@const s = inst.settings}
     <NumberInput label="Lines kept" value={s.maxLines} onchange={(v) => v && v >= 10 && onchange({ settings: { maxLines: Math.round(v) } })} />
     <p class="hint">Text lines from the wire, such as a decoder's messages. Lines before the instrument opened are shown if the wire's buffer still holds them.</p>
+  {:else if inst.kind === 'image'}
+    {@const s = inst.settings}
+    <NumberInput label="Pictures kept" value={s.keep} onchange={(v) => v && v >= 1 && onchange({ settings: { keep: Math.round(v) } })} />
+    <p class="hint">Pictures a decoder draws on this wire (an SSTV decoder's <code>image</code> output), row by row. Rows sent before the instrument opened are shown if the wire's buffer still holds them. To keep every picture without a browser, add an Image Sink.</p>
   {:else}
     <p class="hint">RMS, peak and DC over everything since the last update, in dB relative to full scale (±1).</p>
   {/if}
-  {#if inst.kind !== 'meter' && inst.kind !== 'text'}
+  {#if inst.kind !== 'meter' && inst.kind !== 'text' && inst.kind !== 'image'}
     <fieldset>
       <legend>Sample rate</legend>
       <NumberInput

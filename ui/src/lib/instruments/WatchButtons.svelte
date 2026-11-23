@@ -15,11 +15,12 @@
   <button type="button" onclick={() => onpick('meter')}>Level meter</button>
   <button type="button" onclick={() => onpick('constellation')} disabled={!complex}>Constellation</button>
   <button type="button" onclick={() => onpick('text')} disabled={!bytes} title="Text lines, e.g. a decoder's messages">Messages</button>
+  <button type="button" onclick={() => onpick('image')} disabled={!bytes} title="Pictures, e.g. an SSTV decoder's image output">Image</button>
 </div>
 {#if bytes}
-  <p class="note">Messages shows the text a decoder writes on this wire.</p>
+  <p class="note">Messages shows the text a decoder writes on this wire; Image the pictures (an SSTV decoder's <code>image</code> output).</p>
 {:else if !complex}
-  <p class="note">Constellation needs a complex (c32) wire; Messages a text (u8) wire.</p>
+  <p class="note">Constellation needs a complex (c32) wire; Messages and Image a u8 wire from a decoder.</p>
 {/if}
 
 <style>

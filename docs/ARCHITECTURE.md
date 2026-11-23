@@ -384,6 +384,9 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
   - **Meter**: RMS, peak and DC over everything since the last frame.
   - **Messages** (`text` probe, u8 wires only): every complete text line since the last
     frame, starting with what the ring still holds when it opens. See "Decoded messages".
+  - **Image** (`image` probe, frame kind 7, u8 wires only): every whole picture row since the
+    last frame, as the raster records themselves (each padded to 4 bytes). See "Decoded
+    pictures".
 - **Stats** are broadcast twice a second while running: items/s and buffer fill per wire,
   and the share of a core each block spends in `work`. The UI shows them in the wire popover
   and as the *Load* overlay (heat colours on blocks and wires).
@@ -420,6 +423,56 @@ once it has gone out, so a stalled consumer back-pressures the decoder and forma
 not allocate on the hot path. If the input ends while a message waits for room downstream,
 the decoder waits (`WorkStatus::Wait`) instead of finishing, unless every reader has left
 (`OutputPort::abandoned`).
+
+## Decoded pictures (M9)
+
+Pictures (SSTV today; weather fax, satellite images and the slideshows of digital radio
+later) follow the same idea as decoded messages: **a decoded picture is a sequence of row
+records on a `u8` output** (`core::raster`), so nothing in the runtime, the editor or the file
+format knows about pictures.
+
+- A record is a 16-byte header, magic `FXIM`, picture number (`u32`, counting the
+  decoder's pictures from 1), row, height (0 = not known yet), width (up to 8192), channels (1
+  grey, 3 RGB) and flags (bit 0: the picture's last row), followed by the row's pixels, 8 bits
+  per channel. Little-endian. A reader that joins mid-stream or loses bytes finds the next
+  record by its magic and a header that makes sense (`raster::next`).
+- One row at a time keeps a decoder's queue small (an 800-pixel RGB row is 2.4 kB) and lets
+  pictures that take minutes to arrive be drawn as they come in. A decoder queues rows with
+  `image::push_row` on a `MsgQueue`, like text, and back-pressure works the same way.
+- The **Image** instrument draws rows as they arrive, keeps the last few pictures in a strip,
+  and saves the shown one as PNG. A picture starts when the picture number (or width) changes
+  and ends at its last row, or when the run stops. Like every probe it reads a lossy tap:
+  rows arrive at a few kB/s from a live signal, far below what a tap delivers, but decoding a
+  file as fast as the CPU allows can outrun it, so the "from a recording" template plays the
+  file through a throttle.
+- `image_sink` (Sinks) writes one PNG per picture (`<prefix>-<UTC time>-<n>.png`) when the
+  last row arrives, the next picture starts or the run ends; rows that never came are black.
+  It runs on a thread of its own, since it writes files.
+- A decoder that knows when a picture is cut off (an SSTV transmission that stops) sends its
+  last row again with the last-row flag, so sinks and the instrument close the picture.
+
+Video (M14) will probably need a frame-level probe that drops whole frames when behind; see
+the open questions in the roadmap.
+
+### SSTV decoder
+
+`sstv_decoder` (`blocks/src/image/sstv.rs`) takes audio and has two outputs, `image` (rows)
+and `out` (text: `event=start/end/lost/cut`, the mode, and the sender's clock error in ppm).
+
+- The audio is mixed down by 1900 Hz, low-passed (1.1 kHz) and decimated to about 10 kS/s; the
+  instantaneous frequency is the phase step between samples. It goes into a ring of running
+  sums, so the mean frequency over any recent span costs two lookups. VIS detection, sync
+  search and pixels are all means over spans.
+- VIS: matched at every sample (leader, start bit, eight bits, stop bit), best match in a
+  15 ms window, then the leader-to-start-bit edge pins down the start time.
+- Line clock: each line's sync pulse is searched for within ±max(3 ms, 1 % of a line) of
+  where the clock predicts it, and a least-squares line through the pulses found gives the
+  start of every line and the clock ratio (bounded to ±2 %). With slant correction off the
+  fit still steers the search, so a picture isn't dropped as lost; only pixel timing ignores
+  it. Ten lines in a row without a pulse end the picture.
+- Pixels are the mean frequency over each pixel's time. A scan that runs into a sync or
+  separator tone holds its last clean pixel over the final 0.35 ms, which band-limited audio
+  smears.
 
 ## Recording and playback (M6)
 

@@ -1,0 +1,77 @@
+# SSTV (slow-scan television) pictures from the air: Robot, Martin, Scottie,
+# Wraase and PD modes, picked from the VIS header at the start of each picture.
+#
+# Set up for the ISS, which sends SSTV on 145.800 MHz FM during ARISS events
+# (announced in advance; a pass lasts about ten minutes, a picture one or two).
+# Ham SSTV on the HF bands (14.230 MHz USB and others) works the same way with
+# an HF-capable receiver and `ssb_demod` instead of `fm_demod`.
+#
+# Click the wire out of `sstv.image` and choose Image to watch the picture
+# being drawn; `pictures` saves every one as a PNG in `sstv-pictures/`, and
+# `log` lists them:
+#
+#   t=12.345 event=start mode="PD 120" vis=95 width=640 height=496
+#
+#   SDR 2.4 MS/s ──xlate ÷50──▶ 48 kS/s ──FM demod──▶ SSTV ──image──▶ PNG files
+#                                                          └─text───▶ log
+
+[vars]
+freq = "145.8M"
+offset = "250k"
+samp_rate = "2.4M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$freq - $offset", sample_rate = "$samp_rate", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "channel"
+kind = "freq_xlating_fir"
+params = { offset = "$offset", cutoff = 8000.0, transition = 5000.0, decimation = 50, window = "hamming" }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "fm_demod"
+params = { deviation = 5000.0, deemphasis = "off" }
+ui = { x = 700, y = 120 }
+
+[[block]]
+id = "sstv"
+kind = "sstv_decoder"
+params = { mode = "auto", slant = true }
+ui = { x = 1030, y = 120 }
+
+[[block]]
+id = "pictures"
+kind = "image_sink"
+params = { dir = "sstv-pictures", prefix = "sstv" }
+ui = { x = 1360, y = 60 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 1360, y = 200 }
+
+[[connect]]
+from = "sdr.out"
+to = "channel.in"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.out"
+to = "sstv.in"
+
+[[connect]]
+from = "sstv.image"
+to = "pictures.in"
+
+[[connect]]
+from = "sstv.out"
+to = "log.in"

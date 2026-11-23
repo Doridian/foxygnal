@@ -13,6 +13,7 @@ foxygnal-core = { version = "0.1.0", path = "../foxygnal-core" }
 foxygnal-dsp = { version = "0.1.0", path = "../foxygnal-dsp" }
 foxygnal-sdr = { version = "0.1.0", path = "../foxygnal-sdr" }
 hound = "3.5.1"
+png = "0.18.1"
 serde_json = "1.0.154"
 
 [dev-dependencies]

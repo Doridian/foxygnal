@@ -18,7 +18,7 @@ class GraphView {
     const desc = b && this.catalog.get(b.kind);
     const port = endpoint.slice(dot + 1);
     const p = desc?.outputs.find((p, i) => p.name === port || String(i) === port);
-    return p && b ? portType(p, b.params) : null;
+    return p && b ? portType(p, b.params, desc) : null;
   }
 
   /** Stream metadata by output endpoint (`block.port`), as the engine worked it out. */

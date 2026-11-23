@@ -43,6 +43,11 @@ name, RadioText, programme type and clock time, shown in the Messages instrument
 Decoder templates: "ADS-B aircraft decoder" (`examples/adsb.fox.toml`), "POCSAG pager
 decoder" (`examples/pocsag.fox.toml`) and "APRS packet decoder" (`examples/aprs.fox.toml`).
 
+**Pictures.** The SSTV decoder (Robot, Martin, Scottie, Wraase and PD modes, from the VIS
+header, with slant correction) draws pictures in the Image instrument as they arrive and
+saves each one as a PNG with an Image Sink. Templates: "SSTV pictures" (the ISS on 145.8 MHz,
+`examples/sstv.fox.toml`) and "SSTV from a recording" (a WAV file, `examples/sstv-wav.fox.toml`).
+
 **Settings ⇄ inputs.** Any live number setting can be driven by a wire (`to = "channel.@offset"`;
 "⇢ input" in the inspector), and any stream input can be a constant (`const_inputs = { b = 1.5 }`).
 The "Auto-tuning FM" template wires a peak finder into a channel filter's offset, so it latches

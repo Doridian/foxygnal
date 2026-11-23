@@ -21,7 +21,7 @@
   function typeAt(nodeId: string, handle: string | null | undefined, dir: 'inputs' | 'outputs') {
     const data = ends.current.find((n) => n.id === nodeId)?.data as BlockData | undefined;
     const p = data?.desc[dir].find((p) => p.name === handle);
-    return p && data ? portType(p, data.params) : null;
+    return p && data ? portType(p, data.params, data.desc) : null;
   }
   const type = $derived(typeAt(source, sourceHandleId, 'outputs'));
   const targetType = $derived(typeAt(target, targetHandleId, 'inputs'));

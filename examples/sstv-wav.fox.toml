@@ -1,0 +1,57 @@
+# SSTV from a recording: decode the pictures in a WAV file (any rate from
+# 6 kHz; a stereo file uses its first channel). Choose the file in `wav`, run,
+# and click the wire out of `sstv.image` for the Image instrument. Every
+# picture is also saved as a PNG in `sstv-pictures/`.
+#
+# `realtime` plays the file at its own pace, so the Image instrument draws
+# every row as it arrives. Delete it (wire `wav` straight to `sstv`) to decode
+# as fast as the CPU allows: the PNG files are still complete, but the
+# instrument, which never slows the graph down, then skips most rows.
+#
+#   foxygnal run examples/sstv-wav.fox.toml   (after setting `path`)
+
+[[block]]
+id = "wav"
+kind = "wav_source"
+params = { type = "f32", path = "sstv.wav", channel = 0, repeat = false }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "realtime"
+kind = "throttle"
+params = { type = "f32", rate = 0 }
+ui = { x = 215, y = 260 }
+
+[[block]]
+id = "sstv"
+kind = "sstv_decoder"
+params = { mode = "auto", slant = true }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "pictures"
+kind = "image_sink"
+params = { dir = "sstv-pictures", prefix = "sstv" }
+ui = { x = 710, y = 60 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 710, y = 200 }
+
+[[connect]]
+from = "wav.out"
+to = "realtime.in"
+
+[[connect]]
+from = "realtime.out"
+to = "sstv.in"
+
+[[connect]]
+from = "sstv.image"
+to = "pictures.in"
+
+[[connect]]
+from = "sstv.out"
+to = "log.in"

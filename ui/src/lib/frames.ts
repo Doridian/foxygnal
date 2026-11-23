@@ -61,7 +61,29 @@ export interface TextFrame {
   text: string;
 }
 
-export type Frame = ScopeFrame | SpectrumFrame | ConstellationFrame | MeterFrame | AudioFrame | TextFrame;
+/** One row of a decoded picture (a raster record, see docs/ARCHITECTURE.md). */
+export interface ImageRow {
+  /** The decoder's picture number (counts from 1 each run). */
+  picture: number;
+  row: number;
+  /** Rows the picture will have; 0 if not known. */
+  height: number;
+  width: number;
+  /** 1 = grey, 3 = RGB. */
+  channels: 1 | 3;
+  /** The picture's last row. */
+  last: boolean;
+  pixels: Uint8Array;
+}
+
+export interface ImageFrame {
+  kind: 'image';
+  /** Rows were lost before this frame. */
+  gap: boolean;
+  rows: ImageRow[];
+}
+
+export type Frame = ScopeFrame | SpectrumFrame | ConstellationFrame | MeterFrame | AudioFrame | TextFrame | ImageFrame;
 
 const utf8 = new TextDecoder();
 
@@ -121,6 +143,29 @@ export function decodeFrame(buf: ArrayBuffer): { id: number; seq: number; frame:
     case 6: {
       const n = v.getUint32(12, true);
       return { id, seq, frame: { kind: 'text', gap: (v.getUint8(16) & 1) !== 0, text: utf8.decode(new Uint8Array(buf, 20, n)) } };
+    }
+    case 7: {
+      // n records ("FXIM", u32 picture, u16 row, height, width, u8 channels, flags, pixels), each padded to 4.
+      const n = v.getUint32(12, true);
+      const rows: ImageRow[] = [];
+      let at = 20;
+      for (let i = 0; i < n && at + 16 <= buf.byteLength; i++) {
+        const width = v.getUint16(at + 12, true);
+        const channels = v.getUint8(at + 14) === 3 ? 3 : 1;
+        const len = width * channels;
+        if (at + 16 + len > buf.byteLength) break;
+        rows.push({
+          picture: v.getUint32(at + 4, true),
+          row: v.getUint16(at + 8, true),
+          height: v.getUint16(at + 10, true),
+          width,
+          channels,
+          last: (v.getUint8(at + 15) & 1) !== 0,
+          pixels: new Uint8Array(buf, at + 16, len),
+        });
+        at += (16 + len + 3) & ~3;
+      }
+      return { id, seq, frame: { kind: 'image', gap: (v.getUint8(16) & 1) !== 0, rows } };
     }
   }
   return null;

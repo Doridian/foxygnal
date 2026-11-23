@@ -10,6 +10,7 @@
   import MeterView from './MeterView.svelte';
   import ScopeView from './ScopeView.svelte';
   import SpectrumView from './SpectrumView.svelte';
+  import ImageView from './ImageView.svelte';
   import TextView from './TextView.svelte';
 
   let { inst, popout = false }: { inst: Instrument; popout?: boolean } = $props();
@@ -22,6 +23,10 @@
   let panel = $state<HTMLElement>();
   /** Messages instrument: every line received (null = some were lost). */
   let lines = $state.raw<(string | null)[]>([]);
+  /** Image instrument: receives every frame's rows (it keeps the pictures). */
+  let imageView = $state<ImageView>();
+  /** Some picture rows have arrived (for the "waiting" overlay). */
+  let gotRows = $state(false);
 
   function addText(gap: boolean, text: string) {
     const fresh: (string | null)[] = text ? text.replace(/\n$/, '').split('\n') : [];
@@ -63,6 +68,10 @@
       cfg,
       (f) => {
         if (f.kind === 'text') addText(f.gap, f.text);
+        if (f.kind === 'image' && f.rows.length) {
+          imageView?.add(f.rows);
+          gotRows = true;
+        }
         frame = f;
         lastFrame = performance.now();
       },
@@ -91,10 +100,11 @@
     if (!session.connected) return 'Engine disconnected';
     if (!onGraph) return 'This wire is no longer in the graph.';
     if (error) return error;
-    if (!running) return frame || lines.length ? null : 'Not running. Press Run to see the signal.';
+    if (!running) return frame || lines.length || gotRows ? null : 'Not running. Press Run to see the signal.';
     if (!quiet || captured) return null;
     if (inst.kind === 'scope' && inst.settings.trigger !== 'off' && inst.settings.trigger !== 'auto') return 'Waiting for a trigger…';
     if (inst.kind === 'text') return frame || lines.length ? null : 'Waiting for messages…';
+    if (inst.kind === 'image') return gotRows ? null : 'Waiting for a picture…';
     return frame ? null : 'Waiting for samples…';
   });
 
@@ -118,6 +128,7 @@
         return [`${inst.settings.points} pts`];
       case 'meter':
       case 'text':
+      case 'image':
         return [];
     }
   });
@@ -198,6 +209,8 @@
       <SpectrumView settings={inst.settings} frame={frame?.kind === 'spectrum' ? frame : null} {rate} {center} {colour} {onwidth} />
     {:else if inst.kind === 'constellation'}
       <ConstellationView settings={inst.settings} frame={frame?.kind === 'constellation' ? frame : null} {colour} />
+    {:else if inst.kind === 'image'}
+      <ImageView bind:this={imageView} settings={inst.settings} {running} onchange={(p) => change({ settings: p })} />
     {:else if inst.kind === 'text'}
       <TextView settings={inst.settings} {lines} onclear={() => (lines = [])} onchange={(p) => change({ settings: p })} />
     {:else}

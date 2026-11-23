@@ -116,9 +116,147 @@ Goal: the blocks people reach for first, and a broadcast FM receiver that shows 
       action; blocks without an equivalent become placeholder Python blocks that re-import
       exactly
 
+## M9: Pictures
+
+Goal: watch an SSTV picture being drawn in the browser, from the ISS or a recording.
+
+- [x] Pictures on `u8` wires: self-describing row records (`core::raster`), the **Image**
+      instrument (live drawing, a strip of earlier pictures, save as PNG), and `image_sink`
+      (one PNG per picture, headless)
+- [x] SSTV decoder: Robot 36/72, Martin M1/M2, Scottie S1/S2/DX, Wraase SC2-180, PD
+      50/90/120/160/180/240/290, from the VIS header or a fixed mode; the line clock follows
+      the sync pulses (slant correction, with the clock offset reported in ppm); "SSTV" (ISS,
+      145.8 MHz) and "SSTV from a recording" templates
+- [ ] Weather fax (HFFAX / WEFAX): 60/90/120/240 LPM, IOC 288/576, start/stop tones and
+      phasing; the stations on 3–17 MHz send charts around the clock
+- [ ] NOAA APT: sync A/B, telemetry wedges, both channels, false colour. The NOAA POES
+      satellites were switched off in 2025, so this is for archived recordings
+- [ ] Meteor-M LRPT (Meteor-M N2-3 / N2-4, 137 MHz): QPSK / OQPSK 72 kBd, Viterbi r=1/2,
+      CCSDS frames, Reed-Solomon, the JPEG-like image codec; three channels in colour
+- [ ] Hellschreiber (Feld-Hell): text as pictures
+- [ ] An SSTV *encoder* (PNG in, audio out), for TX and for tests that don't need a radio
+
+## M10: Assistant (MCP server)
+
+Goal: ask an AI assistant "build me a receiver for X" or "what is on this wire?" and have it
+do the work through the same engine the UI uses.
+
+- [ ] `foxygnal mcp`: a Model Context Protocol server over stdio (for desktop assistants and
+      coding agents), plus the same tools at `/api/mcp` (streamable HTTP) on a running
+      `foxygnal serve`, under the same loopback, Host/Origin and token rules as the rest of
+      the API
+- [ ] Tools for building graphs: list and search blocks (descriptors, help text, ports,
+      settings), list examples and templates, read, validate (the same type-checked errors
+      as the editor, naming both endpoints), create and edit `.fox.toml` graphs, insert
+      converters, import and export `.grc`
+- [ ] Tools for signals: run and stop, change live settings, read per-block and per-wire stats,
+      attach a probe and get a *summary* rather than raw samples (strongest peaks and their
+      levels, noise floor, occupied bandwidth, level meter, constellation spread), read decoded
+      messages, fetch the current picture as a PNG, list SDR devices, record a short SigMF
+      capture
+- [ ] Resources: the block catalog, docs, the open graph; prompts for common jobs ("find
+      signals in this band", "decode this recording")
+- [ ] Safety: transmitting is never possible over MCP: TX blocks stay disarmed until a person
+      arms them in the UI. File access stays inside the project directory. Edits made through
+      MCP show up live in an open editor and can be undone there
+
+## M11: Everyday decoders
+
+Goal: the narrowband signals within reach of an RTL-SDR and a simple antenna, each with a
+template.
+
+- **Paging and telemetry**
+  - [ ] FLEX (1600/3200/6400, 2- and 4-level FSK): the paging system used locally, which M8's
+        POCSAG test found instead
+  - [ ] ISM-band sensors (433/868/915 MHz): an OOK/FSK pulse demodulator, PWM/PPM/Manchester
+        slicers, and a table of device formats in the spirit of rtl_433 (weather stations, tire
+        pressure sensors, doorbells, power meters)
+  - [ ] Radiosondes: Vaisala RS41 (GFSK 4800 Bd, Reed-Solomon, positions and PTU) first,
+        then Graw DFM and Meteomodem M10/M20
+- **Maritime and aviation**
+  - [ ] AIS (161.975 / 162.025 MHz, GMSK 9600 Bd HDLC; reuses M8's deframer): ship positions
+        and static data, both channels at once
+  - [ ] ACARS (AM, 2400 bit/s MSK) and VDL Mode 2 (D8PSK, 31.5 kBd, AVLC)
+  - [ ] Mode S beyond DF17: Mode A/C, DF4/5/20/21 with Comm-B (BDS 4,0 / 5,0 / 6,0), local
+        CPR, error correction; and UAT on 978 MHz (US)
+  - [ ] NAVTEX (518 / 490 kHz, SITOR-B 100 Bd FSK) and DSC
+- **Ham radio**
+  - [ ] CW (Morse) decoder with automatic speed tracking
+  - [ ] RTTY (45.45 Bd Baudot, any shift), PSK31/63 (BPSK, Varicode)
+  - [ ] FT8 / FT4 / WSPR: time slots, Costas sync, LDPC (174,91) and Fano decoding, a band
+        activity view
+  - [ ] 9600 Bd G3RUH packet (AX.25 over scrambled GFSK) for amateur satellites
+- **Tones and signalling**
+  - [ ] DTMF, CTCSS and DCS detection (squelch-able), SELCAL
+  - [ ] EAS / SAME (NOAA Weather Radio, 162.4–162.55 MHz): AFSK 520.83 Bd headers
+  - [ ] Time signals: DCF77, MSF, WWVB, JJY (time and date as messages)
+
+## M12: Digital voice and trunking
+
+Goal: see who is talking on digital voice channels; hear the open ones.
+
+- [ ] M17 (4FSK 4800 Bd, open Codec 2 voice): full decode with audio, Codec 2 in Rust
+- [ ] DMR (Tier II / III): sync, colour code, slot types, talkgroups and IDs, data, Capacity
+      Plus / Connect Plus control channels
+- [ ] P25 Phase 1 (C4FM / CQPSK): NID, link control, trunking control channel (TSBK); voice
+      depends on the codec question (IMBE)
+- [ ] NXDN, D-STAR (headers and slow data), Yaesu System Fusion: framing and metadata
+- [ ] TETRA: π/4-DQPSK, the broadcast and system information of unencrypted networks
+- [ ] LoRa: chirp spread spectrum demodulation (SF7–12, all bandwidths, header and CRC),
+      then Meshtastic packets on the public default channel
+- [ ] A trunking follower: a control channel decoder that retunes a voice channel's
+      `freq_xlating_fir` through a wired setting (M8's settings as inputs)
+
+## M13: Digital broadcast audio
+
+Goal: listen to digital radio stations with an RTL-SDR.
+
+- [ ] DAB / DAB+ (fits the RTL-SDR's 2.048 MS/s exactly): OFDM sync, coarse and fine
+      frequency correction, π/4-DQPSK, time and frequency deinterleaving, Viterbi, energy
+      dispersal; the FIC (ensemble and service names), MP2 audio for DAB, Reed-Solomon
+      superframes for DAB+ (audio per the codec question); dynamic label text, and MOT
+      slideshow pictures through M9's pictures
+- [ ] HD Radio (NRSC-5, US): the digital sidebands of FM stations, station information and
+      artist/title, album art and traffic maps as pictures
+- [ ] DRM / DRM+ (HF and VHF digital radio)
+
+## M14: Television
+
+Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
+
+- [ ] Analog TV: AM vestigial sideband video, line and frame sync, PAL / NTSC / SECAM
+      timing; black and white at RTL-SDR rates (a reduced horizontal resolution at 2.4–3.2
+      MS/s), full resolution and colour (PAL and NTSC chroma) with a HackRF, Airspy or Pluto.
+      Sound carrier as an audio output. Analog FM video too: 5.8 GHz FPV drone cameras and
+      amateur ATV
+- [ ] A **Video** instrument and a frame-level probe (see open questions)
+- [ ] DVB-T: OFDM 2k/8k, channel estimation from pilots, QPSK/16/64-QAM, inner
+      deinterleaving, Viterbi, outer deinterleaving, Reed-Solomon (204,188) → MPEG transport
+      stream. Needs 9.14 MS/s (HackRF, Airspy, Pluto): in SDR mode an RTL-SDR tops out near
+      3.2 MS/s and its DVB-T demodulator isn't reachable through librtlsdr
+- [ ] MPEG-TS handling: PAT/PMT/SDT (channel names), EIT (programme guide), PES extraction,
+      a TS output over UDP for VLC / ffplay, and H.264 video in the browser via WebCodecs
+- [ ] ISDB-T one-segment (Japan, South America): 430 kHz wide, so within an RTL-SDR's
+      reach, with H.264 video
+- [ ] Later: DVB-S/S2 (amateur DATV on QO-100), ATSC 1.0 (8VSB), DVB-T2
+
 ## Open questions
 
 - ~~**Plugin strategy** (M6).~~ Decided: WASM components for out-of-tree blocks (sandboxed,
   portable, one file for every platform); blocks that turn out performance-critical move into
   `foxygnal-blocks` (native). Rust dylibs were rejected (no stable ABI, no sandbox).
-- **Name casing**: `foxygnal` vs `Foxygnal` in the UI.
+- ~~**Name casing**.~~ Decided: always `foxygnal`, all lowercase, in the UI, docs and
+  messages (environment variables stay `FOXYGNAL_*`).
+- **Proprietary and patented codecs.** DAB+ and HD Radio carry HE-AAC (HD Radio a variant of
+  it), DMR / D-STAR / YSF / NXDN voice is AMBE+2, P25 voice is IMBE. Options: decode
+  framing and metadata natively and leave voice to a plugin; link a system library at run time
+  (as with SoapySDR); or implement the codec where patents have expired (IMBE). Undecided;
+  needed by M12 and M13.
+- **Video in the browser.** WebCodecs decodes H.264 (and HEVC, AV1 where supported) but not
+  MPEG-2, which most DVB-T and DVB-S services still use. Options: H.264 only in the browser,
+  with MPEG-2 handed to an external player over UDP; or a software MPEG-2 decoder (in the
+  engine, or WASM in the browser). Undecided; needed by M14.
+- **Picture frames vs rows.** M9 sends pictures as row records on `u8` wires, which fits
+  pictures that take seconds to minutes. Analog TV needs 25–30 frames a second of up to
+  720×576: whether rows on `u8` still fit (about 10 MB/s at full PAL resolution), or video
+  needs a frame-level probe that drops whole frames when behind, is to be measured in M14.

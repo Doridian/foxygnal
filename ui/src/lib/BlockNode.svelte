@@ -51,7 +51,7 @@
     {:else if running && !error}<span class="live" title="Running"></span>{/if}
   </header>
   {#each data.desc.inputs as p, i (p.name)}
-    {@const t = portType(p, data.params)}
+    {@const t = portType(p, data.params, data.desc)}
     {#if data.consts && p.name in data.consts}
       <span class="port in const" style:top="{rowTop(i) - 8}px" title="Input {p.name} is the constant {constText(data.consts[p.name])} (edit it in the inspector)"
         >{p.name} = {constText(data.consts[p.name])}</span
@@ -74,7 +74,7 @@
     <span class="port in setting" style:top="{rowTop(i) - 8}px">{p.label}</span>
   {/each}
   {#each data.desc.outputs as p, i (p.name)}
-    {@const t = portType(p, data.params)}
+    {@const t = portType(p, data.params, data.desc)}
     <Handle type="source" position={Position.Right} id={p.name} style="top:{rowTop(i)}px; --port: var(--t-{t})" title="{p.name} · {t}" />
     <span class="port out" style:top="{rowTop(i) - 8}px">{p.name} · <span style:color="var(--t-{t})">{t}</span></span>
   {/each}

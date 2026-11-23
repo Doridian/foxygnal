@@ -109,7 +109,7 @@
         <div class="inputs">
           <h3 class="small muted">Inputs</h3>
           {#each d.inputs as p (p.name)}
-            {@const t = portType(p, node.data.params)}
+            {@const t = portType(p, node.data.params, node.data.desc)}
             {@const c = node.data.consts?.[p.name]}
             <div class="input">
               <label class="small">
@@ -137,11 +137,11 @@
       {#if d.inputs.length || d.outputs.length}
         <div class="ports">
           {#each d.inputs as p (p.name)}
-            {@const t = portType(p, node.data.params)}
+            {@const t = portType(p, node.data.params, node.data.desc)}
             <span class="muted">in · {p.name}</span><span class="mono" style:color="var(--t-{t})">{t}</span>
           {/each}
           {#each d.outputs as p (p.name)}
-            {@const t = portType(p, node.data.params)}
+            {@const t = portType(p, node.data.params, node.data.desc)}
             <span class="muted">out · {p.name}</span><span class="mono" style:color="var(--t-{t})">{t}</span>
           {/each}
         </div>

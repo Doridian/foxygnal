@@ -6,6 +6,7 @@ pub mod buffer;
 pub mod expr;
 pub mod graph;
 pub mod meta;
+pub mod raster;
 pub mod registry;
 pub mod resolve;
 pub mod runtime;

@@ -102,7 +102,7 @@ export function typeOf(node: BlockNode | undefined, handle: string | null | unde
   // A setting wired as an input takes f32.
   if (dir === 'inputs' && handle?.startsWith(PARAM_PORT)) return node ? 'f32' : null;
   const p = node?.data.desc[dir].find((p) => p.name === handle);
-  return p && node ? portType(p, node.data.params) : null;
+  return p && node ? portType(p, node.data.params, node.data.desc) : null;
 }
 
 /** Why a connection can't be made, or `null` if it can. */

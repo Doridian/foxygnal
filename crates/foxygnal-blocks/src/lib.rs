@@ -11,6 +11,7 @@ pub mod file;
 pub mod filters;
 pub mod flow;
 pub mod iir;
+pub mod image;
 pub mod level;
 pub mod math;
 pub mod measure;
@@ -54,4 +55,5 @@ pub fn register_all(r: &mut Registry) {
     digital::register(r);
     net::register(r);
     broadcast::register(r);
+    image::register(r);
 }
