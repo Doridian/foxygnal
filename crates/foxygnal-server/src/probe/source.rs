@@ -15,12 +15,27 @@ pub struct Source {
 impl Source {
     /// Start reading at the stream's current end.
     pub fn new(tap: Tap, ty: StreamType) -> Self {
+        let cursor = tap.written();
+        Self::new_at(tap, ty, cursor)
+    }
+
+    /// A second reader of the same tap, at the same position.
+    pub fn detach(&self) -> Self {
+        Self::new_at(self.tap.clone(), self.ty, self.cursor)
+    }
+
+    fn new_at(tap: Tap, ty: StreamType, cursor: usize) -> Self {
         Self {
-            cursor: tap.written(),
+            cursor,
             tap,
             ty,
             bytes: Vec::new(),
         }
+    }
+
+    /// The ring's capacity in items.
+    pub fn capacity(&self) -> usize {
+        self.tap.capacity()
     }
 
     /// Start from the oldest item the ring still holds instead of the end,

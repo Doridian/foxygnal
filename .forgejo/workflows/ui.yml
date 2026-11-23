@@ -21,5 +21,9 @@ jobs:
         run: npm ci
       - name: Type-check
         run: npm run check
+      # Transport stream demuxing (node runs the TypeScript as it is; the
+      # ffmpeg-based cases skip when ffmpeg isn't installed).
+      - name: Unit tests
+        run: npm test
       - name: Build
         run: npm run build

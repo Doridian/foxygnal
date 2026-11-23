@@ -1,0 +1,43 @@
+# Video from a TS file: plays an MPEG transport stream (a .ts recording of
+# digital TV, or one you make) at its own pace, as a DVB demodulator would
+# deliver it. Run, click the wire into `sink` and choose Video.
+#
+# Set `path` to your file (relative to the project folder) and `byte_rate` to
+# its mux rate in bytes per second (bit rate / 8). A recording from a receiver
+# has a constant mux rate; to make a test file with one:
+#
+#   ffmpeg -f lavfi -i testsrc=size=640x360:rate=25 -f lavfi -i sine \
+#     -t 60 -c:v libx264 -pix_fmt yuv420p -g 25 -b:v 1M -c:a aac -muxrate 1500k -f mpegts video.ts
+#
+# (1500 kbit/s = 187500 bytes/s; `-c:v mpeg2video -c:a mp2` for MPEG-2, as
+# most DVB services use.) A rate that's too low makes the picture stutter; too
+# high and it plays fast.
+
+[vars]
+byte_rate = "187500"
+
+[[block]]
+id = "file"
+kind = "file_source"
+params = { type = "u8", path = "video.ts", repeat = true, sample_rate = "$byte_rate" }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "realtime"
+kind = "throttle"
+params = { type = "u8", sample_rate = 0.0 }
+ui = { x = 330, y = 120 }
+
+[[block]]
+id = "sink"
+kind = "null_sink"
+params = { type = "u8" }
+ui = { x = 610, y = 120 }
+
+[[connect]]
+from = "file.out"
+to = "realtime.in"
+
+[[connect]]
+from = "realtime.out"
+to = "sink.in"

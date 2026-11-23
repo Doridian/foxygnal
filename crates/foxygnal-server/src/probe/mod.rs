@@ -18,6 +18,7 @@ mod scope;
 mod source;
 mod spectrum;
 mod text;
+mod ts;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -50,6 +51,8 @@ pub enum ProbeConfig {
     /// The picture rows of a `u8` wire carrying raster records (decoded
     /// pictures).
     Image {},
+    /// The MPEG transport stream packets of a `u8` TS wire (video).
+    Ts {},
 }
 
 impl ProbeConfig {
@@ -62,6 +65,7 @@ impl ProbeConfig {
             Self::Audio {} => 5,
             Self::Text {} => 6,
             Self::Image {} => 7,
+            Self::Ts {} => 8,
         }
     }
 
@@ -93,6 +97,13 @@ impl ProbeConfig {
                 ));
             }
             Self::Image {} => Box::new(image::Image::new()),
+            Self::Ts {} if ty != StreamType::U8 => {
+                return Err(format!(
+                    "Video needs an MPEG transport stream on a u8 wire, such as a DVB \
+                     demodulator's output or a .ts file; this one carries {ty}."
+                ));
+            }
+            Self::Ts {} => Box::new(ts::Ts::new()),
         })
     }
 }

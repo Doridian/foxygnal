@@ -12,6 +12,7 @@
   import SpectrumView from './SpectrumView.svelte';
   import ImageView from './ImageView.svelte';
   import TextView from './TextView.svelte';
+  import VideoView from './VideoView.svelte';
 
   let { inst, popout = false }: { inst: Instrument; popout?: boolean } = $props();
 
@@ -27,6 +28,9 @@
   let imageView = $state<ImageView>();
   /** Some picture rows have arrived (for the "waiting" overlay). */
   let gotRows = $state(false);
+  /** Video instrument: receives every frame's packets. */
+  let videoView = $state<VideoView>();
+  let gotPackets = $state(false);
 
   function addText(gap: boolean, text: string) {
     const fresh: (string | null)[] = text ? text.replace(/\n$/, '').split('\n') : [];
@@ -72,6 +76,13 @@
           imageView?.add(f.rows);
           gotRows = true;
         }
+        if (f.kind === 'ts') {
+          videoView?.packets(f);
+          if (f.packets.length) gotPackets = true;
+          // The packets are handed on, not kept as the panel's frame.
+          lastFrame = performance.now();
+          return;
+        }
         frame = f;
         lastFrame = performance.now();
       },
@@ -100,11 +111,12 @@
     if (!session.connected) return 'Engine disconnected';
     if (!onGraph) return 'This wire is no longer in the graph.';
     if (error) return error;
-    if (!running) return frame || lines.length || gotRows ? null : 'Not running. Press Run to see the signal.';
+    if (!running) return frame || lines.length || gotRows || gotPackets ? null : 'Not running. Press Run to see the signal.';
     if (!quiet || captured) return null;
     if (inst.kind === 'scope' && inst.settings.trigger !== 'off' && inst.settings.trigger !== 'auto') return 'Waiting for a trigger…';
     if (inst.kind === 'text') return frame || lines.length ? null : 'Waiting for messages…';
     if (inst.kind === 'image') return gotRows ? null : 'Waiting for a picture…';
+    if (inst.kind === 'video') return gotPackets ? null : 'Waiting for a transport stream…';
     return frame ? null : 'Waiting for samples…';
   });
 
@@ -129,6 +141,7 @@
       case 'meter':
       case 'text':
       case 'image':
+      case 'video':
         return [];
     }
   });
@@ -211,6 +224,8 @@
       <ConstellationView settings={inst.settings} frame={frame?.kind === 'constellation' ? frame : null} {colour} />
     {:else if inst.kind === 'image'}
       <ImageView bind:this={imageView} settings={inst.settings} {running} onchange={(p) => change({ settings: p })} />
+    {:else if inst.kind === 'video'}
+      <VideoView bind:this={videoView} id={inst.id} settings={inst.settings} {running} onchange={(p) => change({ settings: p })} />
     {:else if inst.kind === 'text'}
       <TextView settings={inst.settings} {lines} onclear={() => (lines = [])} onchange={(p) => change({ settings: p })} />
     {:else}

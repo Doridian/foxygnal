@@ -57,6 +57,13 @@ automatically, at several MBd on one core. Templates: "DATV loopback (DVB-S)" (a
 through a noisy channel, no hardware, `examples/datv-loopback.fox.toml`) and "DATV receiver
 (DVB-S)" (an SDR to a TS over UDP for ffplay or VLC, `examples/datv-rx.fox.toml`).
 
+**Watching digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
+demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
+you pick with its AAC sound, and shows codecs, resolution, frame rate, bit rates and errors.
+H.264 and HEVC are decoded by the browser (WebCodecs); MPEG-2, which most DVB services still
+use, by foxygnal's own decoder compiled to WebAssembly. Template: "Video from a TS file"
+(`examples/ts-video.fox.toml`).
+
 **AI assistants (MCP).** foxygnal is also a [Model Context Protocol](https://modelcontextprotocol.io)
 server. An assistant can look up blocks, build and check graphs, run them, and measure what's
 on a wire: the signals in a spectrum, levels, decoded messages, pictures. With

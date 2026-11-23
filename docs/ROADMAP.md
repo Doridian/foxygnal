@@ -232,13 +232,23 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
       MS/s), full resolution and colour (PAL and NTSC chroma) with a HackRF, Airspy or Pluto.
       Sound carrier as an audio output. Analog FM video too: 5.8 GHz FPV drone cameras and
       amateur ATV
-- [ ] A **Video** instrument and a frame-level probe (see open questions)
+- [x] A **Video** instrument for digital TV: the `ts` probe forwards the transport stream
+      of a u8 wire (whole 188-byte packets, see ARCHITECTURE.md "Digital video"), and the
+      browser demuxes and decodes it: H.264 and HEVC with WebCodecs, MPEG-1/2 with
+      foxygnal's own decoder in WebAssembly (`foxygnal-mpeg2`), AAC sound. Template "Video
+      from a TS file"
+- [ ] MP2 (MPEG-1 Layer II) sound in the browser, the sound of most DVB services: a small
+      decoder next to the MPEG-2 one. AC-3 / E-AC-3 and AAC-LATM after that
+- [ ] Analog TV pictures: a frame-level probe that drops whole frames when behind (see open
+      questions)
 - [ ] DVB-T: OFDM 2k/8k, channel estimation from pilots, QPSK/16/64-QAM, inner
       deinterleaving, then the DVB-S FEC chain (Viterbi, outer deinterleaving, Reed-Solomon
       (204,188), done) → MPEG transport stream. Needs 9.14 MS/s (HackRF, Airspy, Pluto): in SDR mode an RTL-SDR tops out near
       3.2 MS/s and its DVB-T demodulator isn't reachable through librtlsdr
-- [ ] MPEG-TS handling: PAT/PMT/SDT (channel names), EIT (programme guide), PES extraction,
-      a TS output over UDP for VLC / ffplay, and H.264 video in the browser via WebCodecs
+- [x] MPEG-TS handling in the browser: PAT/PMT/SDT (channel names), PES extraction,
+      continuity and TEI counts, H.264 video via WebCodecs
+- [ ] EIT (programme guide). A TS output over UDP for VLC / ffplay works today with
+      `udp_sink` (u8, `payload = 1316`: seven packets) on the TS wire; a template is to come
 - [ ] ISDB-T one-segment (Japan, South America): 430 kHz wide, so within an RTL-SDR's
       reach, with H.264 video
 - [x] DVB-S (EN 300 421), the mode of amateur DATV: `dvbs_modulator` and
@@ -263,11 +273,14 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
   framing and metadata natively and leave voice to a plugin; link a system library at run time
   (as with SoapySDR); or implement the codec where patents have expired (IMBE). Undecided;
   needed by M12 and M13.
-- **Video in the browser.** WebCodecs decodes H.264 (and HEVC, AV1 where supported) but not
-  MPEG-2, which most DVB-T and DVB-S services still use. Options: H.264 only in the browser,
-  with MPEG-2 handed to an external player over UDP; or a software MPEG-2 decoder (in the
-  engine, or WASM in the browser). Undecided; needed by M14.
+- ~~**Video in the browser.**~~ Decided (M14): the engine forwards the transport stream and
+  the browser decodes. WebCodecs decodes H.264 and HEVC; MPEG-2, which it can't, is decoded
+  by `foxygnal-mpeg2`, a small decoder of our own compiled to WebAssembly (committed as a
+  prebuilt module, so the UI build needs no Rust). MP2 sound still needs the same treatment.
 - **Picture frames vs rows.** M9 sends pictures as row records on `u8` wires, which fits
   pictures that take seconds to minutes. Analog TV needs 25–30 frames a second of up to
   720×576: whether rows on `u8` still fit (about 10 MB/s at full PAL resolution), or video
   needs a frame-level probe that drops whole frames when behind, is to be measured in M14.
+  Digital TV doesn't need either: its transport stream is compressed (1–20 Mbit/s) and the
+  `ts` probe reads it on a thread of its own (ARCHITECTURE.md, "Digital video"), which
+  keeps up to about 64 Mbit/s on a default `u8` ring.

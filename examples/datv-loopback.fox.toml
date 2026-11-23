@@ -9,14 +9,15 @@
 # test picture and tone, H.264 + AAC, padded to exactly that rate):
 #
 #   ffmpeg -f lavfi -i testsrc=size=640x360:rate=25 -f lavfi -i sine=frequency=1000 \
-#     -t 60 -c:v libx264 -b:v 900k -maxrate 900k -bufsize 900k -g 25 \
+#     -t 60 -c:v libx264 -pix_fmt yuv420p -b:v 900k -maxrate 900k -bufsize 900k -g 25 \
 #     -c:a aac -b:a 64k -f mpegts -muxrate 1382353 datv-test.ts
 #
 # and put it in the project directory (or next to this file for `foxygnal run`).
 # The file loops. Watch `demod.status` (Messages) for lock, MER and error
-# counts, the constellation on the wire into `demod`, and the TS on
-# `demod.ts`: whole 188-byte packets, ready for a video player (or a File Sink,
-# or a UDP Sink with a 1316-byte payload to `ffplay udp://127.0.0.1:1234`).
+# counts, and the constellation on the wire into `demod`. Click the wire out of
+# `demod.ts` and choose Video to watch the picture (and switch its sound on):
+# whole 188-byte packets, also ready for a File Sink, or a UDP Sink with a
+# 1316-byte payload to `ffplay udp://127.0.0.1:1234`.
 # Raise `noise` to find the threshold (Es/N0 = 10·log10(0.5 / noise²) dB;
 # 0.18 is about 12 dB, rate 3/4 decodes down to about 5.5 dB, noise ≈ 0.38).
 #

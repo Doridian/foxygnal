@@ -273,9 +273,15 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/sstv-wav.fox.toml"),
     },
     Example {
+        name: "ts-video",
+        title: "Video from a TS file",
+        description: "An MPEG transport stream file (digital TV: H.264, HEVC or MPEG-2) played at its mux rate. Set the file and `byte_rate`, run, click the wire and choose Video.",
+        toml: include_str!("../../../examples/ts-video.fox.toml"),
+    },
+    Example {
         name: "datv-loopback",
         title: "DATV loopback (DVB-S)",
-        description: "A transport stream file → DVB-S modulator → noise and a 2 kHz offset → DVB-S demodulator → TS. No hardware needed; make the TS file with ffmpeg as described at the top of the file.",
+        description: "A transport stream file → DVB-S modulator → noise and a 2 kHz offset → DVB-S demodulator → the Video instrument (click `demod.ts`, choose Video). No hardware needed; make the TS file with ffmpeg as described at the top of the file.",
         toml: include_str!("../../../examples/datv-loopback.fox.toml"),
     },
     Example {
