@@ -31,8 +31,3 @@ jobs:
         run: cargo build --workspace
       - name: Rust test
         run: cargo test --workspace
-      # The UI bundles prebuilt WebAssembly decoders (MPEG-2, MP2, AC-3). The
-      # build is reproducible with the pinned toolchain, so rebuild them and
-      # fail if the committed modules are stale or were built from other code.
-      - name: WebAssembly modules up to date
-        run: sh scripts/build-mpeg2-wasm.sh --check

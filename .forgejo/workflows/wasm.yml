@@ -1,0 +1,29 @@
+name: WebAssembly check
+
+# The UI bundles prebuilt WebAssembly decoders (MPEG-2 video, MP2 and AC-3
+# sound) so building it needs no Rust. The build is reproducible with the
+# toolchain pinned in rust-toolchain.toml, so rebuild them and fail if a
+# committed module is stale or was built from other code.
+#
+# Kept apart from managed-rust.yml, which reposyncer manages.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  check-wasm:
+    runs-on: ${{ vars.MANAGED_RUNNER_TAG || 'ubuntu-26.04' }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7
+      # rustup comes with the runner image; this installs the pinned toolchain
+      # (the build script adds the wasm32-unknown-unknown target itself).
+      - name: Set up Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - name: WebAssembly modules up to date
+        run: sh scripts/build-mpeg2-wasm.sh --check

@@ -743,7 +743,7 @@ flags, no flags from the environment, `--locked`, and the toolchain pinned in
 `rust-toolchain.toml`, which the script runs through rustup (installing it and the wasm
 target if needed). The official toolchain gives the same bytes in any directory and with any
 `CARGO_HOME`; a distro's `rustc` of the same version makes modules that work but differ in a
-few bytes, so the script warns when there's no rustup. CI (`managed-rust.yml`) runs
+few bytes, so the script warns when there's no rustup. CI (`wasm.yml`; `managed-rust.yml` belongs to reposyncer) runs
 `scripts/build-mpeg2-wasm.sh --check`, which builds into a temporary directory and fails if
 a committed module differs, so a crate can't change without its module.
 
