@@ -9,8 +9,9 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crc32mpeg, defaultProgram, Demuxer, PACKET, type Pes } from '../src/lib/video/ts.ts';
-import { adtsFrames, avcAccessUnit, hevcAccessUnit, nalUnits } from '../src/lib/video/nal.ts';
+import { adtsFrames, avcAccessUnit, hevcAccessUnit, LatmReader, nalUnits, type LatmFrame } from '../src/lib/video/nal.ts';
 import { Mp2Decoder, type Mp2Frame } from '../src/lib/video/mp2.ts';
+import { Ac3Decoder, type Ac3Frame } from '../src/lib/video/ac3.ts';
 
 // ---- Building streams by hand ------------------------------------------------
 
@@ -376,4 +377,173 @@ test('ffmpeg stream: MP2 sound decodes in step with its PTS', { skip: !hasFfmpeg
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/** The whole transport stream's PES packets for the default program, by PID. */
+function demuxFile(file: string) {
+  const d = new Demuxer();
+  const got = new Map<number, Pes[]>();
+  d.onPrograms = () => {
+    for (const s of defaultProgram(d.programs.values())?.streams ?? []) d.wanted.add(s.pid);
+  };
+  d.onPes = (p) => got.set(p.pid, [...(got.get(p.pid) ?? []), p]);
+  d.push(new Uint8Array(readFileSync(file)));
+  const prog = defaultProgram(d.programs.values())!;
+  for (const s of prog.streams) d.flush(s.pid);
+  return { prog, got, d };
+}
+
+// ---- AC-3 through the WebAssembly decoder ------------------------------------
+
+const ac3Module = WebAssembly.compile(readFileSync(new URL('../src/lib/video/ac3.wasm', import.meta.url)));
+const ac3Fixtures = new URL('../../crates/foxygnal-ac3/tests/data/', import.meta.url);
+
+for (const [name, layout, rate, channels] of [
+  ['48k-5.1-448k.ac3', '5.1', 48000, 2],
+  ['44k-mono-64k.ac3', '1.0', 44100, 1],
+] as const) {
+  test(`AC-3 decoder: ${name} against ffmpeg`, async () => {
+    const dec = await Ac3Decoder.fromModule(await ac3Module);
+    assert.equal(dec.kind, null);
+    const data = new Uint8Array(readFileSync(new URL(name, ac3Fixtures)));
+    const ref = new Int16Array(new Uint8Array(readFileSync(new URL(`${name}.ref`, ac3Fixtures))).buffer);
+    const frames: Ac3Frame[] = [];
+    // Pieces that don't line up with frames, as PES packets might.
+    for (let at = 0, piece = 333; at < data.length; at += piece) {
+      dec.push(data.subarray(at, at + piece), 90000 + at);
+      for (let f = dec.next(); f; f = dec.next()) frames.push(f);
+    }
+    dec.flush();
+    for (let f = dec.next(); f; f = dec.next()) frames.push(f);
+    assert.equal(dec.errors, 0);
+    assert.deepEqual(dec.kind, { eac3: false, layout });
+    assert.ok(frames.every((f) => f.rate === rate && f.channels === channels && f.samples.length === 1536 * channels));
+    assert.equal(frames[0].pts, 90000);
+    const pcm = new Float32Array(frames.flatMap((f) => [...f.samples]));
+    assert.equal(Math.ceil(pcm.length / 7), ref.length);
+    let max = 0;
+    for (let i = 0, k = 0; i < pcm.length; i += 7, k++) {
+      max = Math.max(max, Math.abs(Math.max(-32768, Math.min(32767, Math.round(pcm[i] * 32768))) - ref[k]));
+    }
+    assert.ok(max <= 1, `max error ${max} LSB`);
+    dec.free();
+  });
+}
+
+for (const [label, flags] of [
+  ['stream type 0x81', []],
+  ['DVB AC-3 descriptor', ['-mpegts_flags', 'system_b']],
+] as const) {
+  test(`ffmpeg stream: AC-3 5.1 and MP2 tracks with languages (${label})`, { skip: !hasFfmpeg && 'ffmpeg not installed' }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fox-ts-'));
+    try {
+      const file = join(dir, 'a.ts');
+      // A 5.1 track (a tone in the centre channel only) in English and a stereo MP2 track in German.
+      const ok = ffmpeg([
+        '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=25', '-f', 'lavfi', '-i', 'sine=frequency=1000:sample_rate=48000',
+        '-t', '2', '-map', '0', '-map', '1', '-map', '1', '-c:v', 'mpeg2video',
+        '-c:a:0', 'ac3', '-filter:a:0', 'pan=5.1|FC=c0', '-b:a:0', '384k', '-metadata:s:a:0', 'language=eng',
+        '-c:a:1', 'mp2', '-ac:a:1', '2', '-metadata:s:a:1', 'language=deu', ...flags, '-f', 'mpegts', file,
+      ]);
+      if (!ok) return;
+      const { prog, got, d } = demuxFile(file);
+      assert.equal(d.ccErrors, 0);
+      const audio = prog.streams.filter((s) => s.kind === 'audio');
+      assert.deepEqual(
+        audio.map((s) => [s.codec, s.lang]),
+        [
+          ['ac3', 'eng'],
+          ['mp2', 'deu'],
+        ],
+      );
+      const dec = await Ac3Decoder.fromModule(await ac3Module);
+      let frames = 0;
+      let sum = 0;
+      let count = 0;
+      let last: number | null = null;
+      for (const p of got.get(audio[0].pid)!) {
+        dec.push(p.data, p.pts);
+        for (let f = dec.next(); f; f = dec.next()) {
+          frames++;
+          assert.deepEqual([f.rate, f.channels, f.bitrate], [48000, 2, 384000]);
+          assert.notEqual(f.pts, null);
+          if (last !== null) assert.ok(Math.abs(f.pts! - last - 1536 * 1.875) <= 1, `${f.pts} after ${last}`);
+          last = f.pts;
+          for (const v of f.samples) {
+            sum += v * v;
+            count++;
+          }
+        }
+      }
+      assert.equal(dec.errors, 0);
+      assert.deepEqual(dec.kind, { eac3: false, layout: '5.1' });
+      assert.ok(Math.abs(frames - 62.5) <= 2, `${frames} frames`);
+      // The centre goes to both sides at −4.5 dB (0.595), scaled by
+      // 1/(1 + 0.595 + 0.5) so that nothing clips (as ffmpeg's decoder does).
+      const rms = Math.sqrt(sum / count);
+      const want = (0.125 * Math.SQRT1_2 * 0.5946) / (1 + 0.5946 + 0.5);
+      assert.ok(Math.abs(rms - want) < 0.002, `RMS ${rms}, want ${want}`);
+      dec.free();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('ffmpeg stream: E-AC-3 is recognised, not decoded', { skip: !hasFfmpeg && 'ffmpeg not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fox-ts-'));
+  try {
+    const file = join(dir, 'a.ts');
+    if (!ffmpeg(['-f', 'lavfi', '-i', 'sine', '-t', '1', '-c:a', 'eac3', '-ac', '2', '-f', 'mpegts', file])) return;
+    const { prog, got } = demuxFile(file);
+    const a = prog.streams.find((s) => s.kind === 'audio')!;
+    assert.equal(a.codec, 'eac3');
+    const dec = await Ac3Decoder.fromModule(await ac3Module);
+    for (const p of got.get(a.pid)!) {
+      dec.push(p.data, p.pts);
+      assert.equal(dec.next(), null);
+    }
+    assert.deepEqual(dec.kind, { eac3: true, layout: '2.0' });
+    dec.free();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- AAC in LATM -------------------------------------------------------------
+
+test('ffmpeg stream: AAC in LATM gives the same access units as ADTS', { skip: !hasFfmpeg && 'ffmpeg not installed' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fox-ts-'));
+  try {
+    const adts = join(dir, 'a.aac');
+    const file = join(dir, 'a.ts');
+    // The same encoding twice (ffmpeg's AAC encoder is deterministic).
+    const input = ['-f', 'lavfi', '-i', 'sine=sample_rate=44100', '-t', '2', '-ac', '2', '-c:a', 'aac'];
+    if (!ffmpeg([...input, '-f', 'adts', adts])) return;
+    if (!ffmpeg([...input, '-mpegts_flags', 'latm', '-f', 'mpegts', file])) return;
+    const want = adtsFrames(new Uint8Array(readFileSync(adts))).map((f) => f.data.subarray(7));
+    const { prog, got } = demuxFile(file);
+    const a = prog.streams.find((s) => s.kind === 'audio')!;
+    assert.equal(a.codec, 'aac-latm');
+    const r = new LatmReader();
+    const frames: LatmFrame[] = [];
+    // Split the PES payloads at odd places: LOAS frames may straddle packets.
+    const es = new Uint8Array(got.get(a.pid)!.flatMap((p) => [...p.data]));
+    for (let at = 0; at < es.length; at += 1000) frames.push(...r.push(es.subarray(at, at + 1000)));
+    assert.equal(frames.length, want.length);
+    for (const [i, f] of frames.entries()) assert.deepEqual(f.data, new Uint8Array(want[i]), `access unit ${i}`);
+    const c = frames[0].config;
+    // AAC LC (2), 44.1 kHz (index 4), 2 channels: 00010 0100 0010 0…
+    assert.deepEqual([c.object, c.rate, c.channels, [...c.asc]], [2, 44100, 2, [0x12, 0x10]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('LATM: garbage and a config-less start are skipped', () => {
+  const r = new LatmReader();
+  // useSameStreamMux = 1 before any config: nothing.
+  assert.deepEqual(r.push(new Uint8Array([0x56, 0xe0, 0x02, 0x80, 0x01])), []);
+  assert.equal(r.config, null);
+  assert.deepEqual(r.push(new Uint8Array(500).map((_, i) => (i * 31) & 255)), []);
 });

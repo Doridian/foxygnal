@@ -6,6 +6,8 @@ export type ToWorker =
   | { type: 'packets'; data: ArrayBuffer; gap: boolean }
   /** null: the first program with video. */
   | { type: 'program'; number: number | null }
+  /** The sound track's PID; null: the first this page decodes. */
+  | { type: 'track'; pid: number | null }
   | { type: 'audio'; on: boolean }
   /** A new run: forget the stream. */
   | { type: 'reset' }
@@ -36,14 +38,16 @@ export interface AudioStats {
   pid: number;
   codec: string;
   lang: string | null;
-  /** The WebCodecs codec string, or `wasm` for our MPEG audio decoder; null until sound is on. */
+  /** The channels sent (AC-3: 2.0, 5.1, …), when played as fewer (stereo); else null. */
+  layout: string | null;
+  /** The WebCodecs codec string, or `wasm` for our own decoders; null until sound is on. */
   decoder: string | null;
   rate: number;
   channels: number;
   bitrate: number;
   /** Frames decoded (since the stream was chosen). */
   frames: number;
-  /** Frames that failed their CRC, and lost frame sync (MPEG audio). */
+  /** Frames that failed their CRC, and lost frame sync (MPEG audio, AC-3). */
   errors: number;
   note: string | null;
 }
@@ -66,5 +70,7 @@ export type FromWorker =
   /** `due`: when to show it, in ms since the epoch (performance.timeOrigin + now). */
   | { type: 'frame'; frame: VideoFrame; due: number; aspect: number }
   | { type: 'pcm'; samples: Float32Array<ArrayBuffer>; channels: 1 | 2; rate: number; due: number }
-  /** Timing jumped (a new run, a looped file): drop queued frames. */
-  | { type: 'flush' };
+  /** Timing jumped (a new run, a looped file): drop queued frames and sound. */
+  | { type: 'flush' }
+  /** Another sound track: drop the queued sound. */
+  | { type: 'audio-flush' };

@@ -1,0 +1,14 @@
+[package]
+name = "foxygnal-ac3"
+description = "A small AC-3 (ATSC A/52, Dolby Digital) decoder with a stereo downmix, for the browser's Video instrument, built to WebAssembly"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No dependencies, and `no_std` outside the WebAssembly glue: the module
+# (scripts/build-mpeg2-wasm.sh) imports nothing from its host.
+
+[lints]
+workspace = true

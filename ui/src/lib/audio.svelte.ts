@@ -15,6 +15,7 @@ class BrowserAudio {
   #ctx: AudioContext | null = null;
   #gain: GainNode | null = null;
   #next = new Map<number, number>(); // probe id → next start time
+  #queued = new Map<number, Set<AudioBufferSourceNode>>(); // playAt's, not played out yet
   /** The context exists but the browser hasn't let it start yet. */
   blocked = $state(false);
   volume = $state(0.8);
@@ -116,10 +117,24 @@ class BrowserAudio {
     src.connect(this.#gain);
     src.start(at);
     this.#next.set(id, at + frames / rate);
+    let queued = this.#queued.get(id);
+    if (!queued) this.#queued.set(id, (queued = new Set()));
+    queued.add(src);
+    src.onended = () => queued.delete(src);
+  }
+
+  /** Silence what `playAt` has queued for this stream (another sound track was chosen). */
+  stop(id: number) {
+    for (const src of this.#queued.get(id) ?? []) {
+      src.onended = null;
+      src.stop();
+    }
+    this.#queued.delete(id);
+    this.#next.delete(id);
   }
 
   forget(id: number) {
-    this.#next.delete(id);
+    this.stop(id);
   }
 }
 

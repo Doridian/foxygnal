@@ -96,10 +96,16 @@ export function describeStream(type: number, descriptors: Uint8Array): { codec: 
     case 0x87:
       return { codec: 'eac3', kind: 'audio' };
   }
-  // Private data: DVB says what it is with a descriptor.
-  for (const [tag] of eachDescriptor(descriptors)) {
+  // Private data: DVB says what it is with a descriptor (and some muxers
+  // with a registration descriptor, as ATSC does).
+  for (const [tag, d] of eachDescriptor(descriptors)) {
     if (tag === 0x6a) return { codec: 'ac3', kind: 'audio' };
     if (tag === 0x7a) return { codec: 'eac3', kind: 'audio' };
+    if (tag === 0x05 && d.length >= 4) {
+      const id = String.fromCharCode(d[0], d[1], d[2], d[3]);
+      if (id === 'AC-3') return { codec: 'ac3', kind: 'audio' };
+      if (id === 'EAC3') return { codec: 'eac3', kind: 'audio' };
+    }
     if (tag === 0x7c) return { codec: 'aac', kind: 'audio' };
     if (tag === 0x56) return { codec: 'teletext', kind: 'data' };
     if (tag === 0x59) return { codec: 'subtitles', kind: 'data' };

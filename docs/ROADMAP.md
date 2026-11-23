@@ -248,7 +248,12 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
 - [x] MP2 (MPEG-1 Layer II) sound in the browser, the sound of most DVB services:
       `foxygnal-mp2`, a small Layer I/II decoder in WebAssembly next to the MPEG-2 one
       (every MPEG-1/2/2.5 rate and mode, CRC checked, compared with ffmpeg in its tests)
-- [ ] AC-3 / E-AC-3 and AAC-LATM sound; a choice of sound track when a program has several
+- [x] AC-3 sound in the browser: `foxygnal-ac3` in WebAssembly (every AC-3 rate, bit rate
+      and channel mode; coupling, rematrixing, dynamic range, both transforms; CRCs checked;
+      5.1 downmixed to stereo, LFE left out; 103 dB or better against ffmpeg). AAC in LATM
+      through WebCodecs. A choice of sound track ("language · codec") when a program has
+      several, switched live. The prebuilt modules are checked against a fresh build in CI
+- [ ] E-AC-3 sound (recognised and skipped for now)
 - [ ] Analog TV pictures: a frame-level probe that drops whole frames when behind (see open
       questions)
 - [x] DVB-T (EN 300 744), non-hierarchical: `dvbt_modulator` and `dvbt_demodulator`, 2k/8k,
@@ -291,8 +296,8 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
 - ~~**Video in the browser.**~~ Decided (M14): the engine forwards the transport stream and
   the browser decodes. WebCodecs decodes H.264 and HEVC; MPEG-2, which it can't, is decoded
   by `foxygnal-mpeg2`, a small decoder of our own compiled to WebAssembly (committed as a
-  prebuilt module, so the UI build needs no Rust). MP2 sound got the same treatment
-  (`foxygnal-mp2`).
+  prebuilt module, so the UI build needs no Rust). MP2 and AC-3 sound got the same treatment
+  (`foxygnal-mp2`, `foxygnal-ac3`); CI rebuilds the modules and fails if they differ.
 - **Picture frames vs rows.** M9 sends pictures as row records on `u8` wires, which fits
   pictures that take seconds to minutes. Analog TV needs 25–30 frames a second of up to
   720×576: whether rows on `u8` still fit (about 10 MB/s at full PAL resolution), or video

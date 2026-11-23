@@ -8,7 +8,7 @@
   import { browserAudio } from '../audio.svelte';
   import type { TsFrame } from '../frames';
   import type { VideoSettings } from '../instruments.svelte';
-  import type { Program } from '../video/ts';
+  import type { EsInfo, Program } from '../video/ts';
   import type { FromWorker, Stats, ToWorker } from '../video/protocol';
 
   let {
@@ -60,6 +60,7 @@
   function flush() {
     for (const q of queue) q.frame.close();
     queue = [];
+    browserAudio.stop(audioId());
   }
 
   function onmessage(e: MessageEvent<FromWorker>) {
@@ -81,6 +82,9 @@
         break;
       case 'flush':
         flush();
+        break;
+      case 'audio-flush':
+        browserAudio.stop(audioId());
         break;
     }
   }
@@ -126,6 +130,7 @@
     worker = new Worker(new URL('../video/worker.ts', import.meta.url), { type: 'module' });
     worker.onmessage = onmessage;
     send({ type: 'program', number: settings.program });
+    send({ type: 'track', pid: settings.track ?? null });
     send({ type: 'audio', on: settings.audio });
     let raf = 0;
     const loop = () => {
@@ -156,6 +161,7 @@
   });
 
   $effect(() => send({ type: 'program', number: settings.program }));
+  $effect(() => send({ type: 'track', pid: settings.track ?? null }));
   $effect(() => send({ type: 'audio', on: settings.audio }));
 
   function toggleSound() {
@@ -182,7 +188,12 @@
     eac3: 'E-AC-3',
   };
   const codecName = (c: string) => CODEC[c] ?? c;
+  /** Codecs the worker plays (worker.ts's DECODED_AUDIO). */
+  const PLAYED = new Set(['aac', 'aac-latm', 'mp2', 'ac3']);
   const current = $derived(programs.find((p) => p.number === selected) ?? null);
+  const tracks = $derived(current?.streams.filter((s) => s.kind === 'audio') ?? []);
+  const trackLabel = (s: EsInfo) => `${s.lang ?? `PID ${s.pid}`} · ${codecName(s.codec)}${PLAYED.has(s.codec) ? '' : ' (not decoded)'}`;
+  const playing = $derived(tracks.find((s) => s.pid === stats?.audio?.pid) ?? null);
   const note = $derived(stats?.video?.note ?? (stats && !stats.video && current ? 'This program has no video.' : null));
 </script>
 
@@ -198,6 +209,19 @@
         <option value={String(p.number)}>{p.number} · {programLabel(p)}</option>
       {/each}
     </select>
+    {#if tracks.length > 1}
+      <select
+        class="track"
+        aria-label="Sound track"
+        value={settings.track == null || !tracks.some((s) => s.pid === settings.track) ? 'auto' : String(settings.track)}
+        onchange={(e) => onchange({ track: e.currentTarget.value === 'auto' ? null : Number(e.currentTarget.value) })}
+      >
+        <option value="auto">{playing && settings.track == null ? `Auto: ${trackLabel(playing)}` : 'Auto (first decoded)'}</option>
+        {#each tracks as s (s.pid)}
+          <option value={String(s.pid)}>{trackLabel(s)}</option>
+        {/each}
+      </select>
+    {/if}
     {#if settings.audio && browserAudio.blocked}
       <button type="button" class="enable" onclick={() => browserAudio.unlock()}>Click to enable sound</button>
     {/if}
@@ -238,7 +262,7 @@
           <dt>Audio</dt>
           <dd>
             {codecName(a.codec)}{a.lang ? ` (${a.lang})` : ''}
-            {#if a.rate}· {a.rate / 1000} kHz{a.channels ? ` · ${a.channels} ch` : ''}{/if}
+            {#if a.rate}· {a.rate / 1000} kHz{a.channels ? ` · ${a.layout && a.layout !== `${a.channels}.0` ? `${a.layout} as ${a.channels} ch` : `${a.channels} ch`}` : ''}{/if}
             · {fmtRate(a.bitrate)}
             {#if a.decoder}<br />{a.decoder === 'wasm' ? 'WebAssembly' : a.decoder} · {a.frames} frames{a.errors ? ` · ${a.errors} errors` : ''}{/if}
             {#if a.note}<br /><span class="warn">{a.note}</span>{/if}
@@ -273,6 +297,10 @@
     flex: 1;
     min-width: 0;
     font-size: 12px;
+  }
+  select.track {
+    flex: 0 1 auto;
+    max-width: 40%;
   }
   .tog {
     width: 30px;
