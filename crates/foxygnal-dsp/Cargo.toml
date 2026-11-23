@@ -21,4 +21,4 @@ harness = false
 workspace = true
 
 [dev-dependencies]
-criterion = { version = "0.7.0", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8.0", default-features = false, features = ["cargo_bench_support"] }
