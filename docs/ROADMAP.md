@@ -66,7 +66,7 @@ Goal: a live FM receiver from an RTL-SDR with three clicks.
 
 Goal: credible numbers on a Raspberry Pi.
 
-- [x] Benchmarks (`criterion`) per block plus whole-graph throughput, tracked in CI
+- [x] Benchmarks (`criterion`) per block plus whole-graph throughput, run in CI on demand
 - [x] Double-mapped ring buffers (contiguous slices)
 - [x] Pooled scheduler; dedicated threads only where needed
 - [x] SIMD kernels for FIR, FFT glue, complex multiply, and type conversion

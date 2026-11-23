@@ -5,19 +5,23 @@ name: Benchmarks
 # this reports and never fails on a slowdown: read the table in the log or
 # download the `criterion-*` artifact.
 #
-# On a pull request the base branch is benchmarked first, on the same runner,
-# and the table compares the two. On main the results are uploaded.
+# Manual only (Actions → Benchmarks → Run workflow): benchmarks are slow and
+# noisy, so they are not part of the normal CI for every push and pull request.
+# Pick the branch to benchmark; if `base` names another branch, that branch is
+# benchmarked first, on the same runner, and the table compares the two.
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      base:
+        description: Branch to compare against (empty for none)
+        required: false
+        default: main
 
 jobs:
   bench:
     runs-on: ${{ vars.MANAGED_RUNNER_TAG || 'ubuntu-26.04' }}
+    timeout-minutes: 45
     env:
       # Short warm-up and measurement: minutes, not tens of minutes.
       BENCH: cargo bench -p foxygnal-dsp -p foxygnal-blocks --bench kernels --bench blocks --
@@ -38,12 +42,12 @@ jobs:
 
       - name: Benchmark the base branch
         id: base
-        if: github.event_name == 'pull_request'
+        if: inputs.base != '' && inputs.base != github.ref_name
         # The base may predate the benchmarks; then there is nothing to compare.
         continue-on-error: true
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          BASE_REF: ${{ github.base_ref }}
+          BASE_REF: ${{ inputs.base }}
         run: |
           git worktree add --detach "$RUNNER_TEMP/base" "origin/$BASE_REF"
           cd "$RUNNER_TEMP/base"
@@ -70,7 +74,7 @@ jobs:
         continue-on-error: true
         uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
-          name: criterion-${{ github.event_name }}-${{ github.sha }}
+          name: criterion-${{ github.sha }}
           path: |
             bench-report/
             target/criterion/

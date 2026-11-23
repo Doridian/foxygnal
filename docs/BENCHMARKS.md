@@ -65,19 +65,21 @@ it goes. Its throughput divided by 2.4 M is "times faster than real time".
 
 ## CI
 
-`.forgejo/workflows/bench.yml` runs on every pull request and push to `main`, in a quick mode
-(`--warm-up-time 0.5 --measurement-time 1`):
+`.forgejo/workflows/bench.yml` is not part of the normal CI: it only runs when started by hand
+(Actions → Benchmarks → Run workflow), in a quick mode (`--warm-up-time 0.5 --measurement-time 1`)
+and with a 45-minute timeout:
 
-- On a **pull request** it first benchmarks the base branch in a separate worktree, on the same
-  runner (`--save-baseline base`), then the PR (`--save-baseline head`), and prints
+- Pick the branch to benchmark. If the `base` input (default `main`) names a different branch,
+  that branch is benchmarked first in a separate worktree, on the same runner
+  (`--save-baseline base`), then the chosen branch (`--save-baseline head`), and it prints
   `bench-report.py table --baseline base`. Comparing two runs on one runner is far more
   meaningful than comparing with numbers from another machine. If the base has no benchmarks
-  (or they fail) the table shows the PR alone.
+  (or they fail) the table shows the branch alone.
 - It also prints the difference from the committed reference numbers
   (`docs/benchmarks/reference-x86_64.json`, this document's machine); only large moves mean
   anything there.
 - The table, a JSON export and criterion's whole `target/criterion` directory are uploaded as
-  the `criterion-<event>-<sha>` artifact (30 days).
+  the `criterion-<sha>` artifact (30 days).
 - It never fails the build on a slowdown: shared runners are noisy, and quick mode more so.
   Read the ▲/▼ markers (moves beyond ±5%) as "worth a look", not as verdicts.
 
