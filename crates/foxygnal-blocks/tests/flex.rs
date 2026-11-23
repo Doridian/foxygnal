@@ -88,6 +88,8 @@ enum Msg<'a> {
     /// Tone only, with up to three (short address) or eight (long) digits.
     Tone(&'a str),
     Binary(&'a [u32]),
+    /// A secure page (vector type 0) of alphanumeric text.
+    Secure(&'a [u8]),
 }
 
 #[derive(Clone, Copy)]
@@ -117,6 +119,7 @@ fn address(capcode: u64) -> Vec<u32> {
 fn message(msg: Msg<'_>, number: u32) -> (Vec<u32>, u32) {
     match msg {
         Msg::Alpha(text) => message(Msg::Fragment(text, 3, false), number),
+        Msg::Secure(text) => (message(Msg::Alpha(text), number).0, 0),
         Msg::Fragment(text, frag, more) => {
             // Header: message number, fragment number, continuation flag.
             let mut words = vec![(number << 13) | (frag << 11) | (u32::from(more) << 10)];
@@ -291,7 +294,8 @@ fn frame(
     for (((&pa, &pb), &pc), &pd) in columns {
         match (speed.baud, speed.levels) {
             (1600, 2) => out.push((two(pa), b)),
-            (1600, _) => out.push((four(pa, pb), b)),
+            // 3200 bps has phases A and C, however it is modulated.
+            (1600, _) => out.push((four(pa, pc), b)),
             (_, 2) => out.extend([(two(pa), b), (two(pc), b)]),
             _ => out.extend([(four(pa, pb), b), (four(pc, pd), b)]),
         }
@@ -354,6 +358,9 @@ fn render(syms: &[Sym], air: &Air, rng: &mut Rng) -> Vec<f32> {
             } else {
                 ends[k].1
             };
+            if v.is_nan() {
+                return (2.0 * rng.gauss()) as f32;
+            }
             (air.dc + air.gain * v + air.noise * rng.gauss()) as f32
         })
         .collect()
@@ -408,7 +415,7 @@ const ALPHA: &[u8] = b"Hello, World! 123 \"quoted\" back\\slash\nline two";
 fn pages(speed: Speed) -> Vec<Page<'static>> {
     let phases: &[usize] = match (speed.baud, speed.levels) {
         (1600, 2) => &[0],
-        (1600, _) => &[0, 1],
+        (1600, _) => &[0, 2],
         (_, 2) => &[0, 2],
         _ => &[0, 1, 2, 3],
     };
@@ -458,7 +465,7 @@ fn expected(speed: Speed) -> Vec<String> {
                 Msg::Numeric(s) => format!("{head} type=numeric msg=\"{s}\""),
                 Msg::Tone("") => format!("{head} type=tone"),
                 Msg::Tone(d) => format!("{head} type=tone msg=\"{d}\""),
-                Msg::Binary(_) | Msg::Fragment(..) => unreachable!(),
+                Msg::Binary(_) | Msg::Fragment(..) | Msg::Secure(_) => unreachable!(),
             }
         })
         .collect()
@@ -617,6 +624,60 @@ fn inverted_weak_and_off_clock() {
             speed.levels
         );
     }
+}
+
+#[test]
+fn secure_pages_on_short_addresses_in_phase_b() {
+    // A layout seen on a real 6400 bps channel (made-up capcodes): phase B mixing short addresses
+    // (secure, alpha) with long ones, so vectors sit at shifted positions.
+    let mut rng = Rng(13);
+    let page = |capcode, msg| Page {
+        phase: 1,
+        capcode,
+        msg,
+    };
+    let pages = [
+        page(205, Msg::Alpha(b"short")),
+        page(8_300_000, Msg::Binary(&[0x012345])),
+        page(70_001, Msg::Secure(b"one")),
+        page(8_312_345, Msg::Alpha(b"long")),
+        page(600_123, Msg::Secure(b"two")),
+    ];
+    let syms = frame(S6400, 6, 32, &pages, &[]);
+    let x = render(&syms, &AIR, &mut rng);
+    let text = run(x, AIR.rate, vec![], json!({}), None);
+    let head = "baud=3200 levels=4 phase=B cycle=6 frame=32";
+    assert_eq!(
+        lines(&text),
+        [
+            format!("{head} capcode=000000205 type=alpha msg=\"short\""),
+            format!("{head} capcode=008300000 type=binary hex=\"012345\""),
+            format!("{head} capcode=000070001 type=secure msg=\"one\""),
+            format!("{head} capcode=008312345 type=alpha msg=\"long\""),
+            format!("{head} capcode=000600123 type=secure msg=\"two\""),
+        ]
+    );
+}
+
+#[test]
+fn shortened_frames() {
+    // Transmitters key off once the blocks in use are sent; the receiver
+    // hears noise for the rest of the frame, then the next frame on time.
+    let mut rng = Rng(14);
+    let pages = &pages(S6400)[..2];
+    let mut syms = frame(S6400, 3, 45, pages, &[]);
+    // Sync 1 + FIW + Sync 2 + 3 blocks of 160 ms (2 × 512 symbols each at 3200 Bd).
+    let used = 144 + 80 + 3 * 512;
+    for s in &mut syms[used..] {
+        s.0 = f64::NAN;
+    }
+    syms.extend(frame(S6400, 3, 46, pages, &[]));
+    let x = render(&syms, &AIR, &mut rng);
+    let text = run(x, AIR.rate, vec![], json!({}), None);
+    let want: Vec<String> = expected(S6400)[..2].to_vec();
+    let mut both = want.clone();
+    both.extend(want.iter().map(|l| l.replace("frame=45", "frame=46")));
+    assert_eq!(lines(&text), both);
 }
 
 #[test]
