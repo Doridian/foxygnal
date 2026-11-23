@@ -1297,7 +1297,8 @@ pub(crate) fn map(cx: &mut Cx<'_>) -> Result<Out, String> {
             return Err("the sub-graph couldn't be flattened".into());
         }
         "adsb_decoder" | "rds_decoder" | "packet_decoder" | "message_log" | "pocsag_decoder"
-        | "aprs_decoder" | "sstv_decoder" | "image_sink" => {
+        | "aprs_decoder" | "sstv_decoder" | "image_sink" | "dvbs_modulator"
+        | "dvbs_demodulator" => {
             return Err("a foxygnal decoder with no GNU Radio equivalent".into());
         }
         "fm_stereo" | "ssb_demod" | "fsk_demod" | "psk_demod" => {

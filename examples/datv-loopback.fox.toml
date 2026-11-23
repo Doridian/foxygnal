@@ -1,0 +1,126 @@
+# DATV loopback: an MPEG transport stream file through a DVB-S modulator, a
+# noisy channel 2 kHz off frequency, and the DVB-S demodulator, with no radio.
+#
+#   TS file ──throttle──▶ DVB-S mod ──×tone──+noise──▶ DVB-S demod ──▶ TS
+#                          1 MBd, 3/4, 2 MS/s                      └─▶ status log
+#
+# Needs a TS file whose rate matches the channel: 1 MBd at rate 3/4 carries
+# 1 MBd × 2 × 3/4 × 188/204 = 1 382 353 bit/s of TS. Make one with ffmpeg (a
+# test picture and tone, H.264 + AAC, padded to exactly that rate):
+#
+#   ffmpeg -f lavfi -i testsrc=size=640x360:rate=25 -f lavfi -i sine=frequency=1000 \
+#     -t 60 -c:v libx264 -b:v 900k -maxrate 900k -bufsize 900k -g 25 \
+#     -c:a aac -b:a 64k -f mpegts -muxrate 1382353 datv-test.ts
+#
+# and put it in the project directory (or next to this file for `foxygnal run`).
+# The file loops. Watch `demod.status` (Messages) for lock, MER and error
+# counts, the constellation on the wire into `demod`, and the TS on
+# `demod.ts`: whole 188-byte packets, ready for a video player (or a File Sink,
+# or a UDP Sink with a 1316-byte payload to `ffplay udp://127.0.0.1:1234`).
+# Raise `noise` to find the threshold (Es/N0 = 10·log10(0.5 / noise²) dB;
+# 0.18 is about 12 dB, rate 3/4 decodes down to about 5.5 dB, noise ≈ 0.38).
+#
+#   foxygnal run examples/datv-loopback.fox.toml
+
+[vars]
+symbol_rate = "1M"
+sps = 2
+ts_rate = "$symbol_rate * 2 * 0.75 * 188 / 204 / 8"
+offset = "2k"
+noise = 0.18
+
+[[block]]
+id = "ts_file"
+kind = "file_source"
+params = { type = "u8", path = "datv-test.ts", repeat = true, sample_rate = "$ts_rate" }
+ui = { x = 50, y = 60 }
+
+[[block]]
+id = "realtime"
+kind = "throttle"
+params = { type = "u8", sample_rate = 0 }
+ui = { x = 300, y = 60 }
+
+[[block]]
+id = "mod"
+kind = "dvbs_modulator"
+params = { symbol_rate = "$symbol_rate", rate = "3/4", sps = "$sps", gain = 0.5 }
+ui = { x = 550, y = 60 }
+
+[[block]]
+id = "carrier"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = "$offset", amplitude = 1.0, sample_rate = "$symbol_rate * $sps" }
+ui = { x = 550, y = 220 }
+
+[[block]]
+id = "shift"
+kind = "multiply"
+params = { type = "c32" }
+ui = { x = 830, y = 120 }
+
+[[block]]
+id = "noise"
+kind = "noise_source"
+params = { type = "c32", amplitude = "$noise", seed = 0 }
+ui = { x = 830, y = 280 }
+
+[[block]]
+id = "channel"
+kind = "add"
+params = { type = "c32" }
+ui = { x = 1080, y = 160 }
+
+[[block]]
+id = "demod"
+kind = "dvbs_demodulator"
+params = { symbol_rate = "$symbol_rate", rate = "auto" }
+ui = { x = 1330, y = 160 }
+
+[[block]]
+id = "ts_out"
+kind = "null_sink"
+params = { type = "u8" }
+ui = { x = 1630, y = 100 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 1630, y = 240 }
+
+[[connect]]
+from = "ts_file.out"
+to = "realtime.in"
+
+[[connect]]
+from = "realtime.out"
+to = "mod.in"
+
+[[connect]]
+from = "mod.out"
+to = "shift.a"
+
+[[connect]]
+from = "carrier.out"
+to = "shift.b"
+
+[[connect]]
+from = "shift.out"
+to = "channel.a"
+
+[[connect]]
+from = "noise.out"
+to = "channel.b"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.ts"
+to = "ts_out.in"
+
+[[connect]]
+from = "demod.status"
+to = "log.in"

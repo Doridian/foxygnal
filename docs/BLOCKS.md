@@ -153,7 +153,9 @@ ARCHITECTURE.md): watch it with the **Messages** instrument or end it in a Messa
 | POCSAG Decoder | `pocsag_decoder` | f32 FM discriminator (de-emphasis off) or NRZ baseband, ≥ 9.6 kS/s → u8 text: 512 / 1200 / 2400 Bd (or `auto`: all three at once), either polarity, sync 0x7CD215D8 and batches, BCH(31,21) repair of up to 2 bits + parity, RIC and function bits, numeric / alphanumeric / both / auto (function bits plus a plausibility check); `t=… baud=1200 ric=… func=3 type=alpha msg="…"` | ✅ |
 | AFSK 1200 Demodulator | `afsk1200_demod` | f32 audio (≥ ~7 kS/s) → u8 bits (mark = 1) or f32 soft at 1200/s: Bell 202 quadrature correlators with per-tone level tracking (pre-/de-emphasis tilt doesn't matter), bit-timing PLL; tones and baud adjustable | ✅ |
 | HDLC Deframer | `hdlc_deframer` | u8 bits → u8: NRZI (optional), 0x7E flags, bit unstuffing, abort on seven 1s, CRC-16-CCITT FCS check (or pass bad frames marked `fcs=bad`); output AX.25 text (call signs, path, control/PID, APRS: positions with/without timestamp, uncompressed and compressed, Mic-E, status, message, object, item, others raw), hex lines, or raw bytes tagged `packet` | ✅ |
-| Multi-level FSK, GFSK/GMSK shaping, FEC | | | 🔜 later |
+| DVB-S Modulator | `dvbs_modulator` | u8 TS (188-byte packets) → c32 at sps × symbol rate: EN 300 421 energy dispersal, RS(204,188), Forney interleaver (12 × 17), K = 7 convolutional code punctured 1/2 / 2/3 / 3/4 / 5/6 / 7/8, Gray QPSK, RRC α = 0.35; RMS level setting | ✅ |
+| DVB-S Demodulator | `dvbs_demodulator` | c32 (≥ 2 samples/symbol) → u8 TS (`ts`) + u8 text (`status`): RRC matched filter, Gardner timing, AGC, QPSK Costas, 4th-power FFT frequency search (± symbol rate / 8), automatic code rate, puncturing phase and phase ambiguity (also a mirrored spectrum), soft Viterbi, RS; uncorrectable packets keep their place with transport_error_indicator set; status once a second and on lock changes | ✅ |
+| Multi-level FSK, GFSK/GMSK shaping | | | 🔜 later |
 
 ## Level
 | block | kind | types | status |

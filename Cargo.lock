@@ -861,6 +861,7 @@ dependencies = [
  "libc",
  "num-complex",
  "png",
+ "rustfft",
  "serde_json",
 ]
 

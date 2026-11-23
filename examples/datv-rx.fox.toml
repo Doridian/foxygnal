@@ -1,0 +1,64 @@
+# DATV receiver: a DVB-S amateur TV signal from an SDR, to an MPEG transport
+# stream.
+#
+#   SDR ──▶ DVB-S demod ──ts──▶ UDP 127.0.0.1:1234 (ffplay / VLC)
+#                       └─status──▶ message log
+#
+# Set `freq` to the transmission and `symbol_rate` to its symbol rate:
+# - 23 cm terrestrial DATV, e.g. 1255 MHz (local repeaters and nets vary).
+# - QO-100 (Es'hail-2) wideband transponder through a 9750 MHz LNB: the
+#   downlink 10 491–10 499 MHz arrives at an IF of 741–749 MHz. Most stations
+#   there use DVB-S2 now (not decoded yet); DVB-S ones usually run 333, 250
+#   or 125 kBd.
+# The SDR runs at `sps` samples per symbol (at least 2; RTL-SDRs go to
+# 3.2 MS/s, so up to 1.6 MBd at 2 sps; a HackRF needs at least 2 MS/s).
+# The demodulator finds a few kHz of tuning error by itself (up to
+# symbol rate / 8), and the code rate and phase.
+#
+# Watch `demod.status` (Messages): `state=lock`, MER and error counts. The TS
+# goes to UDP port 1234 on this machine, one datagram per 7 packets:
+#
+#   ffplay -fflags nobuffer udp://127.0.0.1:1234    (or VLC: udp://@:1234)
+#
+#   foxygnal run examples/datv-rx.fox.toml
+
+[vars]
+freq = "1255M"
+symbol_rate = "333k"
+sps = 4
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$freq", sample_rate = "$symbol_rate * $sps", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "dvbs_demodulator"
+params = { symbol_rate = "$symbol_rate", rate = "auto" }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "ts_out"
+kind = "udp_sink"
+params = { type = "u8", host = "127.0.0.1", port = 1234, header = "none", payload = 1316 }
+ui = { x = 700, y = 60 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 700, y = 200 }
+
+[[connect]]
+from = "sdr.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.ts"
+to = "ts_out.in"
+
+[[connect]]
+from = "demod.status"
+to = "log.in"

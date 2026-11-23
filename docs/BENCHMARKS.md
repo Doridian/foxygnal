@@ -62,6 +62,10 @@ ceiling. Blocks: `fir_filter` (c32/f32, 127 taps), `freq_xlating_fir` (198 taps 
 `graph/fm_receiver_2m4` is `examples/fm-receiver.fox.toml` fed from memory: 2.4 MS/s c32 →
 `freq_xlating_fir` ÷10 → `fm_demod` → `rational_resampler` to 48 kS/s → null sink, as fast as
 it goes. Its throughput divided by 2.4 M is "times faster than real time".
+`graph/dvbs_demodulator_3_4_2sps` is the DVB-S demodulator on a 1 MBd, rate 3/4 signal from
+`dvbs_modulator` at 2 samples/symbol, Es/N0 10 dB, 1.5 kHz off (≈ 1.3 M samples, the
+acquisition included): input samples/s, so symbols/s is half. About 21 MS/s (10.5 MBd) on a
+Ryzen 9 7940HS.
 
 ## CI
 
