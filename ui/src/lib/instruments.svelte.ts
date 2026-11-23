@@ -4,7 +4,7 @@
 
 import type { EdgeRef, FftWindow, ProbeConfig, ScopeChannel, TriggerMode } from './api';
 
-export type InstrumentKind = 'scope' | 'spectrum' | 'constellation' | 'meter' | 'text' | 'image' | 'video';
+export type InstrumentKind = 'scope' | 'spectrum' | 'constellation' | 'meter' | 'text' | 'map' | 'image' | 'video';
 
 export interface ScopeSettings {
   channels: ScopeChannel[];
@@ -51,6 +51,23 @@ export interface TextSettings {
   filter: string;
 }
 
+export interface MapSettings {
+  /** Positions kept per track's trail (1 = no trail). */
+  trail: number;
+  /** Seconds a track stays after its last message; it fades out over this time. */
+  expiry: number;
+  labels: boolean;
+  /** Distances in kilometres or nautical miles. */
+  units: 'km' | 'nm';
+  /** Draw map tiles from `tileUrl` instead of the built-in world map. Off by default: tile requests tell the tile server where you look. */
+  tiles: boolean;
+  /** OpenStreetMap-style template, `https://…/{z}/{x}/{y}.png`. */
+  tileUrl: string;
+  /** Receiver position for range rings; kept in this browser only. */
+  rxLat: number | null;
+  rxLon: number | null;
+}
+
 export interface ImageSettings {
   /** Pictures kept in the strip below the current one. */
   keep: number;
@@ -83,6 +100,7 @@ export type Instrument = Base &
     | { kind: 'constellation'; settings: ConstellationSettings }
     | { kind: 'meter'; settings: MeterSettings }
     | { kind: 'text'; settings: TextSettings }
+    | { kind: 'map'; settings: MapSettings }
     | { kind: 'image'; settings: ImageSettings }
     | { kind: 'video'; settings: VideoSettings }
   );
@@ -115,6 +133,16 @@ export const defaults = {
   constellation: (): ConstellationSettings => ({ points: 1024, persistence: 0.6, scale: 1 }),
   meter: (): MeterSettings => ({}),
   text: (): TextSettings => ({ maxLines: 2000, filter: '' }),
+  map: (): MapSettings => ({
+    trail: 100,
+    expiry: 300,
+    labels: true,
+    units: 'km',
+    tiles: false,
+    tileUrl: '',
+    rxLat: null,
+    rxLon: null,
+  }),
   image: (): ImageSettings => ({ keep: 8, pixelated: false }),
   video: (): VideoSettings => ({ program: null, audio: false, info: true }),
 };
@@ -125,6 +153,7 @@ export const KIND_LABELS: Record<InstrumentKind, string> = {
   constellation: 'Constellation',
   meter: 'Level meter',
   text: 'Messages',
+  map: 'Map',
   image: 'Image',
   video: 'Video',
 };
@@ -162,6 +191,7 @@ export function probeConfig(inst: Instrument, width: number, rate: number | null
     case 'meter':
       return { kind: 'meter' };
     case 'text':
+    case 'map':
       return { kind: 'text' };
     case 'image':
       return { kind: 'image' };
@@ -273,6 +303,7 @@ class Instruments {
     else if (kind === 'scope') inst = { ...base, kind, settings: defaults.scope() };
     else if (kind === 'constellation') inst = { ...base, kind, settings: defaults.constellation() };
     else if (kind === 'text') inst = { ...base, kind, settings: defaults.text(), fps: 10 };
+    else if (kind === 'map') inst = { ...base, kind, settings: defaults.map(), fps: 5 };
     else if (kind === 'image') inst = { ...base, kind, settings: defaults.image(), fps: 10 };
     // Packets every 1/30 s keep the jitter buffer short.
     else if (kind === 'video') inst = { ...base, kind, settings: defaults.video(), fps: 30 };

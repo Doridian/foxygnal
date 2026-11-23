@@ -2,6 +2,7 @@
   import type { Frame } from '../frames';
   import { graphView } from '../graphview.svelte';
   import { instruments, probeConfig, title, type Instrument } from '../instruments.svelte';
+  import { TrackStore } from '../map/tracks';
   import { fmtNum, fmtTime } from '../plot';
   import { session } from '../session.svelte';
   import { CHANNEL_LABELS, typeColour } from './colours';
@@ -31,6 +32,10 @@
   /** Video instrument: receives every frame's packets. */
   let videoView = $state<VideoView>();
   let gotPackets = $state(false);
+  /** Map instrument: tracks, kept here so lines that arrive while the map loads aren't lost. */
+  const tracks = new TrackStore();
+  let tracksVersion = $state(0);
+  let gotPositions = $state(false);
 
   function addText(gap: boolean, text: string) {
     const fresh: (string | null)[] = text ? text.replace(/\n$/, '').split('\n') : [];
@@ -71,7 +76,14 @@
       { from: inst.edge.from, to: inst.edge.to },
       cfg,
       (f) => {
-        if (f.kind === 'text') addText(f.gap, f.text);
+        if (f.kind === 'text') {
+          if (inst.kind === 'map') {
+            if (tracks.addText(f.text, Date.now())) {
+              tracksVersion++;
+              if (!gotPositions) for (const _ of tracks.positioned()) gotPositions = true;
+            }
+          } else addText(f.gap, f.text);
+        }
         if (f.kind === 'image' && f.rows.length) {
           imageView?.add(f.rows);
           gotRows = true;
@@ -111,10 +123,11 @@
     if (!session.connected) return 'Engine disconnected';
     if (!onGraph) return 'This wire is no longer in the graph.';
     if (error) return error;
-    if (!running) return frame || lines.length || gotRows || gotPackets ? null : 'Not running. Press Run to see the signal.';
+    if (!running) return frame || lines.length || gotRows || gotPackets || gotPositions ? null : 'Not running. Press Run to see the signal.';
     if (!quiet || captured) return null;
     if (inst.kind === 'scope' && inst.settings.trigger !== 'off' && inst.settings.trigger !== 'auto') return 'Waiting for a trigger…';
     if (inst.kind === 'text') return frame || lines.length ? null : 'Waiting for messages…';
+    if (inst.kind === 'map') return gotPositions ? null : 'Waiting for positions…';
     if (inst.kind === 'image') return gotRows ? null : 'Waiting for a picture…';
     if (inst.kind === 'video') return gotPackets ? null : 'Waiting for a transport stream…';
     return frame ? null : 'Waiting for samples…';
@@ -140,6 +153,7 @@
         return [`${inst.settings.points} pts`];
       case 'meter':
       case 'text':
+      case 'map':
       case 'image':
       case 'video':
         return [];
@@ -226,6 +240,22 @@
       <ImageView bind:this={imageView} settings={inst.settings} {running} onchange={(p) => change({ settings: p })} />
     {:else if inst.kind === 'video'}
       <VideoView bind:this={videoView} id={inst.id} settings={inst.settings} {running} onchange={(p) => change({ settings: p })} />
+    {:else if inst.kind === 'map'}
+      {@const settings = inst.settings}
+      <!-- Loaded on first use, with its world map, to keep the main bundle small. -->
+      {#await import('./MapView.svelte') then { default: MapView }}
+        <MapView
+          {settings}
+          store={tracks}
+          version={tracksVersion}
+          onclear={() => {
+            tracks.clear();
+            gotPositions = false;
+            tracksVersion++;
+          }}
+          onchange={(p) => change({ settings: p })}
+        />
+      {/await}
     {:else if inst.kind === 'text'}
       <TextView settings={inst.settings} {lines} onclear={() => (lines = [])} onchange={(p) => change({ settings: p })} />
     {:else}

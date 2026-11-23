@@ -46,6 +46,14 @@ decoder" (`examples/pocsag.fox.toml`), "FLEX pager decoder" (`examples/flex.fox.
 (`examples/aprs.fox.toml`), "AIS ship decoder" (`examples/ais.fox.toml`, both AIS channels
 at once) and "ACARS aircraft datalink" (`examples/acars.fox.toml`).
 
+**Maps.** The Map instrument plots the positions any decoder reports (`lat=… lon=…`):
+ADS-B aircraft, AIS ships, APRS stations and objects, each with a trail, a heading arrow and
+a label, merged with the identity and static data that come without a position (a flight
+number, a ship's name), fading out as they go quiet. Click one for everything it sent. The
+base map is a built-in Natural Earth world map, so it works offline and nothing leaves your
+computer; map tiles from an OpenStreetMap-style server are an opt-in setting, as is a
+receiver position for range rings (kept in the browser).
+
 **Pictures.** The SSTV decoder (Robot, Martin, Scottie, Wraase and PD modes, from the VIS
 header, with slant correction) draws pictures in the Image instrument as they arrive and
 saves each one as a PNG with an Image Sink. Templates: "SSTV pictures" (the ISS on 145.8 MHz,
