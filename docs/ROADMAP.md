@@ -174,6 +174,11 @@ template.
   - [ ] ISM-band sensors (433/868/915 MHz): an OOK/FSK pulse demodulator, PWM/PPM/Manchester
         slicers, and a table of device formats in the spirit of rtl_433 (weather stations, tire
         pressure sensors, doorbells, power meters)
+  - [x] A **Map** instrument for any decoder's positions (`lat=`/`lon=`, keyed by `icao`,
+        `mmsi`, APRS `src` or object name, `serial`, `id`, `callsign`): trails, heading
+        arrows, labels, fading and expiry, details on click, merged identity and static
+        data, range rings around an optional receiver position. Offline Natural Earth base
+        map; OpenStreetMap-style tiles opt-in
   - [ ] Radiosondes: Vaisala RS41 (GFSK 4800 Bd, Reed-Solomon, positions and PTU) first,
         then Graw DFM and Meteomodem M10/M20
 - **Maritime and aviation**

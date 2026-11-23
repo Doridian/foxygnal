@@ -31,7 +31,7 @@ pub fn register(r: &mut Registry) {
                    altitude, velocity and position (from an even/odd CPR pair). One line of \
                    text per message, e.g. `t=1.234567 icao=4840D6 df=17 tc=4 type=ident \
                    callsign=KLM1023 raw=…`; connect it to a Message Log and watch the wire \
-                   with the Messages instrument.",
+                   with the Messages or Map instrument.",
             inputs: vec![PortSpec {
                 name: "in",
                 ty: Some(StreamType::F32),

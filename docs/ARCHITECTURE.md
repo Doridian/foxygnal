@@ -384,8 +384,9 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
     the same frames: the UI adds one row per frame.
   - **Constellation**: the latest N points (c32 wires only). Persistence is drawn in the UI.
   - **Meter**: RMS, peak and DC over everything since the last frame.
-  - **Messages** (`text` probe, u8 wires only): every complete text line since the last
-    frame, starting with what the ring still holds when it opens. See "Decoded messages".
+  - **Messages** and **Map** (`text` probe, u8 wires only): every complete text line since
+    the last frame, starting with what the ring still holds when it opens. See "Decoded
+    messages" and "Positions on a map".
   - **Image** (`image` probe, frame kind 7, u8 wires only): every whole picture row since the
     last frame, as the raster records themselves (each padded to 4 bytes). See "Decoded
     pictures".
@@ -415,6 +416,9 @@ generic:
   wire popover and the dock for u8 wires. The probe reads a tap like every probe (never
   back-pressures the decoder), sends only whole lines, and starts with whatever history the
   ring still holds, so opening it late still shows recent messages.
+- The **Map** instrument (`ui/src/lib/instruments/MapView.svelte`, the same `text` probe) is
+  offered next to Messages and plots the lines that carry a position. See "Positions on a
+  map".
 - `message_log` (Sinks) is the natural end of a decoder's output; with `stdout = true` it
   prints whole lines on the engine's standard output, for `foxygnal run`. It takes up to four
   inputs (`inputs = 2`: ports `in`, `in1`), so decoders of several channels (the two AIS
@@ -430,6 +434,40 @@ once it has gone out, so a stalled consumer back-pressures the decoder and forma
 not allocate on the hot path. If the input ends while a message waits for room downstream,
 the decoder waits (`WorkStatus::Wait`) instead of finishing, unless every reader has left
 (`OutputPort::abandoned`).
+
+## Positions on a map
+
+The Map instrument works from the decoded-message convention alone, by field names, so a new
+decoder that reports positions shows up on it without UI code (`ui/src/lib/map/tracks.ts`):
+
+- **Position**: `lat` and `lon` in decimal degrees (`latitude`/`longitude` and `lng` are
+  accepted too). The decoders that report positions (`adsb_decoder`, `ais_decoder`, APRS in
+  `hdlc_deframer`/AX.25) all write `lat=`/`lon=`; new ones should as well.
+- **Track id**, the first present of: `icao` (aircraft), `mmsi` (ships), `name` when
+  `type=object` or `type=item` (an APRS object is its own track, not its sender's), `src`
+  (APRS / AX.25 stations), `serial` (radiosondes, planned), `id`, `callsign`. Positions
+  with no id share one anonymous track.
+- **Merging**: every line with an id updates that track's fields (latest value wins), with or
+  without a position, so an ADS-B identity message names the aircraft and an AIS type 5
+  message names the ship. Only lines with a position extend the trail.
+- **Heading** for the arrow: the first of `track_deg`, `track`, `cog`, `course`,
+  `heading_deg`, `heading`, `hdg`. **Label**: `flight`, `name`, `callsign`, `src`, `serial`,
+  else the id.
+- Tracks age by arrival time in the browser (lines carry sample time, not wall time), fade
+  over the expiry time and are then dropped; a track limit evicts the longest silent.
+
+The map is a Canvas 2D with our own Web Mercator (`ui/src/lib/map/mercator.ts`), not a map
+library. The default base map is Natural Earth 1:50m land, coastlines and borders (public
+domain), built by `ui/scripts/build-world.mjs` from world-atlas's TopoJSON into a compact
+file of shared, quantized arcs (566 kB, 211 kB gzipped). It is a separate asset fetched the
+first time a Map opens; the instrument's code is a lazy chunk too, while the track store
+lives in the panel so no lines are lost while it loads. The land and lines are built once
+into `Path2D`s in world units, so a redraw is a transform and three path operations per
+visible copy of the world. Map tiles from an OpenStreetMap-style URL template are an opt-in
+setting, off by default: the browser fetches them straight from that server, which learns
+the area being looked at. The receiver position (for range rings and distances) is an
+instrument setting, stored in the browser like every instrument's settings and never sent
+to the engine.
 
 ## Decoded pictures (M9)
 
@@ -1210,7 +1248,7 @@ A local server that can write files (file sink) and later transmit RF needs care
 
 Svelte 5 + Vite + TypeScript, and **Svelte Flow** (`@xyflow/svelte`) for the node editor.
 Instruments are hand-written canvases, not a charting library: Canvas2D for traces (scope,
-spectrum, constellation), and WebGL2 for the waterfall, whose history lives in a float
+spectrum, constellation) and the map, and WebGL2 for the waterfall, whose history lives in a float
 texture used as a ring. A new row is one small upload, and changing the dB range re-colours
 the whole history. Video is decoded in a worker (WebCodecs, or the MPEG-2
 decoder in WebAssembly) and drawn as `VideoFrame`s on a 2D canvas. Instruments live in a resizable dock under the canvas, are remembered per

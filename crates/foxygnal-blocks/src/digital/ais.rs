@@ -78,8 +78,9 @@ pub fn register(r: &mut Registry) {
                    heading=1`; static data (type 5, 19, 24) adds `name=\"…\" callsign=… \
                    shiptype=… length=… beam=…`, voyage data `dest=\"…\" eta=… draught=…`. \
                    Types 1–5, 9, 11, 18, 19, 21, 24 and 27 are decoded; others come out as \
-                   type, MMSI and `raw=` hex. NMEA: `!AIVDM` sentences, for chart plotters \
-                   (a File Sink or UDP Sink passes them on). Use one decoder per channel.",
+                   type, MMSI and `raw=` hex. The Map instrument plots the ships. NMEA: \
+                   `!AIVDM` sentences, for chart plotters (a File Sink or UDP Sink passes \
+                   them on). Use one decoder per channel.",
             inputs: vec![PortSpec {
                 name: "in",
                 ty: Some(StreamType::F32),

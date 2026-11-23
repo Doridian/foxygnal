@@ -15,6 +15,7 @@
   <button type="button" onclick={() => onpick('meter')}>Level meter</button>
   <button type="button" onclick={() => onpick('constellation')} disabled={!complex}>Constellation</button>
   <button type="button" onclick={() => onpick('text')} disabled={!bytes} title="Text lines, e.g. a decoder's messages">Messages</button>
+  <button type="button" onclick={() => onpick('map')} disabled={!bytes} title="Positions a decoder reports (lat=… lon=…), e.g. ADS-B, AIS or APRS">Map</button>
   <button type="button" onclick={() => onpick('image')} disabled={!bytes} title="Pictures, e.g. an SSTV decoder's image output">Image</button>
   <button type="button" onclick={() => onpick('video')} disabled={!bytes} title="Digital TV: an MPEG transport stream, such as a DVB demodulator's output or a .ts file"
     >Video</button
@@ -22,11 +23,11 @@
 </div>
 {#if bytes}
   <p class="note">
-    Messages shows the text a decoder writes on this wire; Image the pictures (an SSTV decoder's <code>image</code> output); Video plays an MPEG transport stream (digital
+    Messages shows the text a decoder writes on this wire; Map plots the positions in it (ADS-B, AIS, APRS); Image the pictures (an SSTV decoder's <code>image</code> output); Video plays an MPEG transport stream (digital
     TV).
   </p>
 {:else if !complex}
-  <p class="note">Constellation needs a complex (c32) wire; Messages, Image and Video a u8 wire from a decoder.</p>
+  <p class="note">Constellation needs a complex (c32) wire; Messages, Map, Image and Video a u8 wire from a decoder.</p>
 {/if}
 
 <style>

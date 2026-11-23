@@ -37,6 +37,9 @@
   ];
   const FFT_SIZES = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
   const AVERAGES = [1, 2, 4, 8, 16, 32, 64, 128];
+  const TILE_EXAMPLE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  const TILE_VARS = '{z} {x} {y}';
+  const TILE_SUB = '{s}';
 
   function toggleChannel(ch: ScopeChannel) {
     if (inst.kind !== 'scope') return;
@@ -186,6 +189,64 @@
     {@const s = inst.settings}
     <NumberInput label="Lines kept" value={s.maxLines} onchange={(v) => v && v >= 10 && onchange({ settings: { maxLines: Math.round(v) } })} />
     <p class="hint">Text lines from the wire, such as a decoder's messages. Lines before the instrument opened are shown if the wire's buffer still holds them.</p>
+  {:else if inst.kind === 'map'}
+    {@const s = inst.settings}
+    <fieldset>
+      <legend>Tracks</legend>
+      <label>Trail <NumberInput label="Trail length in positions" value={s.trail} onchange={(v) => v && v >= 1 && set({ trail: Math.round(v) })} /> positions</label>
+      <label>Expire after <NumberInput label="Expiry in seconds" value={s.expiry} onchange={(v) => v && v >= 1 && set({ expiry: v })} /> s</label>
+      <div class="row">
+        <label class="check"><input type="checkbox" checked={s.labels} onchange={(e) => set({ labels: e.currentTarget.checked })} />Labels</label>
+        <select aria-label="Distance units" value={s.units} onchange={(e) => set({ units: e.currentTarget.value })}>
+          <option value="km">km</option>
+          <option value="nm">nautical miles</option>
+        </select>
+      </div>
+      <p class="hint">
+        Plots lines with <code>lat=</code> and <code>lon=</code>, one track per <code>icao</code>, <code>mmsi</code>, APRS <code>src</code> or object name,
+        <code>serial</code>, <code>id</code> or <code>callsign</code>. Lines with an id but no position (an aircraft's identity, a ship's name) add to the track's
+        details. Tracks fade as they age. Click one for its details.
+      </p>
+    </fieldset>
+    <fieldset>
+      <legend>Receiver</legend>
+      <div class="row">
+        <label
+          >Lat <NumberInput
+            label="Receiver latitude"
+            allowEmpty
+            placeholder="none"
+            value={s.rxLat}
+            onchange={(v) => set({ rxLat: v !== null && Math.abs(v) <= 90 ? v : null })}
+          /></label
+        >
+        <label
+          >Lon <NumberInput
+            label="Receiver longitude"
+            allowEmpty
+            placeholder="none"
+            value={s.rxLon}
+            onchange={(v) => set({ rxLon: v !== null && Math.abs(v) <= 180 ? v : null })}
+          /></label
+        >
+      </div>
+      <p class="hint">Decimal degrees, south and west negative, for range rings and distances. Kept in this browser only.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Base map</legend>
+      <label class="check"><input type="checkbox" checked={s.tiles} onchange={(e) => set({ tiles: e.currentTarget.checked })} />Map tiles from a server</label>
+      <input
+        type="url"
+        aria-label="Tile URL template"
+        placeholder={TILE_EXAMPLE}
+        value={s.tileUrl}
+        onchange={(e) => set({ tileUrl: e.currentTarget.value.trim() })}
+      />
+      <p class="hint">
+        Off, the map is the built-in Natural Earth world map and nothing leaves this computer. Tiles are fetched by this browser straight from the server you name,
+        which learns which area you look at. Use <code>{TILE_VARS}</code> (and <code>{TILE_SUB}</code> for a subdomain), and follow the server's usage policy.
+      </p>
+    </fieldset>
   {:else if inst.kind === 'image'}
     {@const s = inst.settings}
     <NumberInput label="Pictures kept" value={s.keep} onchange={(v) => v && v >= 1 && onchange({ settings: { keep: Math.round(v) } })} />
@@ -201,7 +262,7 @@
   {:else}
     <p class="hint">RMS, peak and DC over everything since the last update, in dB relative to full scale (±1).</p>
   {/if}
-  {#if inst.kind !== 'meter' && inst.kind !== 'text' && inst.kind !== 'image' && inst.kind !== 'video'}
+  {#if inst.kind !== 'meter' && inst.kind !== 'text' && inst.kind !== 'map' && inst.kind !== 'image' && inst.kind !== 'video'}
     <fieldset>
       <legend>Sample rate</legend>
       <NumberInput
