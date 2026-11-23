@@ -41,7 +41,9 @@ debug builds are too slow for a 2.4 MS/s receiver. The "FM stereo + RDS" templat
 (`examples/fm-stereo-rds.fox.toml`) plays a station in stereo and decodes its RDS: station
 name, RadioText, programme type and clock time, shown in the Messages instrument.
 Decoder templates: "ADS-B aircraft decoder" (`examples/adsb.fox.toml`), "POCSAG pager
-decoder" (`examples/pocsag.fox.toml`) and "APRS packet decoder" (`examples/aprs.fox.toml`).
+decoder" (`examples/pocsag.fox.toml`), "FLEX pager decoder" (`examples/flex.fox.toml`, the
+1600/3200/6400 bps paging used across North America) and "APRS packet decoder"
+(`examples/aprs.fox.toml`).
 
 **Pictures.** The SSTV decoder (Robot, Martin, Scottie, Wraase and PD modes, from the VIS
 header, with slant correction) draws pictures in the Image instrument as they arrive and

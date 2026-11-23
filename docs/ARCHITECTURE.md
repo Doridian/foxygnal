@@ -395,8 +395,8 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
 
 ## Decoded messages (M6)
 
-Decoders (`adsb_decoder`, `rds_decoder`, `pocsag_decoder`, `hdlc_deframer`, `packet_decoder`
-in hex mode, …) need a way to show a
+Decoders (`adsb_decoder`, `rds_decoder`, `pocsag_decoder`, `flex_decoder`, `hdlc_deframer`,
+`packet_decoder` in hex mode, …) need a way to show a
 person what they found, without per-block UI code. The convention: **a decoded message is one line of
 UTF-8 text, `\n`-terminated, on a `u8` output.** Lines are `key=value` fields where that
 makes sense (`t=1.234567 icao=4840D6 df=17 tc=4 type=ident callsign=KLM1023 raw=…`), so

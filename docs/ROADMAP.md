@@ -167,8 +167,10 @@ Goal: the narrowband signals within reach of an RTL-SDR and a simple antenna, ea
 template.
 
 - **Paging and telemetry**
-  - [ ] FLEX (1600/3200/6400, 2- and 4-level FSK): the paging system used locally, which M8's
-        POCSAG test found instead
+  - [x] FLEX (1600/3200/6400, 2- and 4-level FSK): the paging system used locally, which M8's
+        POCSAG test found instead. Speed and polarity from Sync 1, phases A–D, BCH(31,21)
+        repair, short and long addresses, alphanumeric / numeric / tone / secure / binary
+        pages, fragments marked; "FLEX" template
   - [ ] ISM-band sensors (433/868/915 MHz): an OOK/FSK pulse demodulator, PWM/PPM/Manchester
         slicers, and a table of device formats in the spirit of rtl_433 (weather stations, tire
         pressure sensors, doorbells, power meters)
