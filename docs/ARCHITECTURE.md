@@ -928,7 +928,10 @@ move raw little-endian items, so they interoperate with GNU Radio's UDP/TCP bloc
   The I/O thread keeps a partial item until the rest arrives and, after a loss, skips to the
   sender's item grid, so items stay aligned. UDP pushes whole datagrams or drops them
   (counted as `dropped`, like a sequence gap); TCP waits for room in the ring, which pushes
-  back on the sender through TCP's flow control.
+  back on the sender through TCP's flow control. `udp_source` asks the kernel for an 8 MiB
+  receive buffer (Linux caps it at `net.core.rmem_max`): the 208 KiB default is only 11 ms
+  of a 2.4 MS/s c32 stream, and datagrams that arrive while the I/O thread is descheduled
+  for longer are lost before foxygnal sees them.
 - **`udp_sink`** (pooled) sends from `work()` on a non-blocking connected socket; a partial
   datagram waits up to 10 ms for more items (`Wait`), and a full socket buffer retries after
   1 ms.

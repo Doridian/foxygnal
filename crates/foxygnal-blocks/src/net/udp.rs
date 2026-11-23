@@ -18,6 +18,12 @@ use crate::params;
 /// 10 MS/s c32 stream.
 const RX_RING: usize = 1 << 22;
 
+/// Kernel receive buffer udp_source asks for: 8 MiB, 0.4 s of a 2.4 MS/s c32
+/// stream. The default (208 KiB on Linux) is 11 ms of it: a receive thread
+/// that is late by that much loses datagrams. The kernel caps the request
+/// (Linux: `net.core.rmem_max`).
+const RX_SOCKET_BUFFER: usize = 8 << 20;
+
 /// Largest UDP payload over Ethernet without fragmenting (1500 − 20 − 8).
 const MTU_PAYLOAD: u64 = 1472;
 
@@ -261,6 +267,8 @@ impl Block for UdpSource {
     fn start(&mut self) -> Result<(), Error> {
         let (sock, addr) = self.bind().map_err(Error::Other)?;
         sock.set_read_timeout(Some(POLL))?;
+        // Best effort: a smaller buffer still works, it just tolerates less.
+        let _ = socket2::SockRef::from(&sock).set_recv_buffer_size(RX_SOCKET_BUFFER);
         let header = self.header;
         self.feed = Some(Feed::spawn(
             "fox:udp_source",
