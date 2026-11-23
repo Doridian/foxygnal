@@ -326,8 +326,13 @@ arrive; with a rotator or a steady hand, the polar orbiters too.
 - [ ] Meteor-M HRPT (1700 MHz, BPSK, Manchester 665.4 kbit/s): MSU-MR, all six channels
 - [ ] Metop AHRPT (Metop-B/C, 1701.3 MHz, QPSK 2.33 MSym/s, CCSDS): AVHRR/3 in false
       colour, plus the instrument packets that come for free (MHS, AMSU, IASI counts)
-- [ ] GOES DCS (DCPR relay, 1679.7–1680.7 MHz): 300 bit/s BPSK and 1200 bit/s 8PSK
-      platforms, a channelizer over the whole band, platform address and message as messages
+- [x] GOES DCS (DCPR relay, 1679.7–1680.1 MHz): `goes_dcs_decoder`, the CS2 format (300 and
+      1200 bit/s, both 8PSK with a 64-state trellis code; only the preamble is BPSK), a
+      fast-convolution channelizer and carrier detector over the whole band, many platforms
+      at once; GOES ID (BCH-corrected), channel, rate, signal quality, frequency offset and
+      the message as text or hex. `goes_dcs_sim` and loopback tests through noise, offsets
+      and overlapping platforms (validated against our own encoder and the standard's
+      examples, not yet off air). "GOES DCS" and "GOES DCS (simulated)" templates
 - [x] Pass prediction: SGP4 from TLEs (a file, or pasted in), pass times, elevation and
       azimuth, and Doppler as a wired setting for `freq_xlating_fir`; an upcoming-passes view
       (`sat_tracker`, the palette's Passes section, "Satellite Doppler tracking" template;

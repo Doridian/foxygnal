@@ -279,6 +279,18 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/sat-doppler.fox.toml"),
     },
     Example {
+        name: "goes-dcs",
+        title: "GOES DCS",
+        description: "An SDR at 1679.9 MHz, 500 kS/s → GOES DCS decoder: the Data Collection System relayed by GOES-East and GOES-West, river and rain gauges, weather stations and buoys bursting at 300 and 1200 bit/s, decoded many at once. Needs a dish, an L-band LNA and a real receiver.",
+        toml: include_str!("../../../examples/goes-dcs.fox.toml"),
+    },
+    Example {
+        name: "goes-dcs-sim",
+        title: "GOES DCS (simulated)",
+        description: "A simulated DCS band (12 platforms at 300 and 1200 bit/s) → noise → GOES DCS decoder → messages. No hardware needed.",
+        toml: include_str!("../../../examples/goes-dcs-sim.fox.toml"),
+    },
+    Example {
         name: "aprs",
         title: "APRS packet decoder",
         description: "An SDR at 144.39 MHz (144.8 MHz in Europe) → FM demod → AFSK 1200 → HDLC/AX.25 → APRS positions, messages and objects. Needs a real receiver.",

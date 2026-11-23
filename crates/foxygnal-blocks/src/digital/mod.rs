@@ -19,6 +19,7 @@ mod adsb;
 mod afsk;
 pub mod ais;
 pub mod ax25;
+pub mod dcs;
 mod flex;
 pub mod hdlc;
 pub mod ism;
@@ -49,6 +50,7 @@ pub fn register(r: &mut Registry) {
     afsk::register(r);
     hdlc::register(r);
     ism::register(r);
+    dcs::register(r);
 }
 
 /// Text (or packet bytes) waiting to go out on a `u8` port, one message at a

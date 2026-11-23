@@ -49,7 +49,10 @@ decoder" (`examples/pocsag.fox.toml`), "FLEX pager decoder" (`examples/flex.fox.
 at once), "ACARS aircraft datalink" (`examples/acars.fox.toml`), and, in the spirit of rtl_433, "ISM
 sensors at 433 MHz" (`examples/ism-433.fox.toml`: weather stations, thermometers, tire
 pressure sensors, door sensors and doorbells) and "ERT meters and 915 MHz sensors"
-(`examples/ism-915.fox.toml`).
+(`examples/ism-915.fox.toml`), plus "GOES DCS" (`examples/goes-dcs.fox.toml`: the
+GOES Data Collection System relay at 1679.9 MHz, river gauges and weather stations bursting
+at 300 and 1200 bit/s, decoded many at once) and its no-hardware twin "GOES DCS
+(simulated)" (`examples/goes-dcs-sim.fox.toml`).
 
 **Satellites.** The Satellite Tracker follows a satellite from its two-line elements (SGP4,
 from a file or pasted in; nothing is downloaded) and steers a channel filter through the

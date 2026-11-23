@@ -1299,7 +1299,8 @@ pub(crate) fn map(cx: &mut Cx<'_>) -> Result<Out, String> {
         "adsb_decoder" | "rds_decoder" | "packet_decoder" | "message_log" | "pocsag_decoder"
         | "flex_decoder" | "aprs_decoder" | "ais_decoder" | "acars_decoder" | "sstv_decoder"
         | "image_sink" | "dvbs_modulator" | "dvbs_demodulator" | "ism_decoder"
-        | "ccsds_deframer" | "ccsds_packets" | "ccsds_framer" | "ccsds_modulator" => {
+        | "ccsds_deframer" | "ccsds_packets" | "ccsds_framer" | "ccsds_modulator"
+        | "goes_dcs_decoder" | "goes_dcs_sim" => {
             return Err("a foxygnal decoder with no GNU Radio equivalent".into());
         }
         "fm_stereo" | "ssb_demod" | "fsk_demod" | "psk_demod" => {

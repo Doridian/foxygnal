@@ -1,0 +1,79 @@
+# GOES DCS, simulated: a band of DCS platforms from the simulator, noise,
+# and the decoder, with no dish.
+#
+#   DCS simulator ──throttle──+noise──▶ GOES DCS decoder ──text──▶ log
+#   12 platforms, 250 kS/s
+#
+# The simulator puts its platforms on CS2 channels around 1679.9 MHz, with
+# oscillator errors up to ±100 Hz and levels up to 10 dB apart, every third
+# one at 1200 bit/s. Each sends an ASCII or pseudo-binary message every
+# `interval` seconds or so, like
+#
+#   t=… addr=6E30E1E2 ch=436 baud=1200 freq_MHz=1679.904334 offset_Hz=+83.6 … format=ascii text="000 STAGE 3.00 BATT 12.5 CH436"
+#
+# Look at the wire into `dcs` with the spectrum or waterfall to see the
+# bursts. Raise `noise` to watch the weakest platforms go: with 0.07 the
+# weakest 1200 bit/s ones are at about 13 dB Es/N0.
+#
+#   foxygnal run examples/goes-dcs-sim.fox.toml
+
+[vars]
+fs = "250k"
+center = "1679.9M"
+noise = 0.07
+
+[[block]]
+id = "sim"
+kind = "goes_dcs_sim"
+params = { sample_rate = "$fs", center = "$center", platforms = 12, interval = 20.0, rates = "both", amplitude = 0.05, freq_error = 100.0, seed = 1 }
+ui = { x = 50, y = 60 }
+
+[[block]]
+id = "realtime"
+kind = "throttle"
+params = { type = "c32", sample_rate = 0 }
+ui = { x = 330, y = 60 }
+
+[[block]]
+id = "noise"
+kind = "noise_source"
+params = { type = "c32", amplitude = "$noise", seed = 0 }
+ui = { x = 330, y = 220 }
+
+[[block]]
+id = "channel"
+kind = "add"
+params = { type = "c32" }
+ui = { x = 600, y = 120 }
+
+[[block]]
+id = "dcs"
+kind = "goes_dcs_decoder"
+params = { center = "$center", level = 10.0, max_platforms = 48, rates = "both" }
+ui = { x = 850, y = 120 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 1150, y = 120 }
+
+[[connect]]
+from = "sim.out"
+to = "realtime.in"
+
+[[connect]]
+from = "realtime.out"
+to = "channel.a"
+
+[[connect]]
+from = "noise.out"
+to = "channel.b"
+
+[[connect]]
+from = "channel.out"
+to = "dcs.in"
+
+[[connect]]
+from = "dcs.out"
+to = "log.in"

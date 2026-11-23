@@ -1,0 +1,52 @@
+# GOES DCS: the Data Collection System relayed by the GOES weather satellites.
+#
+# Tens of thousands of platforms (river and rain gauges, weather stations,
+# buoys, fire weather towers) send short bursts to GOES-East and GOES-West on
+# 401.7–402.1 MHz; the satellites relay the whole band to the ground on
+# 1679.7–1680.1 MHz. Each burst is a few seconds of 8PSK at 300 or 1200 bit/s
+# (trellis coded, CS2 format) on one of 266 + 266 channels 750 Hz apart. The
+# decoder watches the whole band, finds each burst by its carrier and decodes
+# many at once. Click the wire into `log` and choose Messages:
+#
+#   t=12.345 addr=CE1200B8 ch=123 baud=300 freq_MHz=1679.792012 offset_Hz=+12.0 level_dB=-31.2 snr_dB=17.5 cn0_dBHz=39.3 phase_noise_deg=4.1 good_phase_pct=95.0 quality=N flag=0x22 format=ascii len=86 end=eot text="…"
+#
+# You need a dish (about 1 m, or a 1.2 m grid) pointed at GOES-East (75.2°W)
+# or GOES-West (137.2°W), a 1.7 GHz LNA/filter, and an SDR. 500 kS/s takes
+# the whole band; 250 kS/s around 1679.9 MHz covers most of it. The downlink
+# is weak: bursts at 20 dB SNR or better decode reliably, below about 11 dB
+# (Es/N0) they start to fail. Lower `level` if quiet platforms are missed,
+# raise it if noise makes it start on nothing.
+#
+#   SDR 1679.9 MHz, 500 kS/s ──▶ GOES DCS decoder ──text──▶ log
+#
+#   foxygnal run examples/goes-dcs.fox.toml   (prints the messages: stdout = true)
+
+[vars]
+freq = "1679.9M"
+samp_rate = "500k"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$freq", sample_rate = "$samp_rate", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "dcs"
+kind = "goes_dcs_decoder"
+params = { center = 0.0, level = 10.0, max_platforms = 48, rates = "both" }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 700, y = 120 }
+
+[[connect]]
+from = "sdr.out"
+to = "dcs.in"
+
+[[connect]]
+from = "dcs.out"
+to = "log.in"

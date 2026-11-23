@@ -402,7 +402,7 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
 ## Decoded messages (M6)
 
 Decoders (`adsb_decoder`, `uat_decoder`, `rds_decoder`, `pocsag_decoder`, `flex_decoder`,
-`ais_decoder`, `acars_decoder`, `ism_decoder`, `hdlc_deframer`,
+`ais_decoder`, `acars_decoder`, `ism_decoder`, `goes_dcs_decoder`, `hdlc_deframer`,
 `packet_decoder` in hex mode, …) need a way to show a
 person what they found, without per-block UI code. The convention: **a decoded message is one line of
 UTF-8 text, `\n`-terminated, on a `u8` output.** Lines are `key=value` fields where that
@@ -671,6 +671,73 @@ network access: element sets come from a file or pasted text.
   when the graph has a tracker, refreshes when its settings change and every ten minutes,
   counts down to each pass, warns about element sets older than two weeks, and *Track* sets
   the tracker's `satellite`.
+
+## GOES DCS (M15)
+
+`goes_dcs_decoder` (`digital::dcs`) decodes the GOES Data Collection System: platforms send
+bursts on 401.7–402.1 MHz and GOES relays the band on 1679.7–1680.1 MHz (uplink + 1278 MHz,
+not inverted). The format is the DCPRS Certification Standard v2.0 (CS2, 2009), which is
+what is on the air since the 100 bit/s CS1 platforms were retired:
+
+- **Channels**: 750 Hz apart from 401.701 MHz, numbered 1–266 for the even slots and
+  301–566 for the odd ones (1, 301, 2, 302, …); 1200 bit/s only on every third slot.
+  `frame::channel_at` maps an RF frequency (either band) to a channel and offset.
+- **Modulation**: 8PSK at 150 symbols/s (300 bit/s) or 600 symbols/s (1200 bit/s), root
+  raised cosine with α = 1. The data is trellis coded: each byte is split into bit pairs
+  (least significant pair first); the upper bit is uncoded (it adds 180°), the lower goes
+  through a K = 7 code (taps 1101101 and 1001111) whose two outputs pick one of four phases.
+- **Frame**: unmodulated carrier (0.5 s / 0.25 s), then BPSK clock `101` and the 15-bit FSS
+  `001111100110101`, then the trellis-coded part: GOES ID (32 bits, a BCH(31,21) codeword
+  plus a 0), flag word (data format ASCII / pseudo-binary / binary, UTC sync, odd parity),
+  the data, EOT (0x04) and flush bits. The coded part is XORed with a 40-byte scrambler
+  sequence restarting at the GOES ID. Binary messages carry a BCH-protected 14-bit length
+  after the flag word and a CRC-16 every 4000 bytes, and have no EOT.
+
+The receiver (`dcs::receiver`) runs in four stages, none of which allocate after setup:
+
+1. **Channelizer.** Overlap-save fast convolution: an FFT of N = the next power of two ≥
+   fs / 100 (50–100 Hz bins), hop N/2. Each active platform takes 32 (300 bit/s) or 64
+   (1200 bit/s) bins around its carrier, weighted by a raised-cosine edge, and an inverse
+   FFT of that size gives its own low-rate stream, with the phase of the bin shift kept
+   continuous between blocks.
+2. **Detector.** The same FFT, Hann-windowed by combining neighbouring bins, averaged over
+   ~30 ms, against a noise floor from the 25th percentile of each 32-bin group. A new burst
+   is a narrow peak `level` dB above the floor that lasts 40 ms; its frequency comes from a
+   parabola through the log powers. Bins near an active platform are skipped (±450 Hz while
+   it is still a carrier, ±300 / ±800 Hz once its rate is known), so neighbours 750 Hz away
+   are found while the first is still in its preamble. A peak that never turns into a
+   message (the pilots, the DC spike, a CW carrier) times out after 1.2 s and is masked
+   until it has been quiet for 0.3 s.
+3. **Demodulator** (`dcs::demod::Chain`, one per rate per platform slot, the one that finds
+   an FSS wins). Matched filter (the RRC with the transmitter's taper over its last symbol);
+   during the carrier, an open-loop frequency estimate from the average of
+   (z[n]·z*[n−L])², which the BPSK clock and FSS do not upset; a non-coherent correlation
+   with 6 carrier symbols, the clock and the FSS (threshold 0.75), each lag turned back by
+   the frequency estimate. At the peak, the preamble's two halves give phase, residual
+   frequency and amplitude, which start a Gardner timing loop and a decision-directed 8PSK
+   phase loop (second order) without a pull-in. Symbols go to a soft-decision Viterbi
+   decoder for the 64-state code (`dcs::viterbi`): the branch metric for a coded label is
+   |Re(r·e^{−jθ})|, the sign of which is the uncoded bit; traceback depth 64.
+4. **Frame.** Bit pairs are descrambled into bytes: GOES ID (BCH corrects up to two bit
+   errors; `addr_fixed=` says how many, `addr_bad=1` if it can't), flag word, data until EOT,
+   the binary length, the signal fading (the average symbol power below a fifth of the
+   preamble's for 12 symbols), or 4000 bytes (16000 at 1200 bit/s).
+
+Statistics follow the DAMS-NT conventions: Es/N0 from the spread of the symbols around their
+points (`snr_dB`, and `cn0_dBHz` from it), RMS phase error, the share of symbols within
+±8.44° of a point (`good_phase_pct`), and the quality letter N (≥ 85 %), F (≥ 70 %), P. They
+are accumulated only for symbols the Viterbi decoder has released and that belong to the
+message, so the noise after the end doesn't count. ASCII and pseudo-binary text is printed
+with its parity bits stripped (`parity_errors=` counts the bad ones); pseudo-binary values
+are not decoded, since what they mean is in each platform's configuration.
+
+`goes_dcs_sim` and `dcs::modulator` are the transmitter side, written from the same reading
+of CS2: they are what the tests (and the "GOES DCS (simulated)" template) use, so the
+loopback proves the two halves agree with each other, not with real platforms. What does come
+from outside: the standard's two GOES ID examples are BCH codewords, its scrambler example
+matches, and the encoder's impulse responses match its trellis-encoder figure. Measured on
+33-character messages, decoding is reliable from about 12 dB Es/N0 (34 dB-Hz at 300 bit/s,
+40 dB-Hz at 1200 bit/s) and about half get through at 10 dB.
 
 ## Digital video (M14)
 
