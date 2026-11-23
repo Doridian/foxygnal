@@ -160,11 +160,12 @@ impl Hub {
     pub fn set(&self, client: u64, id: u32, edge: EdgeRef, config: ProbeConfig, fps: f32) {
         let period = Duration::from_secs_f32(1.0 / fps.clamp(1.0, 60.0));
         let mut h = self.lock();
-        if let Some(p) = h.probes.get_mut(&(client, id)) {
-            if p.edge == edge && p.config == config {
-                p.period = period;
-                return;
-            }
+        if let Some(p) = h.probes.get_mut(&(client, id))
+            && p.edge == edge
+            && p.config == config
+        {
+            p.period = period;
+            return;
         }
         h.probes.insert(
             (client, id),
@@ -351,6 +352,9 @@ pub(crate) fn spawn(session: Weak<Session>) {
                 let now = Instant::now();
                 s.hub()
                     .tick(run.as_ref().map(|(id, m, map)| (*id, m, &**map)), now);
+                if let Some((id, mon, map)) = &run {
+                    s.poll_warnings(*id, mon, map);
+                }
                 match &run {
                     None => last = None,
                     Some((id, mon, map)) => match &last {
@@ -409,8 +413,10 @@ mod tests {
     }
 
     fn f32s(b: &[u8]) -> Vec<f32> {
-        b.chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect()
     }
 

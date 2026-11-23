@@ -326,3 +326,102 @@ fn build_noise(p: &ParamReader<'_>) -> Result<Instance, Error> {
         outputs: vec![("out".into(), ty)],
     })
 }
+
+// ---- Constant inputs ---------------------------------------------------------
+
+/// Registers `const_source`, the hidden block that stands in for a stream
+/// input given a constant (`const_inputs` in a graph file; see
+/// `foxygnal_core::resolve`). Not in the palette.
+pub(crate) fn register_const(r: &mut Registry) {
+    r.register(
+        BlockDescriptor {
+            kind: foxygnal_core::resolve::CONST_KIND,
+            label: "Constant",
+            category: "Sources",
+            help: "A constant stream with no sample rate of its own: it stands in for an \
+                   input set to a constant, and produces as fast as that block consumes.",
+            inputs: vec![],
+            outputs: vec![PortSpec {
+                name: "out",
+                ty: None,
+            }],
+            params: vec![
+                params::any_type(),
+                params::float("value", "Value", 0.0, None, "The constant (real part).").live(),
+                params::float("imag", "Imaginary", 0.0, None, "Imaginary part (c32 only).").live(),
+            ],
+        },
+        build_const,
+    );
+    r.set_hidden(foxygnal_core::resolve::CONST_KIND);
+}
+
+/// Items produced per `work` call at most: enough to keep up with any
+/// consumer, little enough not to fill whole buffers for nothing.
+const CONST_CHUNK: usize = 4096;
+
+pub struct ConstSource {
+    ty: StreamType,
+    re: f64,
+    im: f64,
+}
+
+impl Block for ConstSource {
+    fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
+        let out = &mut io.outputs[0];
+        let n = match self.ty {
+            StreamType::C32 => {
+                let s = out.slice_mut::<Complex32>();
+                let n = s.len().min(CONST_CHUNK);
+                s[..n].fill(Complex32::new(self.re as f32, self.im as f32));
+                n
+            }
+            StreamType::F32 => {
+                let s = out.slice_mut::<f32>();
+                let n = s.len().min(CONST_CHUNK);
+                s[..n].fill(self.re as f32);
+                n
+            }
+            StreamType::I16 => {
+                let s = out.slice_mut::<i16>();
+                let n = s.len().min(CONST_CHUNK);
+                s[..n].fill(self.re.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16);
+                n
+            }
+            StreamType::U8 => {
+                let s = out.slice_mut::<u8>();
+                let n = s.len().min(CONST_CHUNK);
+                s[..n].fill(self.re.round().clamp(0.0, 255.0) as u8);
+                n
+            }
+        };
+        if n == 0 {
+            return Ok(WorkStatus::Blocked);
+        }
+        out.produce(n);
+        Ok(WorkStatus::Ok)
+    }
+
+    fn set_param(&mut self, name: &str, value: &serde_json::Value) -> Result<(), Error> {
+        let v = value.as_f64().unwrap_or_default();
+        match name {
+            "value" => self.re = v,
+            "imag" => self.im = v,
+            _ => return Err(Error::Other(format!("`{name}` is not a live parameter"))),
+        }
+        Ok(())
+    }
+}
+
+fn build_const(p: &ParamReader<'_>) -> Result<Instance, Error> {
+    let ty = p.stream_type("type")?;
+    Ok(Instance {
+        block: Box::new(ConstSource {
+            ty,
+            re: p.f64("value")?,
+            im: p.f64("imag")?,
+        }),
+        inputs: vec![],
+        outputs: vec![("out".into(), ty)],
+    })
+}

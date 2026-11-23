@@ -500,4 +500,163 @@ fn sigmf_writer_meta_is_usable_before_finish() {
     let tags = parse_tags(&text).unwrap();
     let keys: Vec<_> = tags.iter().map(|t| (t.offset, &*t.key)).collect();
     assert_eq!(keys, vec![(0, "rx_freq"), (10, "squelch"), (50, "gap")]);
+    assert_eq!(w.annotations(), 2);
+}
+
+/// Record `data` with `tags` through a SigMF sink (`p` without the path).
+fn record_tagged<T: Sample>(
+    base: &Path,
+    data: Vec<T>,
+    tags: Vec<foxygnal_core::Tag>,
+    mut p: serde_json::Value,
+) {
+    let mut fg = Flowgraph::new().with_buffer_capacity(37);
+    let s = fg.add("src", VectorSource::with_tags(data, tags));
+    p["path"] = json!(path_str(base));
+    let k = fg.add("sink", build("sigmf_sink", p));
+    fg.connect(s, 0, k, 0).unwrap();
+    fg.start().unwrap().wait().unwrap();
+}
+
+/// Play a SigMF source through `head(count)`; returns the items, the tags
+/// and the configured centre frequency.
+fn play_from<T: Sample + Clone>(
+    p: serde_json::Value,
+    ty: &str,
+    count: usize,
+) -> (Vec<T>, Vec<foxygnal_core::Tag>, Option<f64>) {
+    let mut fg = Flowgraph::new().with_buffer_capacity(37);
+    let s = fg.add("src", build("sigmf_source", p));
+    let h = fg.add("head", build("head", json!({"type": ty, "count": count})));
+    let (sink, out, got) = VectorSink::<T>::with_tags();
+    let k = fg.add("sink", sink);
+    fg.connect(s, 0, h, 0).unwrap();
+    fg.connect(h, 0, k, 0).unwrap();
+    let freq = fg.configure().unwrap()[0].meta.center_freq;
+    fg.start().unwrap().wait().unwrap();
+    let out = out.lock().unwrap().clone();
+    let got = got.lock().unwrap().clone();
+    (out, got, freq)
+}
+
+/// `start` seeks into the recording: earlier tags are dropped except the
+/// capture in effect, later ones move back, and a loop restarts there.
+#[test]
+fn sigmf_source_starts_at_a_sample() {
+    use foxygnal_core::{Tag, TagValue};
+    let base = scratch("seek");
+    let n = 1000usize;
+    let data: Vec<Complex32> = (0..n).map(|i| Complex32::new(i as f32, 0.0)).collect();
+    record_tagged(
+        &base,
+        data,
+        vec![
+            Tag::new(0, "hw", "Simulated FM band (sim:)"),
+            Tag::new(0, "rx_freq", 100e6),
+            Tag::new(300, "rx_freq", 101.5e6),
+            Tag::new(350, "packet", "early"),
+            Tag::new(500, "overflow", 42i64),
+            Tag::new(700, "packet", "hello"),
+        ],
+        json!({"type": "c32"}),
+    );
+    let key = |t: &Tag| (t.offset, t.key.to_string());
+    let src = |start: u64, repeat: bool| json!({"type": "c32", "path": path_str(&base), "start": start, "repeat": repeat});
+
+    // Looping from sample 400: 600 samples per pass.
+    let (out, got, freq) = play_from::<Complex32>(src(400, true), "c32", 1200);
+    assert_eq!(freq, Some(101.5e6), "the capture in effect at the start");
+    assert_eq!(out.len(), 1200);
+    assert_eq!(out[0].re, 400.0);
+    assert_eq!(out[599].re, 999.0);
+    assert_eq!(out[600].re, 400.0, "loops back to the start, not to 0");
+    let mut want = Vec::new();
+    for pass in [0u64, 600] {
+        want.extend([
+            (pass, "hw".to_owned()),
+            (pass, "rx_freq".to_owned()),
+            (pass + 100, "overflow".to_owned()),
+            (pass + 300, "packet".to_owned()),
+        ]);
+    }
+    assert_eq!(got.iter().map(key).collect::<Vec<_>>(), want);
+    assert_eq!(got[1].value, TagValue::Float(101.5e6));
+    assert_eq!(got[3].value, TagValue::Str("hello".into()));
+
+    // Right on a capture boundary: its rx_freq once, not twice.
+    let (out, got, _) = play_from::<Complex32>(src(300, false), "c32", n);
+    assert_eq!(out.len(), 700);
+    assert_eq!(
+        got.iter().map(key).collect::<Vec<_>>(),
+        vec![
+            (0, "hw".to_owned()),
+            (0, "rx_freq".to_owned()),
+            (50, "packet".to_owned()),
+            (200, "overflow".to_owned()),
+            (400, "packet".to_owned()),
+        ]
+    );
+    assert_eq!(got[1].value, TagValue::Float(101.5e6));
+
+    // Before the first retune: the first capture's frequency.
+    let (_, got, freq) = play_from::<Complex32>(src(10, false), "c32", n);
+    assert_eq!(freq, Some(100e6));
+    assert_eq!(got[1].value, TagValue::Float(100e6));
+    assert_eq!(got[2].offset, 290);
+
+    // Past the end is an error that says how long the recording is.
+    let mut fg = Flowgraph::new();
+    let s = fg.add("src", build("sigmf_source", src(1000, false)));
+    let (k, _) = VectorSink::<Complex32>::instance();
+    let k = fg.add("k", k);
+    fg.connect(s, 0, k, 0).unwrap();
+    let e = match fg.start() {
+        Ok(run) => run.wait().expect_err("start past the end"),
+        Err(e) => e,
+    }
+    .to_string();
+    assert!(e.contains("1000 samples"), "{e}");
+}
+
+/// Interleaved ci16 played as raw i16: `start` counts samples (I/Q pairs),
+/// so the file offset and the tag offsets are in items, twice that.
+#[test]
+fn sigmf_source_start_counts_samples_not_items() {
+    use foxygnal_core::{Tag, TagValue};
+    let base = scratch("seek-ci16");
+    // 200 I/Q samples; retune at sample 30, a burst at sample 50.
+    let data: Vec<i16> = (0..400).collect();
+    record_tagged(
+        &base,
+        data,
+        vec![Tag::new(60, "rx_freq", 7.1e6), Tag::new(100, "burst", true)],
+        json!({"type": "i16", "complex": true}),
+    );
+    let key = |t: &Tag| (t.offset, t.key.to_string());
+    let p = json!({"type": "i16", "path": path_str(&base), "start": 40, "repeat": true});
+    // 160 samples = 320 items per pass.
+    let (out, got, freq) = play_from::<i16>(p, "i16", 640);
+    assert_eq!(freq, Some(7.1e6));
+    assert_eq!(&out[..4], &[80, 81, 82, 83]);
+    assert_eq!(out[319], 399);
+    assert_eq!(&out[320..322], &[80, 81]);
+    assert_eq!(
+        got.iter().map(key).collect::<Vec<_>>(),
+        vec![
+            (0, "rx_freq".to_owned()),
+            (20, "burst".to_owned()),
+            (320, "rx_freq".to_owned()),
+            (340, "burst".to_owned()),
+        ]
+    );
+    assert_eq!(got[0].value, TagValue::Float(7.1e6));
+    // As c32, the same start gives sample offsets.
+    let p = json!({"type": "c32", "path": path_str(&base), "start": 40});
+    let (out, got, _) = play_from::<Complex32>(p, "c32", 1000);
+    assert_eq!(out.len(), 160);
+    assert_eq!(out[0], Complex32::new(80.0 / 32768.0, 81.0 / 32768.0));
+    assert_eq!(
+        got.iter().map(key).collect::<Vec<_>>(),
+        vec![(0, "rx_freq".to_owned()), (10, "burst".to_owned())]
+    );
 }

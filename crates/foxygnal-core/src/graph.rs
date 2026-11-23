@@ -29,6 +29,13 @@ pub struct BlockSpec {
     pub kind: String,
     #[serde(default)]
     pub params: Params,
+    /// Stream inputs given a constant instead of a wire (`const_inputs = { b
+    /// = 1.5 }`). A number or an expression for any type (the imaginary part
+    /// of a c32 constant is then 0), or `[re, im]` for c32. Each becomes a
+    /// hidden `const_source` block when the graph is resolved (see
+    /// [`crate::resolve`]).
+    #[serde(default, skip_serializing_if = "Params::is_empty")]
+    pub const_inputs: Params,
     /// Editor-only metadata (canvas position, colour, notes). Ignored by the runtime.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ui: BTreeMap<String, serde_json::Value>,
@@ -98,6 +105,16 @@ impl Targets {
         };
         s.iter().map(String::as_str)
     }
+}
+
+/// A port named `@name` is the block's parameter `name` wired as an input
+/// (a *control input*): `to = "sdr.@frequency"`. See [`param_port`].
+pub const PARAM_PORT_PREFIX: char = '@';
+
+/// The parameter a port name refers to, if it is a control input (`@gain`
+/// → `gain`).
+pub fn param_port(port: &str) -> Option<&str> {
+    port.strip_prefix(PARAM_PORT_PREFIX)
 }
 
 /// A parsed `block.port` endpoint.

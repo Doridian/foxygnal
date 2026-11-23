@@ -27,7 +27,9 @@ frames of a few KB each.
 | `foxygnal-sdr` | SDR device API, device strings, drivers and discovery, the TX arm switch | — |
 | `foxygnal-grc` | GNU Radio `.grc` import (see [GRC_IMPORT.md](GRC_IMPORT.md)) | core |
 | `foxygnal-server` | REST + WebSocket API, probes and instruments, static UI | core, dsp, sdr, grc |
-| `foxygnal` | CLI | all |
+| `foxygnal-plugin` | block plugins: WebAssembly components run with wasmtime (see "Plugins") | core |
+| `foxygnal-plugin-sdk` | guest side: write plugins in Rust (built for `wasm32-unknown-unknown`) | — |
+| `foxygnal` | CLI | all (plugin: cargo feature `plugins`, default on) |
 
 `foxygnal-sdr` holds the device trait, discovery and the drivers. Drivers that need a C library
 (librtlsdr, libhackrf, SoapySDR) load it at run time, so `cargo build` needs no C libraries and no
@@ -92,6 +94,111 @@ code.
   return `TagPropagation::Manual` from `Block::tag_propagation` and forward tags themselves.
   A full queue drops new tags rather than block (`InputPort::dropped_tags`).
 
+## Control inputs and constant inputs (M8)
+
+Settings and streams can trade places: any live number setting can be driven by a wire, and
+any stream input can be a constant. Both are generic (no block code), so an `add` can add a
+constant, and a peak finder can steer a channel filter (`examples/fm-autotune.fox.toml`).
+
+**Settings as inputs.** A connection to port `@name` drives the block's parameter `name`:
+
+```toml
+[[connect]]
+from = "peak.out"
+to = "channel.@offset"   # freq_xlating_fir's live `offset`, set by an f32 stream
+```
+
+- Only parameters that are live and a float, int or bool can be wired
+  (`ParamSpec::wireable`); anything else, an unknown parameter, or a stream that isn't f32
+  is an `Error::Edge` naming both endpoints (insert a converter for other types; the editor
+  offers one). The value in `params` stays the initial value, used until the first control
+  value arrives.
+- At build time each wired parameter becomes a hidden **control input** of that block
+  instance (`Flowgraph::connect_param`): an f32 read cursor the runtime owns. It is not in
+  the block's inputs: `work()` never sees it, `configure` doesn't see its metadata, it never
+  paces the block, and it is left out of "an input is exhausted → finish".
+- **Timing: sample and hold per `work` call.** Before each `work` (right after live params
+  from the UI), the runtime drains every control input completely and keeps the last value.
+  If it differs from the last one seen, it maps it (float as is, int rounded, bool `> 0.5`),
+  checks the parameter's range and calls `Block::set_param`. So a value applies to
+  everything the block processes from its next `work` call on, typically within a few
+  milliseconds' worth of samples; it is not sample-accurate. NaN is ignored. When the
+  producer ends, the parameter keeps its last value.
+- A new control value wakes the block (its waker is registered on control cursors too), so a
+  change applies promptly even when the stream inputs are idle. No allocation and no locks
+  on this path (`serde_json::Value::from(f64)` doesn't allocate; names are the descriptor's
+  `&'static str`).
+- A value the parameter's range or the block rejects doesn't stop the graph: the block keeps
+  its last good value and the runtime records a **warning** once (until a value is accepted
+  again), one per block and setting (`Monitor::warnings`, `warning_count`). The server sends
+  them as `status.warnings` (pinned to blocks like errors) and the block shows them.
+- Control edges count for the topological order, so a loop through a control input is
+  refused like any loop (feedback loops would need a delay block; not done).
+- An exported input of a hierarchical block may point at `inner.@param`.
+
+**Constant inputs.** A block may give stream inputs a constant instead of a wire:
+
+```toml
+[[block]]
+id = "add"
+kind = "add"
+params = { type = "f32" }
+const_inputs = { b = "$dc * 2" }   # a number or expression; c32 inputs take [re, im]
+```
+
+- Resolved away in `core::resolve`: each constant becomes a hidden block
+  `add/const:b` of kind `const_source` (in `foxygnal-blocks`, marked hidden with
+  `Registry::set_hidden`, so the catalog serves `"hidden": true` and the palette skips it)
+  with the input's stream type, wired to that input. The runtime and the blocks see an
+  ordinary graph.
+- `const_source` states **no sample rate**, so `StreamMeta::merge` takes the rate from the
+  block's other inputs (blocks that read `cx.input_rate(port)` of the constant port itself
+  get the usual "nothing upstream sets the rate" error). It fills up to 4096 items per
+  `work` call, so it runs in lockstep with whatever consumes it.
+- Values are evaluated like params (numbers, SI suffixes, `$vars`, expressions); i16 / u8
+  constants are rounded and clamped. `[re, im]` on a non-c32 input, an unknown input, a
+  constant on an input that is also wired, and a block whose every input is constant (nothing
+  would pace it) are errors naming the block.
+- Changing a constant changes the hidden block's live `value` / `imag`, so the server's
+  `diff_params` applies it live through `ParamSender`; adding or removing one changes the
+  topology (stale). The `/` in the id makes the server treat the hidden block like the inside
+  of a hierarchical block: its wire is not drawn, its CPU counts toward `add`, its errors pin
+  to `add`.
+
+**Editor.** Each wireable setting has a "⇢ input" toggle in the inspector; on, the block shows
+a diamond handle `@name` (labelled with the setting) below its stream inputs, the field says
+"wired · initial value", and `ui.wired = ["name"]` keeps the handle while unconnected. Off
+removes the handle and its wire. The inspector's *Inputs* section has a "constant" checkbox
+and value field per stream input (c32: `re, im`); the node then shows `b = 1.5` instead of a
+handle. All descriptor-driven and undoable like any edit.
+
+## Plugins (M6)
+
+Out-of-tree blocks are WebAssembly components (WIT world `foxygnal:block/block-plugin`,
+`wit/block.wit`), loaded at start-up by `foxygnal-plugin` with wasmtime (Cranelift, component
+model, no WASI). Details, numbers and the guest SDK: [PLUGINS.md](PLUGINS.md).
+
+- **Registry hook.** `Registry::register_plugin(descriptor, plugin, factory)` takes a boxed
+  closure (`DynFactory`) instead of a `fn`, refuses kinds that are taken, and marks the catalog
+  entry `"plugin": "<name>"`. Kinds are `<plugin>:<kind>` (graph files keep `graph:`).
+  Descriptor strings are leaked (`&'static str`), once per plugin load.
+- **One instance per block.** The factory instantiates the component in a fresh `Store`, calls
+  the plugin's `create`, and returns a `PluginBlock`: a native `Block` that forwards
+  `configure`, `set_param` and `work`, and reports `TagPropagation` from the descriptor.
+- **Batches, one copy each way.** `work` lowers each input's readable bytes (≤ 8192 items) as a
+  `list<u8>` argument (wasmtime copies from the ring into plugin memory); the plugin hands its
+  output to the imported `emit`, which the host copies from plugin memory into the ring
+  (`WasmList::as_le_slice`), and reports consumption through `consume`. No host allocation per
+  call; `work` is skipped when every input is empty.
+- **Sandbox.** Imports are only `foxygnal:block/host` (`emit`, `consume`, `add-tag`, `log`). A
+  `ResourceLimiter` caps linear memory (64 MiB per instance). Every call has an epoch deadline
+  (250 ms); the epoch thread (`fox:plugin-epoch`) ticks every 10 ms while a call runs and parks
+  when idle. Traps (including the deadline) become the block's error and stop the graph like
+  any block error; the instance is never entered again.
+- **Loading.** `--plugins DIR`, else `<project dir>/plugins` (next to the graph for run/bench)
+  and `~/.local/share/foxygnal/plugins`. Core modules built with the SDK are turned into
+  components at load time (`wit-component`); plugins compile in parallel.
+
 ## Browser audio
 
 `browser_audio` is a sink that consumes its input (paced at the stream rate unless hardware
@@ -110,6 +217,13 @@ One wire means one probe and one lossless stream, so the channels can't drift ap
 samples independently. The audio probe on a c32 wire sets the frame's stereo flag and
 interleaves L, R; the UI builds a two-channel `AudioBuffer`. A real wire stays mono, and the
 frame format is unchanged for it (the flag is a new bit; `n` counts sample instants).
+
+The sound-card blocks (`audio_sink` / `audio_source`, `audio` feature) take the same `type`:
+with c32 the lock-free ring between `work()` and the cpal callback carries interleaved L/R
+pairs (always whole frames), and the callback maps them to the device's channels: L/R to the
+first two (silence on any others), or (L+R)/2 on a mono device. A mono sink plays the same
+sample on every channel; a stereo source reads the device's first two channels (a mono input
+feeds both sides).
 
 ## Buffers
 
@@ -278,11 +392,15 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
 
 ## Decoded messages (M6)
 
-Decoders (`adsb_decoder`, `rds_decoder`, `packet_decoder` in hex mode, …) need a way to show a
+Decoders (`adsb_decoder`, `rds_decoder`, `pocsag_decoder`, `hdlc_deframer`, `packet_decoder`
+in hex mode, …) need a way to show a
 person what they found, without per-block UI code. The convention: **a decoded message is one line of
 UTF-8 text, `\n`-terminated, on a `u8` output.** Lines are `key=value` fields where that
 makes sense (`t=1.234567 icao=4840D6 df=17 tc=4 type=ident callsign=KLM1023 raw=…`), so
-they read well and grep well. Everything downstream is generic:
+they read well and grep well. Free text from the air (a pager message, an APRS comment) goes in
+a quoted field with `"`, `\`, line breaks and other control characters escaped
+(`digital::text::Escaped`), so a message can never span two lines. Everything downstream is
+generic:
 
 - The **Messages** instrument (`text` probe, frame kind 6) shows the lines of any `u8` wire,
   with a filter, follow/scroll-back and a "lines were lost" marker; it is offered in the
@@ -318,7 +436,10 @@ renamed over the old one, so a crash leaves a usable recording. `parse_tags` is 
 `sigmf_source` emits `rx_freq` at every capture's start, `hw` at 0, and each annotation's
 `foxygnal:*` fields as tags (an annotation without any becomes a `label` tag from
 `core:label` / `core:comment`), again on each loop. Interleaved i16 / u8 streams count two
-items per sample.
+items per sample. Its `start` param (a sample index, the unit annotations use) seeks the data
+file to `start × sample size` and shifts the tags back by `start`; earlier tags are dropped,
+except `hw` and the `rx_freq` of the capture in effect, which land on item 0 (and set the
+output's centre frequency). A loop restarts at `start`.
 
 **One-click recording** (`server/src/record.rs`). Any wire of the running graph can be recorded
 without editing the graph. A recording is not a probe: it attaches a lossless `TapReader` to the
@@ -341,6 +462,11 @@ read outside that folder.
 **Playback.** The palette's *Recordings* panel lists `GET /api/recordings`; *Add* puts a
 `sigmf_source` with `path = "recordings/<name>.sigmf-meta"` (relative paths resolve against the
 project directory) on the canvas, `c32` for complex recordings and `f32` for real ones.
+Each entry expands into a timeline (`GET /api/recordings/{name}`): capture segments shaded and
+labelled with their frequency, annotations as markers coloured by label, with tooltips. Clicking
+the strip or a marker offers *Add source from here*, a `sigmf_source` with `start` at that
+sample. While recording, the `record` events carry an `annotations` count, which the record
+button shows.
 
 ## Hardware (M4)
 
@@ -448,6 +574,7 @@ REST:
 - A block descriptor with `"response": true` belongs to a block
   registered with `Registry::register_with_response` (filters, resamplers)
 - A block descriptor with `"tx": true` transmits (see "TX arming")
+- `"hidden": true`: an internal block (`const_source`) the palette leaves out
 - `"keywords"` (optional, `Registry::set_keywords`): aliases the palette search also matches
   (`abs`, `envelope` for `c32_to_f32`)
 - `GET /api/devices`: per-driver discovery, `[{driver, label, devices [{driver, args, label,
@@ -484,13 +611,13 @@ WebSocket `/api/ws`, one per browser tab:
   playback"). Server:
   `hello` (full snapshot on connect or after lag, including `meta`, `allow_tx`: the
   server was started with `--allow-tx`, and `recordings`: those in progress),
-  `record {edge, name, path, started_at, elapsed_ms, samples, bytes, gaps, done, error?}` to
+  `record {edge, name, path, started_at, elapsed_ms, samples, bytes, gaps, annotations, done, error?}` to
   every tab, about twice a second per recording and once with `done: true` when it ends (a
   start that failed has no `name` and an `error`),
   `graph {graph, name, version, from}`, `meta {edges [{from, to, sample_rate?, center_freq?}],
   error?, tx?}` after every graph change (`tx`: blocks that would transmit, `[{block, kind,
   device?, frequency?, sample_rate?, gain?}]`),
-  `status {state, started_at, stale, errors[], tx_armed?}`, where each error names a `block`, an
+  `status {state, started_at, stale, errors[], warnings[]?, tx_armed?}` (`warnings`: rejected control input values, see "Control inputs and constant inputs"), where each error names a `block`, an
   `edge {from, to}`, or neither, `stats {blocks[], edges[]}`, and, to the probe's tab only,
   `probe {id, error}` when a probe can't show anything (wire not running, wrong type) or
   recovers. Probes belong to the connection; the UI sets them up again after reconnecting.

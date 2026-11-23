@@ -78,6 +78,7 @@ pub fn router(cfg: &Config, session: Arc<Session>) -> Router {
         .route("/files/{name}", get(api::get_file).put(api::put_file))
         .route("/import", post(api::import_upload))
         .route("/import/{name}", get(api::import_file))
+        .route("/export", post(api::export_grc))
         .route("/recordings", get(record::list))
         .route(
             "/recordings/{name}",

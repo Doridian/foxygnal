@@ -78,6 +78,11 @@ pub struct Status {
     /// The graph changed in ways that only apply after a restart.
     pub stale: bool,
     pub errors: Vec<ErrorInfo>,
+    /// Problems that don't stop the run, pinned to blocks: a value on a wired
+    /// setting (`block.@param`) that the block rejected. One per block and
+    /// setting; cleared when a run starts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<ErrorInfo>,
     /// The current run transmits: TX was armed for it. The UI shows a red
     /// indicator while this is set.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -231,6 +236,9 @@ struct Inner {
     started_at: Option<u64>,
     stale: bool,
     errors: Vec<ErrorInfo>,
+    warnings: Vec<ErrorInfo>,
+    /// [`Monitor::warning_count`] when `warnings` was last updated.
+    warning_count: u64,
     run: Option<Run>,
     next_run: u64,
     meta: Meta,
@@ -279,6 +287,8 @@ impl Session {
                 started_at: None,
                 stale: false,
                 errors: Vec::new(),
+                warnings: Vec::new(),
+                warning_count: 0,
                 run: None,
                 next_run: 0,
                 meta: Meta::default(),
@@ -307,6 +317,28 @@ impl Session {
 
     pub(crate) fn emit_stats(&self, stats: Stats) {
         self.emit(&Event::Stats(stats));
+    }
+
+    /// Pick up new warnings of run `id` (see [`Status::warnings`]) and send
+    /// a status if they changed. Cheap when nothing changed.
+    pub(crate) fn poll_warnings(&self, id: u64, monitor: &Monitor, map: &EdgeMap) {
+        let count = monitor.warning_count();
+        let mut inner = self.lock();
+        if inner.run.as_ref().is_none_or(|r| r.id != id) || count == inner.warning_count {
+            return;
+        }
+        inner.warning_count = count;
+        inner.warnings = monitor
+            .warnings()
+            .into_iter()
+            .map(|w| {
+                map.error(&Error::Block {
+                    block: w.block,
+                    source: Box::new(Error::Other(format!("{}: {}", w.key, w.message))),
+                })
+            })
+            .collect();
+        self.emit(&Event::Status(Self::status(&inner)));
     }
 
     /// Recordings in progress.
@@ -393,6 +425,7 @@ impl Session {
             started_at: inner.started_at,
             stale: inner.stale,
             errors: inner.errors.clone(),
+            warnings: inner.warnings.clone(),
             tx_armed: inner.run.as_ref().is_some_and(|r| r.tx.is_some()),
         }
     }
@@ -576,6 +609,8 @@ impl Session {
             return;
         }
         inner.errors.clear();
+        inner.warnings.clear();
+        inner.warning_count = 0;
         inner.stale = false;
         let started = self.build(&inner.graph).and_then(|b| {
             let map = Arc::new(b.map);
@@ -661,11 +696,12 @@ impl Session {
                 .iter()
                 .filter(|p| matches!(p.kind, ParamKind::Path))
             {
-                if let Some(serde_json::Value::String(p)) = b.params.get(spec.name) {
-                    if !p.is_empty() && std::path::Path::new(p).is_relative() {
-                        let abs = self.base_dir.join(p).to_string_lossy().into_owned();
-                        b.params.insert(spec.name.to_owned(), abs.into());
-                    }
+                if let Some(serde_json::Value::String(p)) = b.params.get(spec.name)
+                    && !p.is_empty()
+                    && std::path::Path::new(p).is_relative()
+                {
+                    let abs = self.base_dir.join(p).to_string_lossy().into_owned();
+                    b.params.insert(spec.name.to_owned(), abs.into());
                 }
             }
         }

@@ -304,8 +304,10 @@ fn monitor_taps_and_counts_a_running_graph() {
     let got = tap.read(tap.written().saturating_sub(1024), &mut buf);
     assert!(got.items > 0);
     let samples: Vec<f32> = buf[..got.items * 4]
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect();
     assert!(
         samples.iter().all(|v| (v.abs() - 0.5).abs() < 1e-6),

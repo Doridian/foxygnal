@@ -16,7 +16,7 @@
   import TxDialog from './TxDialog.svelte';
   import { graphView } from './graphview.svelte';
   import { instruments } from './instruments.svelte';
-  import { GRAPH_KIND, emptyGraph, fetchBlocks, fetchExample, importFile, importText, isGrc, openFile, parseToml, renderToml, saveFile, type BlockDescriptor, type DeviceInfo, type Exports, type GraphSpec, type RecordingInfo, type Imported, type TxInfo } from './api';
+  import { GRAPH_KIND, emptyGraph, exportGrc, fetchBlocks, fetchExample, importFile, importText, isGrc, openFile, parseToml, renderToml, saveFile, type BlockDescriptor, type DeviceInfo, type Exports, type GraphSpec, type RecordingInfo, type Imported, type TxInfo } from './api';
   import { ID_RE, baseForCopy, baseForKind, convertersFor, edgeId, extrasOf, freshId, fromSpec, rejectReason, toSpec, typeOf, type BlockNode, type GraphExtras, type Wire } from './graph';
   import { renameRef, resolveVars } from './expr';
   import { session } from './session.svelte';
@@ -251,13 +251,33 @@
   function showImport(imp: Imported, source: string) {
     replaceGraph(imp.graph, null);
     suggestedName = imp.name;
-    const n = imp.warnings.length;
-    if (!n) return toast(`Imported ${source}`);
-    const shown = imp.warnings.slice(0, 6).map((w) => `• ${w}`);
+    warnToast(`Imported ${source}`, imp.warnings);
+  }
+
+  /** `done`, plus up to six of `warnings` (Copy lists all). */
+  function warnToast(done: string, warnings: string[]) {
+    const n = warnings.length;
+    if (!n) return toast(done);
+    const shown = warnings.slice(0, 6).map((w) => `• ${w}`);
     if (n > shown.length) shown.push(`…and ${n - shown.length} more (Copy lists all)`);
-    toast(`Imported ${source} with ${n} warning${n > 1 ? 's' : ''}:\n${shown.join('\n')}`, 'info', [
-      { label: 'Copy', run: () => navigator.clipboard?.writeText(imp.warnings.join('\n')) },
+    toast(`${done} with ${n} warning${n > 1 ? 's' : ''}:\n${shown.join('\n')}`, 'info', [
+      { label: 'Copy', run: () => navigator.clipboard?.writeText(warnings.join('\n')) },
     ], 30000);
+  }
+
+  /** Download the graph as a GNU Radio `.grc`; what didn't map exactly is listed. */
+  async function downloadGrc() {
+    try {
+      const exp = await exportGrc(JSON.parse(specJson), session.name ?? (suggestedName || undefined));
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([exp.grc], { type: 'application/x-yaml' }));
+      a.download = exp.name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      warnToast(`Exported ${exp.name}`, exp.warnings);
+    } catch (e) {
+      toast(`Couldn't export to GNU Radio: ${(e as Error).message}`, 'error');
+    }
   }
 
   async function save(as = false) {
@@ -348,6 +368,26 @@
     nodes = nodes.map((n) => (n.id === id ? { ...n, data: { ...n.data, params: { ...n.data.params, [name]: value } } } : n));
   }
 
+  /** Show setting `name` of block `id` as an input (handle `@name`), or stop (its wire goes too). */
+  function setWired(id: string, name: string, on: boolean) {
+    nodes = nodes.map((n) => {
+      if (n.id !== id) return n;
+      const wired = (n.data.wired ?? []).filter((w) => w !== name);
+      return { ...n, data: { ...n.data, wired: on ? [...wired, name] : wired } };
+    });
+    if (!on) edges = edges.filter((e) => e.target !== id || e.targetHandle !== `@${name}`);
+  }
+
+  /** Give input `port` of block `id` a constant (its wire goes), or a wire again (`undefined`). */
+  function setConst(id: string, port: string, value: unknown) {
+    nodes = nodes.map((n) => {
+      if (n.id !== id) return n;
+      const { [port]: _, ...rest } = n.data.consts ?? {};
+      return { ...n, data: { ...n.data, consts: value === undefined ? rest : { ...rest, [port]: value } } };
+    });
+    if (value !== undefined) edges = edges.filter((e) => e.target !== id || e.targetHandle !== port);
+  }
+
   function setVars(v: Record<string, number | string>) {
     extras = { ...extras, vars: v };
   }
@@ -417,7 +457,7 @@
     };
     // Shift the clipboard too, so repeated pastes cascade.
     clipboard = {
-      block: clipboard.block.map((b) => ({ ...b, ui: { x: Number(b.ui?.x ?? 0) + 40, y: Number(b.ui?.y ?? 0) + 40 } })),
+      block: clipboard.block.map((b) => ({ ...b, ui: { ...b.ui, x: Number(b.ui?.x ?? 0) + 40, y: Number(b.ui?.y ?? 0) + 40 } })),
       connect: clipboard.connect,
     };
     const g: GraphSpec = {
@@ -561,9 +601,11 @@
     if (desc) addBlock(desc, viewCentre(), { device: d.args });
   }
 
-  function addRecording(r: RecordingInfo) {
+  function addRecording(r: RecordingInfo, start = 0) {
     const desc = catalog.get('sigmf_source');
-    if (desc) addBlock(desc, viewCentre(), { path: r.path, type: r.datatype?.startsWith('r') ? 'f32' : 'c32' });
+    const params: Record<string, unknown> = { path: r.path, type: r.datatype?.startsWith('r') ? 'f32' : 'c32' };
+    if (start > 0) params.start = start;
+    if (desc) addBlock(desc, viewCentre(), params);
   }
 
   function toggleRun() {
@@ -619,6 +661,7 @@
     { label: 'Save as…', keys: 'Ctrl ⇧ S', run: () => save(true) },
     { label: 'Download .fox.toml', run: download },
     { label: 'Upload .fox.toml or .grc…', run: upload },
+    { label: 'Export to GNU Radio (.grc)…', run: downloadGrc },
   ];
 </script>
 
@@ -666,6 +709,8 @@
     node={selectedNode}
     edge={selectedEdge}
     onparam={setParam}
+    onwire={setWired}
+    onconst={setConst}
     onrename={rename}
     ondelete={deleteSelection}
     scope={vars.values}

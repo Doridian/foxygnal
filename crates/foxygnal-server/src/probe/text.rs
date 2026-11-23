@@ -94,7 +94,7 @@ impl Instrument for Text {
             .u32(self.pending.len() as u32)
             .bytes4([u8::from(self.gap), 0, 0, 0]);
         out.append(&mut self.pending);
-        while out.len() % 4 != 0 {
+        while !out.len().is_multiple_of(4) {
             out.push(0);
         }
         self.gap = false;

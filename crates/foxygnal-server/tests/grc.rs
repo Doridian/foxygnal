@@ -116,6 +116,22 @@ async fn grc_files_import_on_open() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert!(String::from_utf8_lossy(&body).contains("GNU Radio"));
 
+    // GNU Radio 3.7 XML, told apart by its content; broken XML is a 400.
+    for (text, status) in [
+        (fixture("tone_scope_37.grc"), StatusCode::OK),
+        ("<flow_graph><block>".to_owned(), StatusCode::BAD_REQUEST),
+    ] {
+        let (s, body) = call(
+            &dir,
+            Request::post("/api/import")
+                .header(header::HOST, HOST)
+                .body(Body::from(text))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, status, "{}", String::from_utf8_lossy(&body));
+    }
+
     // Paths stay inside the project dir, and a .grc is never written.
     let (s, _) = call(&dir, get("/api/import/..%2Fx.grc")).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
@@ -145,5 +161,47 @@ async fn grc_files_import_on_open() {
     .await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert!(dir.join("fm rx.fox.toml").is_file());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn post_json(uri: &str, body: String) -> Request<Body> {
+    Request::post(uri)
+        .header(header::HOST, HOST)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn graphs_export_to_grc() {
+    let dir = std::env::temp_dir().join(format!("foxygnal-grc-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ex = format!("{}/../../examples", env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(format!("{ex}/hier-tones.fox.toml")).unwrap();
+    let spec = foxygnal_core::GraphSpec::from_toml(&text).unwrap();
+
+    // Sub-graphs come from the project directory or the bundled library.
+    let body = serde_json::to_string(&spec).unwrap();
+    let uri = "/api/export?name=hier%20tones.fox.toml";
+    let (s, out) = call(&dir, post_json(uri, body)).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&out));
+    let exp: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(exp["name"], "hier tones.grc");
+    let grc = exp["grc"].as_str().unwrap();
+    assert!(grc.contains("file_format: 1"));
+    assert!(grc.contains("id: analog_sig_source_x"));
+    let warnings = exp["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("flattened"))
+    );
+    // Nothing is written.
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+
+    // A body that isn't a graph is a 4xx.
+    let (s, b) = call(&dir, post_json("/api/export", "flowgraph".into())).await;
+    assert!(s.is_client_error(), "{s} {}", String::from_utf8_lossy(&b));
     let _ = std::fs::remove_dir_all(&dir);
 }

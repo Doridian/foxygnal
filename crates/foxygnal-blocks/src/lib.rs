@@ -13,6 +13,7 @@ pub mod flow;
 pub mod iir;
 pub mod level;
 pub mod math;
+pub mod measure;
 pub mod net;
 mod params;
 pub mod resample;
@@ -34,7 +35,9 @@ pub fn registry() -> Registry {
 
 pub fn register_all(r: &mut Registry) {
     sources::register(r);
+    sources::register_const(r);
     math::register(r);
+    measure::register(r);
     flow::register(r);
     file::register(r);
     filters::register(r);

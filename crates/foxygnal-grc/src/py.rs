@@ -716,6 +716,164 @@ pub fn fmt_num(v: f64) -> String {
     }
 }
 
+// ---- Back to Python (export) ----------------------------------------------------
+
+/// A number as Python source: whole numbers below 100 000 plainly, others in
+/// the shorter of plain and scientific notation (`2.4e6`, `250000` →
+/// `2.5e5`, `0.05`). Float noise from unit prefixes (`50us` is
+/// 4.9999999999999996e-5) is rounded away at 15 significant digits.
+pub fn py_num(v: f64) -> String {
+    let r: f64 = format!("{v:.14e}").parse().unwrap_or(v);
+    let v = if (r - v).abs() <= v.abs() * 1e-15 {
+        r
+    } else {
+        v
+    };
+    if v.fract() == 0.0 && v.abs() < 1e5 {
+        return format!("{}", v as i64);
+    }
+    let plain = format!("{v}");
+    let sci = format!("{v:e}");
+    if sci.len() < plain.len() { sci } else { plain }
+}
+
+/// A Python string literal.
+pub fn py_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+const PY_ADD: u8 = 1;
+const PY_MUL: u8 = 2;
+const PY_UNARY: u8 = 3;
+const PY_POW: u8 = 4;
+const PY_ATOM: u8 = 5;
+
+/// The expression as Python source, with only the parentheses it needs.
+pub fn to_python(e: &Py) -> String {
+    python_prec(e).0
+}
+
+fn python_prec(e: &Py) -> (String, u8) {
+    let wrap = |e: &Py, min: u8| {
+        let (s, p) = python_prec(e);
+        if p < min { format!("({s})") } else { s }
+    };
+    match e {
+        Py::Num(_, t) if t.starts_with('-') => (t.clone(), PY_UNARY),
+        Py::Num(_, t) => (t.clone(), PY_ATOM),
+        Py::Str(s) => (py_str(s), PY_ATOM),
+        Py::Bool(b) => (if *b { "True" } else { "False" }.into(), PY_ATOM),
+        Py::None => ("None".into(), PY_ATOM),
+        Py::Name(n) => (n.clone(), PY_ATOM),
+        Py::Neg(x) => (format!("-{}", wrap(x, PY_UNARY)), PY_UNARY),
+        Py::Bin(BinOp::Pow, a, b) => (
+            format!("{}**{}", wrap(a, PY_ATOM), wrap(b, PY_UNARY)),
+            PY_POW,
+        ),
+        Py::Bin(op, a, b) => {
+            let (sym, p) = match op {
+                BinOp::Add => ("+", PY_ADD),
+                BinOp::Sub => ("-", PY_ADD),
+                BinOp::Mul => ("*", PY_MUL),
+                BinOp::Div => ("/", PY_MUL),
+                BinOp::FloorDiv => ("//", PY_MUL),
+                BinOp::Mod => ("%", PY_MUL),
+                BinOp::Pow => unreachable!("handled above"),
+            };
+            // `a - (b - c)` and `a / (b * c)` keep their parentheses.
+            let rmin = if matches!(op, BinOp::Add | BinOp::Mul) {
+                p
+            } else {
+                p + 1
+            };
+            (format!("{} {sym} {}", wrap(a, p), wrap(b, rmin)), p)
+        }
+        Py::Call(f, args, kwargs) => {
+            let mut parts: Vec<String> = args.iter().map(to_python).collect();
+            parts.extend(kwargs.iter().map(|(k, v)| format!("{k}={}", to_python(v))));
+            (format!("{f}({})", parts.join(", ")), PY_ATOM)
+        }
+        Py::List(items) => (
+            format!(
+                "[{}]",
+                items.iter().map(to_python).collect::<Vec<_>>().join(", ")
+            ),
+            PY_ATOM,
+        ),
+    }
+}
+
+/// A number as an expression.
+pub fn num(v: f64) -> Py {
+    Py::Num(v, py_num(v))
+}
+
+/// `a op b`, folding constants so generated expressions stay readable
+/// (`x * 1` → `x`, `48000 / 2` → `24000`).
+pub fn bin(op: BinOp, a: Py, b: Py) -> Py {
+    let lit = |e: &Py| match e {
+        Py::Num(v, _) => Some(*v),
+        _ => None,
+    };
+    match (op, lit(&a), lit(&b)) {
+        (BinOp::Mul | BinOp::Div, _, Some(1.0)) => a,
+        (BinOp::Mul, Some(1.0), _) => b,
+        (BinOp::Add | BinOp::Sub, _, Some(0.0)) => a,
+        (BinOp::Add, Some(0.0), _) => b,
+        (_, Some(x), Some(y)) => {
+            let v = match op {
+                BinOp::Add => x + y,
+                BinOp::Sub => x - y,
+                BinOp::Mul => x * y,
+                BinOp::Div if y != 0.0 => x / y,
+                _ => return Py::Bin(op, Box::new(a), Box::new(b)),
+            };
+            num(v)
+        }
+        _ => Py::Bin(op, Box::new(a), Box::new(b)),
+    }
+}
+
+/// A foxygnal expression (`"$samp_rate / 10"`, `"2.4M"`, `"100 kHz"`) as a
+/// Python expression: `$name` → `rename(name)`, SI prefixes applied, units
+/// dropped.
+pub fn from_fox(src: &str, rename: &dyn Fn(&str) -> String) -> Result<Py, String> {
+    use foxygnal_core::expr::{Expr, Op};
+    fn conv(e: &Expr, rename: &dyn Fn(&str) -> String) -> Py {
+        match e {
+            Expr::Num(v) => num(*v),
+            Expr::Var(n) => Py::Name(rename(n)),
+            Expr::Neg(x) => match conv(x, rename) {
+                Py::Num(v, _) => num(-v),
+                x => Py::Neg(Box::new(x)),
+            },
+            Expr::Bin(op, a, b) => {
+                let op = match op {
+                    Op::Add => BinOp::Add,
+                    Op::Sub => BinOp::Sub,
+                    Op::Mul => BinOp::Mul,
+                    Op::Div => BinOp::Div,
+                };
+                Py::Bin(op, Box::new(conv(a, rename)), Box::new(conv(b, rename)))
+            }
+        }
+    }
+    Ok(conv(&Expr::parse(src)?, rename))
+}
+
 /// The expression as Python-ish text, for messages.
 pub fn show(e: &Py) -> String {
     match e {
@@ -891,6 +1049,80 @@ mod tests {
             })
             .unwrap();
             assert!((py - fx).abs() <= 1e-9 * py.abs(), "{src}: {py} vs {fx}");
+        }
+    }
+
+    fn fox_vars(n: &str) -> Result<f64, String> {
+        vars(n)
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| n.to_string())
+    }
+
+    fn to_py(src: &str) -> String {
+        to_python(&from_fox(src, &|n| n.to_owned()).unwrap())
+    }
+
+    #[test]
+    fn foxygnal_to_python() {
+        assert_eq!(to_py("2.4M"), "2.4e6");
+        assert_eq!(to_py("100 kHz"), "1e5");
+        assert_eq!(to_py("12.5 kHz"), "12500");
+        assert_eq!(to_py("50us"), "5e-5");
+        assert_eq!(to_py("$samp_rate / 10"), "samp_rate / 10");
+        assert_eq!(
+            to_py("$samp_rate / (2 * $decim)"),
+            "samp_rate / (2 * decim)"
+        );
+        assert_eq!(to_py("($samp_rate / 2) / $decim"), "samp_rate / 2 / decim");
+        assert_eq!(
+            to_py("$samp_rate - ($decim - 1)"),
+            "samp_rate - (decim - 1)"
+        );
+        assert_eq!(to_py("-($fm_dev - 100k) * 2"), "-(fm_dev - 1e5) * 2");
+        assert_eq!(to_py("-5"), "-5");
+        // Names are renamed to the exported block ids.
+        let py = from_fox("$rate * 2", &|n| format!("{n}_0")).unwrap();
+        assert_eq!(to_python(&py), "rate_0 * 2");
+        assert!(from_fox("$samp_rate +", &|n| n.to_owned()).is_err());
+    }
+
+    #[test]
+    fn python_numbers() {
+        assert_eq!(py_num(48000.0), "48000");
+        assert_eq!(py_num(2.4e6), "2.4e6");
+        assert_eq!(py_num(1e6), "1e6");
+        assert_eq!(py_num(0.5), "0.5");
+        assert_eq!(py_num(-3.0), "-3");
+        assert_eq!(py_str("it's"), "'it\\'s'");
+        // Constant folding in the builder.
+        let x = Py::Name("x".into());
+        assert_eq!(to_python(&bin(BinOp::Mul, x.clone(), num(1.0))), "x");
+        assert_eq!(to_python(&bin(BinOp::Add, num(2.0), num(3.0))), "5");
+    }
+
+    #[test]
+    fn foxygnal_python_foxygnal_keeps_the_value() {
+        for src in [
+            "2.4M",
+            "100 kHz",
+            "-12.5 dB",
+            "$samp_rate / 10",
+            "$samp_rate / (2 * $decim)",
+            "$samp_rate - ($decim - 1) * 3",
+            "-($fm_dev - 100k) * 2",
+            "-(-$decim)",
+            "$fm_dev / $samp_rate * 1m",
+            "1 - 2 - 3",
+            "8 / 4 / 2",
+        ] {
+            let fox = foxygnal_core::expr::eval(src, &mut fox_vars).unwrap();
+            let python = to_py(src);
+            let pyv = ev(&python).unwrap().as_f64().unwrap();
+            let back = tr(&python).unwrap();
+            let again = foxygnal_core::expr::eval(&back, &mut fox_vars).unwrap();
+            let tol = 1e-9 * fox.abs().max(1e-12);
+            assert!((fox - pyv).abs() <= tol, "{src} → {python}: {fox} vs {pyv}");
+            assert!((fox - again).abs() <= tol, "{src} → {python} → {back}");
         }
     }
 }

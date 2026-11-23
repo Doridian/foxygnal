@@ -9,6 +9,7 @@ use foxygnal_core::{DirLoader, Flowgraph, GraphSpec, Registry};
 use foxygnal_server::{Security, Ui};
 
 mod bench;
+mod plugins;
 mod procstat;
 
 #[derive(Parser)]
@@ -20,6 +21,11 @@ mod procstat;
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+    /// Load block plugins (`*.wasm`) from this directory instead of the
+    /// defaults (`plugins/` in the project dir, or next to the graph for
+    /// run/bench, and ~/.local/share/foxygnal/plugins). Repeatable.
+    #[arg(long, global = true, value_name = "DIR")]
+    plugins: Vec<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -82,8 +88,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Convert a GNU Radio Companion flowgraph (`.grc`, GNU Radio 3.8+) to a
-    /// `.fox.toml` graph. Common blocks only; warnings name what didn't map.
+    /// Convert a GNU Radio Companion flowgraph (`.grc`: GNU Radio 3.8+ YAML or
+    /// 3.7 XML) to a `.fox.toml` graph. Common blocks only; warnings name what
+    /// didn't map.
     Import {
         grc: PathBuf,
         /// Output file (default: the `.grc` with a `.fox.toml` extension;
@@ -97,6 +104,19 @@ enum Cmd {
         /// the `audio` feature) instead of `browser_audio`.
         #[arg(long)]
         audio_device: bool,
+    },
+    /// Convert a `.fox.toml` graph to a GNU Radio Companion flowgraph (`.grc`,
+    /// GNU Radio 3.10 YAML). Blocks without an equivalent become placeholders;
+    /// warnings name what didn't map exactly.
+    Export {
+        graph: PathBuf,
+        /// Output file (default: the graph with a `.grc` extension; `-`
+        /// prints to stdout).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Overwrite the output file if it exists.
+        #[arg(long)]
+        force: bool,
     },
     /// List available blocks.
     Blocks {
@@ -146,7 +166,18 @@ fn tx_blocks<'a>(graph: &'a GraphSpec, registry: &Registry) -> Vec<&'a str> {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    let registry = foxygnal_blocks::registry();
+    let mut registry = foxygnal_blocks::registry();
+    // Plugins come from the project (serve) or the graph's directory.
+    let base = match &cli.cmd {
+        Cmd::Serve { project_dir, .. } => project_dir.clone(),
+        Cmd::Run { graph, .. } | Cmd::Bench { graph, .. } => {
+            graph.parent().map(PathBuf::from).unwrap_or_default()
+        }
+        _ => PathBuf::from("."),
+    };
+    if !matches!(cli.cmd, Cmd::Import { .. } | Cmd::Export { .. }) {
+        plugins::load(&mut registry, &plugins::dirs(&cli.plugins, &base)?)?;
+    }
     match cli.cmd {
         Cmd::Serve {
             bind,
@@ -279,6 +310,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             force,
             audio_device,
         } => import_grc(&grc, output, force, audio_device)?,
+        Cmd::Export {
+            graph,
+            output,
+            force,
+        } => export_grc(&graph, output, force)?,
         Cmd::Blocks { json } => {
             if json {
                 let all: Vec<_> = registry.catalog().collect();
@@ -329,5 +365,35 @@ fn import_grc(
         imp.graph.blocks.len(),
         imp.warnings.len()
     );
+    Ok(())
+}
+
+fn export_grc(graph: &Path, output: Option<PathBuf>, force: bool) -> anyhow::Result<()> {
+    let text =
+        std::fs::read_to_string(graph).with_context(|| format!("reading {}", graph.display()))?;
+    let spec = GraphSpec::from_toml(&text).with_context(|| graph.display().to_string())?;
+    // Sub-graphs sit next to the file.
+    let loader = DirLoader(graph.parent().map(PathBuf::from).unwrap_or_default());
+    let name = graph
+        .file_name()
+        .map(|n| n.to_string_lossy().trim_end_matches(".fox.toml").to_owned());
+    let opts = foxygnal_grc::ExportOptions {
+        loader: Some(&loader),
+        name,
+    };
+    let exp = foxygnal_grc::export(&spec, &opts)?;
+    for w in &exp.warnings {
+        eprintln!("warning: {w}");
+    }
+    let out = output.unwrap_or_else(|| foxygnal_grc::grc_name(graph));
+    if out.as_os_str() == "-" {
+        print!("{}", exp.grc);
+        return Ok(());
+    }
+    if out.exists() && !force {
+        bail!("{} exists; pass --force to overwrite it", out.display());
+    }
+    std::fs::write(&out, &exp.grc).with_context(|| format!("writing {}", out.display()))?;
+    eprintln!("wrote {} ({} warnings)", out.display(), exp.warnings.len());
     Ok(())
 }

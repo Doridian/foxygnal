@@ -49,7 +49,7 @@ impl Storage {
     /// A double mapping of `len` bytes, or `None` if this platform can't make
     /// one. `len` must be a nonzero multiple of [`page_size`].
     pub(crate) fn mirrored(len: usize) -> Option<Storage> {
-        if len == 0 || len % page_size() != 0 {
+        if len == 0 || !len.is_multiple_of(page_size()) {
             return None;
         }
         imp::map_mirrored(len).map(|ptr| Storage {

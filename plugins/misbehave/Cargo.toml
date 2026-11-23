@@ -1,0 +1,12 @@
+[package]
+name = "foxygnal-misbehave"
+description = "Test plugin for foxygnal: blocks that trap, spin, hog memory, tag and decimate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+foxygnal-plugin-sdk = { path = "../../crates/foxygnal-plugin-sdk" }

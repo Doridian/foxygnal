@@ -1,0 +1,88 @@
+# Inputs as constants, settings as inputs.
+#
+# `add` normally sums two streams. Here input `b` is a constant instead of a
+# wire (`const_inputs`), so it adds a DC offset to the tone: change `dc` while
+# it runs and the offset follows. A slow sine is wired into the gain's Gain
+# setting (`gain.@gain`), so the tone's level swells and fades.
+#
+#   tone ──▶ add (+ $dc) ──▶ gain ──▶ throttle ──▶ null
+#                             ▲
+#   lfo (0.5 Hz) ──▶ pace ────┘  (gain.@gain)
+#
+# Like any generator, the LFO needs a throttle (`pace`), or it would run as
+# fast as the gain reads it.
+#
+# Click a wire to watch it on a scope.
+
+[vars]
+dc = 0.5
+samp_rate = 48000
+
+[[block]]
+id = "tone"
+kind = "signal_source"
+params = { type = "f32", frequency = 440.0, amplitude = 0.5, sample_rate = "$samp_rate" }
+ui = { x = 50, y = 100 }
+
+[[block]]
+id = "add"
+kind = "add"
+params = { type = "f32" }
+# A number or expression; a c32 input takes `[re, im]`.
+const_inputs = { b = "$dc" }
+ui = { x = 380, y = 100 }
+
+[[block]]
+id = "lfo"
+kind = "signal_source"
+# 0.2…1.0: the control value is applied before each `work` call of `gain`.
+params = { type = "f32", frequency = 0.5, amplitude = 0.4, offset = 0.6, sample_rate = 1000 }
+ui = { x = 50, y = 300 }
+
+[[block]]
+id = "pace"
+kind = "throttle"
+params = { type = "f32" }
+ui = { x = 380, y = 300 }
+
+[[block]]
+id = "gain"
+kind = "gain"
+params = { type = "f32", gain = 1.0 }
+ui = { x = 700, y = 100 }
+
+[[block]]
+id = "throttle"
+kind = "throttle"
+params = { type = "f32" }
+ui = { x = 1020, y = 100 }
+
+[[block]]
+id = "null"
+kind = "null_sink"
+params = { type = "f32" }
+ui = { x = 1340, y = 100 }
+
+[[connect]]
+from = "tone.out"
+to = "add.a"
+
+[[connect]]
+from = "add.out"
+to = "gain.in"
+
+[[connect]]
+from = "lfo.out"
+to = "pace.in"
+
+[[connect]]
+from = "pace.out"
+to = "gain.@gain"
+
+[[connect]]
+from = "gain.out"
+to = "throttle.in"
+
+[[connect]]
+from = "throttle.out"
+to = "null.in"

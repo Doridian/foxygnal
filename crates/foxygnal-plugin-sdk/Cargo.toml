@@ -1,0 +1,18 @@
+[package]
+name = "foxygnal-plugin-sdk"
+description = "Write foxygnal blocks as WebAssembly component plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Build plugins for `wasm32-unknown-unknown` (see docs/PLUGINS.md). The crate
+# also compiles natively so the workspace checks it; the host imports are
+# unreachable there.
+
+[dependencies]
+wit-bindgen = { version = "0.61.1", default-features = false, features = ["macros", "realloc"] }
+
+[lints]
+workspace = true

@@ -189,12 +189,13 @@ pub fn channel_with(
             // 1, 2, 4 and 8 always divide a page). The fallback keeps the
             // same capacity, so a graph behaves the same either way.
             let bytes = (item_size * capacity).next_multiple_of(page_size());
-            let capacity = if bytes % item_size == 0 {
+            let capacity = if bytes.is_multiple_of(item_size) {
                 bytes / item_size
             } else {
                 capacity
             };
-            let mirrored = (bytes % item_size == 0)
+            let mirrored = bytes
+                .is_multiple_of(item_size)
                 .then(|| Storage::mirrored(bytes))
                 .flatten();
             // The fallback: twice the capacity, kept identical by `Ring::mirror`.

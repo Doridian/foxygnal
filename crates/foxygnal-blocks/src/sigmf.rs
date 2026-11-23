@@ -36,7 +36,7 @@ pub fn register(r: &mut Registry) {
                    ±1 floats, f32 any real one. i16 and u8 pass ci16 / cu8 (or ri16 / ru8) \
                    samples through unconverted; complex ones arrive as interleaved I/Q pairs. \
                    Capture segments become `rx_freq` tags and annotations become tags at \
-                   their sample (again on every loop).",
+                   their sample (again on every loop). Start skips into the recording.",
             inputs: vec![],
             outputs: vec![PortSpec {
                 name: "out",
@@ -59,6 +59,20 @@ pub fn register(r: &mut Registry) {
                     kind: ParamKind::Bool,
                     default: json!(false),
                     help: "Start over at end of file instead of ending the stream.",
+                    live: false,
+                },
+                ParamSpec {
+                    name: "start",
+                    label: "Start",
+                    kind: ParamKind::Int {
+                        min: Some(0),
+                        max: None,
+                    },
+                    default: json!(0),
+                    help: "Sample index to start at (and to loop back to), as in the \
+                           recording's annotations: I/Q pairs for complex recordings, not \
+                           stream items. Earlier tags are skipped, except that the capture \
+                           in effect there is tagged (`rx_freq`) on the first item.",
                     live: false,
                 },
             ],
@@ -342,6 +356,33 @@ pub fn parse_tags(text: &str) -> Result<Vec<Tag>, String> {
     Ok(tags)
 }
 
+/// The tags of a playback that starts at sample `start`: those at or after
+/// it, moved back by `start`, plus `hw` and the capture segment in effect at
+/// `start` (its `rx_freq`) at offset 0. `tags` is as [`parse_tags`] returns
+/// it (sorted, sample offsets).
+pub fn tags_from(tags: &[Tag], start: u64) -> Vec<Tag> {
+    if start == 0 {
+        return tags.to_vec();
+    }
+    let at_zero = |t: &&Tag| t.offset < start && &*t.key == "hw";
+    let mut out: Vec<Tag> = tags.iter().filter(at_zero).cloned().collect();
+    let active = tags
+        .iter()
+        .rfind(|t| &*t.key == "rx_freq" && t.offset <= start);
+    if let Some(t) = active.filter(|t| t.offset < start) {
+        out.push(t.clone());
+    }
+    for t in &mut out {
+        t.offset = 0;
+    }
+    out.extend(tags.iter().filter(|t| t.offset >= start).map(|t| {
+        let mut t = t.clone();
+        t.offset -= start;
+        t
+    }));
+    out
+}
+
 fn read_text(path: &Path) -> Result<String, Error> {
     std::fs::read_to_string(path)
         .map_err(|e| Error::Other(format!("cannot open {}: {e}", path.display())))
@@ -366,6 +407,8 @@ pub struct SigmfSource {
     data_path: PathBuf,
     ty: StreamType,
     repeat: bool,
+    /// The sample to start (and loop back) at.
+    start: u64,
     /// From `configure`: the recording's datatype, how to convert it, and
     /// output items per sample.
     plan: Option<(DataType, Conv, usize)>,
@@ -421,22 +464,46 @@ impl Block for SigmfSource {
         let bad = |e: String| Error::Other(format!("{}: {e}", self.meta_path.display()));
         let meta = parse_meta(&text).map_err(bad)?;
         let (conv, per) = self.plan(meta.datatype)?;
-        self.tags = parse_tags(&text).map_err(bad)?;
+        self.tags = tags_from(&parse_tags(&text).map_err(bad)?, self.start);
         for t in &mut self.tags {
             t.offset *= per as u64;
         }
+        // The capture in effect at the start, if it says.
+        let freq = self
+            .tags
+            .iter()
+            .take_while(|t| t.offset == 0)
+            .filter(|t| &*t.key == "rx_freq")
+            .find_map(|t| match t.value {
+                TagValue::Float(f) => Some(f),
+                TagValue::Int(i) => Some(i as f64),
+                _ => None,
+            })
+            .or(meta.frequency);
         for o in cx.outputs.iter_mut() {
             // Interleaved output counts items, two per complex sample.
             o.sample_rate = meta.sample_rate.map(|r| r * per as f64);
-            o.center_freq = meta.frequency;
+            o.center_freq = freq;
         }
         self.plan = Some((meta.datatype, conv, per));
         Ok(())
     }
 
     fn start(&mut self) -> Result<(), Error> {
-        let file = File::open(&self.data_path)
+        let mut file = File::open(&self.data_path)
             .map_err(|e| Error::Other(format!("cannot open {}: {e}", self.data_path.display())))?;
+        if self.start > 0 {
+            let size = self.plan.map_or(1, |(dt, _, _)| dt.sample_size() as u64);
+            let samples = file.metadata()?.len() / size;
+            if self.start >= samples {
+                return Err(Error::Other(format!(
+                    "{} has {samples} samples; can't start at sample {}",
+                    self.data_path.display(),
+                    self.start
+                )));
+            }
+            file.seek(SeekFrom::Start(self.start * size))?;
+        }
         self.file = Some(file);
         self.scratch = vec![0; 1 << 16];
         self.fill = 0;
@@ -486,7 +553,7 @@ impl Block for SigmfSource {
             }
             Conv::I16 { big_endian } => {
                 let o = out.slice_mut::<i16>();
-                for (o, b) in o[..n].iter_mut().zip(raw.chunks_exact(2)) {
+                for (o, b) in o[..n].iter_mut().zip(raw.as_chunks::<2>().0) {
                     let b = [b[0], b[1]];
                     *o = if big_endian {
                         i16::from_be_bytes(b)
@@ -510,8 +577,9 @@ impl Block for SigmfSource {
         self.pos = end;
         out.produce(n);
         if n == 0 && eof {
-            if self.repeat && file.metadata()?.len() >= dt.sample_size() as u64 {
-                file.seek(SeekFrom::Start(0))?;
+            let from = self.start * dt.sample_size() as u64;
+            if self.repeat && file.metadata()?.len() >= from + dt.sample_size() as u64 {
+                file.seek(SeekFrom::Start(from))?;
                 self.fill = 0;
                 self.pos = 0;
                 self.next_tag = 0;
@@ -540,6 +608,7 @@ fn build_source(p: &ParamReader<'_>) -> Result<Instance, Error> {
             data_path,
             ty,
             repeat: p.bool("repeat")?,
+            start: p.u64("start")?,
             plan: None,
             file: None,
             scratch: Vec::new(),
@@ -681,6 +750,11 @@ impl SigmfWriter {
     /// Bytes in the data file so far.
     pub fn bytes(&self) -> u64 {
         self.items * self.item_size as u64
+    }
+
+    /// Annotations so far (overflows, gaps, packets, other tags).
+    pub fn annotations(&self) -> usize {
+        self.annotations.len()
     }
 
     /// Samples written so far (I/Q pairs for interleaved streams).

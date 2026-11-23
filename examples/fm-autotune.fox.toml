@@ -1,0 +1,92 @@
+# Auto-tuning FM: the channel filter follows the strongest station in the band.
+#
+# The SDR stays put and streams 2.4 MHz of the FM band. `peak` averages FFT
+# spectra of that band and, five times a second, outputs the offset of the
+# strongest station (the centre of its power over 150 kHz). That number is
+# wired into the channel filter's Offset setting (`channel.@offset`: a setting
+# turned into an input), so the filter, and with it the audio, latches onto the
+# station without retuning the hardware. A station must be 3 dB stronger than
+# the current one before it switches over (hysteresis), and on noise the last
+# offset is held.
+#
+#   2.4 MS/s ─┬─────────────xlate ÷10──▶ FM demod ──▶ resample ──▶ browser
+#             └──▶ peak ──offset──┘
+#
+# With no device set, the first SDR found is used, or the simulated FM band
+# (`sim:`). There, at 99.7 MHz, 99.1 MHz (−0.6 MHz, weak) and 100.3 MHz
+# (+0.6 MHz, strong) are in view: it plays 100.3 MHz. Narrow the search range
+# (`search_from` / `search_to`, live) to pick another part of the band. With a
+# real receiver, the DC spike at 0 Hz can look like a signal: start the range
+# above 0 Hz if it does.
+#
+# A jump in offset is phase-continuous in the mixer, so it doesn't click;
+# the audio simply moves to the new station.
+
+[vars]
+center = "99.7M"
+samp_rate = "2.4M"
+audio_rate = "48k"
+search_from = "-1.1M"
+search_to = "1.1M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$center", sample_rate = "$samp_rate", gain = 30.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "peak"
+kind = "peak_frequency"
+params = { fft_size = 8192, update_rate = 5.0, min_offset = "$search_from", max_offset = "$search_to", bandwidth = 150000.0, min_snr = 10.0, hysteresis = 3.0 }
+ui = { x = 380, y = 300 }
+
+[[block]]
+id = "channel"
+kind = "freq_xlating_fir"
+# `offset` is only the starting value: the wire from `peak` sets it.
+params = { offset = 0.0, cutoff = 100000.0, transition = 40000.0, decimation = 10, window = "hamming" }
+ui = { x = 700, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "fm_demod"
+params = { deviation = 75000.0, deemphasis = "50us" }
+ui = { x = 1020, y = 120 }
+
+[[block]]
+id = "resample"
+kind = "rational_resampler"
+params = { type = "f32", output_rate = "$audio_rate" }
+ui = { x = 1340, y = 120 }
+
+[[block]]
+id = "audio"
+kind = "browser_audio"
+params = { pace = false }
+ui = { x = 1660, y = 120 }
+
+[[connect]]
+from = "sdr.out"
+to = "channel.in"
+
+[[connect]]
+from = "sdr.out"
+to = "peak.in"
+
+# A setting wired as an input: `@` + the parameter name.
+[[connect]]
+from = "peak.out"
+to = "channel.@offset"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.out"
+to = "resample.in"
+
+[[connect]]
+from = "resample.out"
+to = "audio.in"

@@ -27,7 +27,9 @@ fn noise(n: usize, seed: u32) -> Vec<f32> {
 
 fn cnoise(n: usize, seed: u32) -> Vec<Complex32> {
     noise(2 * n, seed)
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| Complex32::new(p[0], p[1]))
         .collect()
 }

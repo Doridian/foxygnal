@@ -1,0 +1,7 @@
+# wasmtime (the default `plugins` feature) needs Rust 1.97 or newer. CI runner
+# images ship whatever stable was current when they were built; pinning here
+# makes `rustup` install this toolchain instead. Without rustup (e.g. a distro
+# Rust) this file is ignored; any toolchain >= `rust-version` works.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]

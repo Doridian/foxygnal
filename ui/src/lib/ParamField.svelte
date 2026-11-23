@@ -10,7 +10,16 @@
     running,
     onchange,
     scope = new Map(),
-  }: { spec: ParamSpec; value: unknown; running: boolean; onchange: (v: unknown) => void; scope?: Scope } = $props();
+    wired = false,
+  }: {
+    spec: ParamSpec;
+    value: unknown;
+    running: boolean;
+    onchange: (v: unknown) => void;
+    scope?: Scope;
+    /** Wired as an input: the value here is only the initial one. */
+    wired?: boolean;
+  } = $props();
 
   const unit = $derived(spec.kind === 'float' ? spec.unit : undefined);
   const range = $derived(
@@ -53,7 +62,9 @@
 <div class="field">
   <label class="head" for={fid}>
     <span>{spec.label}{unit ? ` (${unit})` : ''}</span>
-    {#if spec.live}
+    {#if wired}
+      <span class="wired" title="This setting is an input: a wire sets it while running. The value here applies until the first value arrives.">wired · initial value</span>
+    {:else if spec.live}
       <span class="live" title="Applies live while running"></span>
     {:else if running}
       <span class="restart">applies on restart</span>
@@ -137,6 +148,11 @@
     height: 6px;
     border-radius: 50%;
     background: var(--ok);
+  }
+  .wired {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--warn);
   }
   .restart {
     margin-left: auto;

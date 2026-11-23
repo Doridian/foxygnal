@@ -209,7 +209,7 @@ unsafe impl<T> Sync for RawPtr<T> {}
 pub(crate) fn cu8_to_c32(src: &[u8], dst: &mut [Complex32]) -> usize {
     const K: f32 = 1.0 / 127.5;
     let n = (src.len() / 2).min(dst.len());
-    for (d, s) in dst[..n].iter_mut().zip(src.chunks_exact(2)) {
+    for (d, s) in dst[..n].iter_mut().zip(src.as_chunks::<2>().0) {
         *d = Complex32::new((s[0] as f32 - 127.5) * K, (s[1] as f32 - 127.5) * K);
     }
     n
@@ -220,7 +220,7 @@ pub(crate) fn cu8_to_c32(src: &[u8], dst: &mut [Complex32]) -> usize {
 pub(crate) fn cs8_to_c32(src: &[u8], dst: &mut [Complex32]) -> usize {
     const K: f32 = 1.0 / 128.0;
     let n = (src.len() / 2).min(dst.len());
-    for (d, s) in dst[..n].iter_mut().zip(src.chunks_exact(2)) {
+    for (d, s) in dst[..n].iter_mut().zip(src.as_chunks::<2>().0) {
         *d = Complex32::new((s[0] as i8) as f32 * K, (s[1] as i8) as f32 * K);
     }
     n
@@ -234,7 +234,7 @@ pub(crate) fn c32_to_cs8(src: &[Complex32], dst: &mut [u8]) -> usize {
         ((x * 127.0).round().clamp(-127.0, 127.0) as i8) as u8
     }
     let n = src.len().min(dst.len() / 2);
-    for (s, d) in src[..n].iter().zip(dst.chunks_exact_mut(2)) {
+    for (s, d) in src[..n].iter().zip(dst.as_chunks_mut::<2>().0) {
         d[0] = q(s.re);
         d[1] = q(s.im);
     }

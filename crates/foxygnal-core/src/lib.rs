@@ -19,13 +19,13 @@ pub use buffer::{BufferKind, SPARE_READERS, Tap, TapRead, TapReader};
 pub use graph::GraphSpec;
 pub use meta::{Configure, StreamMeta};
 pub use registry::{
-    BlockDescriptor, CatalogEntry, FrequencyResponse, Instance, ParamKind, ParamReader, ParamSpec,
-    Params, PortSpec, Registry, ResponseFn,
+    BlockDescriptor, CatalogEntry, DynFactory, FrequencyResponse, Instance, ParamKind, ParamReader,
+    ParamSpec, Params, PortSpec, Registry, ResponseFn,
 };
 pub use resolve::{DirLoader, GraphLoader, NoLoader, Resolved, resolve};
 pub use runtime::{
-    BlockCounters, BlockId, EdgeCounters, EdgeMeta, Flowgraph, GraphCounters, Monitor, ParamSender,
-    Running, StopHandle,
+    BlockCounters, BlockId, BlockWarning, EdgeCounters, EdgeMeta, Flowgraph, GraphCounters,
+    Monitor, ParamSender, Running, StopHandle,
 };
 pub use sample::{Complex32, Sample, StreamType};
 pub use tag::{Tag, TagPropagation, TagValue};

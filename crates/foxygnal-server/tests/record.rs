@@ -114,6 +114,8 @@ async fn records_a_wire_losslessly_with_its_tags() {
     s.handle(1, cmd(json!({"op": "record_start", "edge": edge()})));
     let v = record_event(&mut events, |v| v["samples"].as_u64() > Some(100_000)).await;
     assert_eq!(v["done"], false, "{v}");
+    // One packet per 1000-sample pass, counted while recording.
+    assert!(v["annotations"].as_u64() > Some(50), "{v}");
     let name = v["name"].as_str().unwrap().to_owned();
     assert!(name.starts_with("ramp_test-throttle_out-"), "{name}");
     assert_eq!(v["path"], format!("recordings/{name}.sigmf-meta"));
@@ -139,7 +141,9 @@ async fn records_a_wire_losslessly_with_its_tags() {
     assert_eq!(done["bytes"], data.len() as u64);
     // Lossless: the ramp continues sample by sample from wherever it started.
     let re: Vec<u32> = data
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes(c[..4].try_into().unwrap()) as u32)
         .collect();
     for (i, w) in re.windows(2).enumerate() {
@@ -164,6 +168,7 @@ async fn records_a_wire_losslessly_with_its_tags() {
     }
     let ann = meta["annotations"].as_array().unwrap();
     assert!(!ann.is_empty());
+    assert_eq!(done["annotations"], ann.len() as u64);
     for a in ann {
         let at = a["core:sample_start"].as_u64().unwrap() as usize;
         assert_eq!(re[at], 600, "{a}");

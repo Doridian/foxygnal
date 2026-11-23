@@ -1,0 +1,191 @@
+/// foxygnal block plugins: a WebAssembly component exports block descriptors
+/// and a block resource; the engine wraps each block as a native block.
+///
+/// Buffers cross the boundary in batches, never per sample:
+/// - inputs are passed to `work` as one `list<u8>` per input port (the host
+///   copies the readable items straight from its ring buffer into the
+///   plugin's memory);
+/// - outputs go back through the imported `emit`, which the host copies
+///   straight from the plugin's memory into its ring buffer.
+/// Items are raw little-endian bytes of the port's stream type (`c32` is
+/// interleaved re, im as two f32).
+///
+/// See docs/PLUGINS.md.
+package foxygnal:block@0.1.0;
+
+interface types {
+    /// Item type of a stream.
+    enum stream-type { %f32, c32, %i16, %u8 }
+
+    /// A parameter value. Floats accept ints, but not the other way round.
+    variant param-value {
+        float(f64),
+        int(s64),
+        boolean(bool),
+        text(string),
+    }
+
+    record float-range {
+        min: option<f64>,
+        max: option<f64>,
+        /// Display unit ("Hz", "dB", "s"); the UI adds SI prefixes.
+        unit: option<string>,
+    }
+
+    record int-range {
+        min: option<s64>,
+        max: option<s64>,
+    }
+
+    /// How the UI presents and validates a parameter.
+    variant param-kind {
+        float(float-range),
+        int(int-range),
+        boolean,
+        /// One of these strings.
+        choice(list<string>),
+        text,
+    }
+
+    record param-spec {
+        /// Machine name used in graph files.
+        name: string,
+        label: string,
+        kind: param-kind,
+        default: param-value,
+        help: string,
+        /// Can change while running (delivered through `block.set-param`).
+        live: bool,
+    }
+
+    record port-spec {
+        name: string,
+        /// `none`: depends on parameters (the type the block reports in
+        /// `created`).
+        %type: option<stream-type>,
+    }
+
+    /// How input tags reach the outputs.
+    enum tag-mode {
+        /// The host passes every tag on a consumed item to every output,
+        /// its offset scaled by produced/consumed. The plugin sees no tags.
+        all-to-all,
+        /// The plugin gets the input tags in `work` and emits tags itself.
+        manual,
+    }
+
+    record block-descriptor {
+        /// Stable id, unique within the plugin. The engine's kind is
+        /// `<plugin name>:<kind>`.
+        kind: string,
+        label: string,
+        /// Palette category, e.g. "Filters". Plugins may use their own.
+        category: string,
+        help: string,
+        inputs: list<port-spec>,
+        outputs: list<port-spec>,
+        params: list<param-spec>,
+        tags: tag-mode,
+    }
+
+    record plugin-info {
+        /// Lowercase letters, digits, `_` and `-`, starting with a letter.
+        /// Becomes the kind prefix.
+        name: string,
+        version: string,
+        blocks: list<block-descriptor>,
+    }
+
+    /// Facts about a stream (both optional).
+    record stream-meta {
+        sample-rate: option<f64>,
+        center-freq: option<f64>,
+    }
+
+    variant tag-value {
+        boolean(bool),
+        int(s64),
+        float(f64),
+        text(string),
+    }
+
+    /// A tag on an input item (manual tag mode only).
+    record input-tag {
+        port: u32,
+        /// Index into this call's input list for `port`, in items.
+        index: u32,
+        key: string,
+        value: tag-value,
+    }
+
+    variant work-status {
+        /// Progress was made; call again soon.
+        ok,
+        /// Nothing could be done (no input / no room): wait for a neighbour.
+        blocked,
+        /// Nothing to do for about this many nanoseconds.
+        wait(u64),
+        /// Finished (e.g. a source that has no more data).
+        done,
+    }
+}
+
+/// Functions the host provides. Only meaningful during `block.work`.
+interface host {
+    use types.{tag-value};
+
+    /// Hand `data` (whole items) to output `port`. May be called several
+    /// times per `work`; the items append. At most the `space` given for
+    /// that port in total.
+    emit: func(port: u32, data: list<u8>);
+
+    /// Mark `items` items of input `port` as consumed. Calls add up; at
+    /// most the number of items passed.
+    consume: func(port: u32, items: u32);
+
+    /// Tag the item at `index` of this call's output for `port` (0 = the
+    /// first item emitted in this call). Manual tag mode only.
+    add-tag: func(port: u32, index: u32, key: string, value: tag-value);
+
+    /// A debug message for the engine's log (rate-limited).
+    log: func(message: string);
+}
+
+interface plugin {
+    use types.{plugin-info, param-value, stream-meta, stream-type, input-tag, work-status};
+
+    /// What this plugin provides. Called once when the plugin loads.
+    info: func() -> plugin-info;
+
+    resource block {
+        /// Given each input's metadata, return each output's. An empty list
+        /// keeps the default (every field from the first input that has it).
+        /// Called before `work`, with no side effects allowed.
+        configure: func(inputs: list<stream-meta>) -> result<list<stream-meta>, string>;
+
+        /// Change a parameter flagged `live`, between `work` calls. The value
+        /// has already been checked against the spec.
+        set-param: func(name: string, value: param-value) -> result<_, string>;
+
+        /// Process a batch. `inputs[i]` holds the readable items of input
+        /// port i; `space[o]` is how many items output o has room for.
+        /// Report results through the `host` imports, then return a status.
+        work: func(inputs: list<list<u8>>, space: list<u32>, tags: list<input-tag>) -> result<work-status, string>;
+    }
+
+    /// A built block and its concrete port types.
+    record created {
+        block: block,
+        inputs: list<stream-type>,
+        outputs: list<stream-type>,
+    }
+
+    /// Build a block of `kind` (as in `info`). Every parameter of the
+    /// descriptor is given, defaults filled in, values checked.
+    create: func(kind: string, params: list<tuple<string, param-value>>) -> result<created, string>;
+}
+
+world block-plugin {
+    import host;
+    export plugin;
+}

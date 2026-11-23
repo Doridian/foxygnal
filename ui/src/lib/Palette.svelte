@@ -17,17 +17,17 @@
     onadd: (d: BlockDescriptor) => void;
     /** Add a receiver for a discovered device. */
     ondevice: (d: DeviceInfo) => void;
-    /** Add a SigMF Source playing a recording. */
-    onrecording: (r: RecordingInfo) => void;
+    /** Add a SigMF Source playing a recording, from sample `start`. */
+    onrecording: (r: RecordingInfo, start?: number) => void;
     search?: string;
     input?: HTMLInputElement;
   } = $props();
 
-  const ORDER = ['Hardware', 'Sources', 'Filters', 'Resamplers', 'Demodulators', 'Level', 'Math', 'Converters', 'Flow', 'Sinks', 'Graphs'];
+  const ORDER = ['Hardware', 'Sources', 'Filters', 'Resamplers', 'Demodulators', 'Level', 'Measurement', 'Math', 'Converters', 'Flow', 'Sinks', 'Graphs'];
 
   const matches = $derived.by(() => {
     const q = search.trim().toLowerCase();
-    return catalog.filter((d) => !q || `${d.label} ${d.kind} ${d.category} ${d.help} ${(d.keywords ?? []).join(' ')}`.toLowerCase().includes(q));
+    return catalog.filter((d) => !d.hidden && (!q || `${d.label} ${d.kind} ${d.category} ${d.help} ${d.plugin ? 'plugin' : ''} ${(d.keywords ?? []).join(' ')}`.toLowerCase().includes(q)));
   });
 
   const categories = $derived.by(() => {
@@ -110,7 +110,7 @@
   {#each categories as [cat, items] (cat)}
     <h3>{cat}</h3>
     {#each items as d (d.kind)}
-      <button class="item" title={d.help} draggable="true" ondragstart={(e) => ondragstart(e, d)} onclick={() => onadd(d)}>{d.label}</button>
+      <button class="item" title={d.plugin ? `${d.help}\n\nFrom plugin “${d.plugin}”` : d.help} draggable="true" ondragstart={(e) => ondragstart(e, d)} onclick={() => onadd(d)}>{d.label}{#if d.plugin}<span class="badge">{d.plugin}</span>{/if}</button>
     {/each}
   {:else}
     {#if catalog.length}<p class="muted">No block matches “{search}”.</p>{/if}
@@ -168,6 +168,15 @@
   .item:focus-visible {
     background: var(--panel-2);
     border-color: var(--line);
+  }
+  .badge {
+    margin-left: 6px;
+    padding: 0 5px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--muted);
+    font: 10px var(--mono);
+    vertical-align: 1px;
   }
   .hint {
     margin-top: auto;

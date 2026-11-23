@@ -40,6 +40,13 @@ pressed Run (try the "Live FM radio" template). Build with `--release` for real-
 debug builds are too slow for a 2.4 MS/s receiver. The "FM stereo + RDS" template
 (`examples/fm-stereo-rds.fox.toml`) plays a station in stereo and decodes its RDS: station
 name, RadioText, programme type and clock time, shown in the Messages instrument.
+Decoder templates: "ADS-B aircraft decoder" (`examples/adsb.fox.toml`), "POCSAG pager
+decoder" (`examples/pocsag.fox.toml`) and "APRS packet decoder" (`examples/aprs.fox.toml`).
+
+**Settings ⇄ inputs.** Any live number setting can be driven by a wire (`to = "channel.@offset"`;
+"⇢ input" in the inspector), and any stream input can be a constant (`const_inputs = { b = 1.5 }`).
+The "Auto-tuning FM" template wires a peak finder into a channel filter's offset, so it latches
+onto the strongest station in the band.
 
 **Native audio** (sound card sink and source) is behind the `audio` cargo feature, off by default
 because on Linux it needs the ALSA headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel`
@@ -77,6 +84,14 @@ rate, centre frequency, device, and the stream's tags (retunes become capture se
 overflows and other events annotations). The **Recordings** list in the palette shows them;
 **Add** puts a SigMF Source for one on the canvas, which plays the tags back too.
 
+### Plugins
+
+Blocks can also come from **plugins**: WebAssembly components, sandboxed (no files or network,
+a memory limit and a time limit per call), written in Rust with `foxygnal-plugin-sdk` and built
+with `cargo build --target wasm32-unknown-unknown`. Drop the `.wasm` into `plugins/` in the
+project directory or `~/.local/share/foxygnal/plugins` (or pass `--plugins DIR`) and its blocks
+appear in the palette as `<plugin>:<kind>`. See [docs/PLUGINS.md](docs/PLUGINS.md).
+
 UI development with hot reload: run `foxygnal serve` in one terminal and `npm run dev` in
 `ui/` in another, then open the Vite URL (`http://127.0.0.1:5173`). It proxies `/api` to the engine.
 
@@ -87,11 +102,15 @@ crates/
   foxygnal-core     stream types, ring buffers, Block trait, registry, graph spec, scheduler
   foxygnal-blocks   standard block library
   foxygnal-sdr      SDR device API, drivers, discovery, simulator, TX arm switch
-  foxygnal-grc      GNU Radio .grc import
+  foxygnal-grc      GNU Radio .grc import and export
   foxygnal-server   HTTP/WebSocket server (axum) for the UI
-  foxygnal          the CLI binary (serve / run / bench / import / blocks)
+  foxygnal-plugin   block plugins: WebAssembly components run with wasmtime
+  foxygnal-plugin-sdk  write plugins (built for wasm32)
+  foxygnal          the CLI binary (serve / run / bench / import / export / blocks)
 ui/                 Svelte 5 + Vite + Svelte Flow browser editor
 examples/           *.fox.toml flowgraphs
+plugins/            example and test plugins (a wasm32 workspace of its own)
+wit/                the plugin interface (WIT)
 bench/              graphs for `foxygnal bench` (docs/PERFORMANCE.md)
 docs/               plans and design notes
 ```
@@ -102,7 +121,9 @@ docs/               plans and design notes
 - [Roadmap](docs/ROADMAP.md): milestones M0–M6
 - [Performance](docs/PERFORMANCE.md): `foxygnal bench`, Raspberry Pi builds and targets
 - [Blocks](docs/BLOCKS.md): block catalog, implemented and planned
-- [GRC import](docs/GRC_IMPORT.md): `foxygnal import flowgraph.grc`, the block mapping and its limits
+- [Plugins](docs/PLUGINS.md): writing, building and installing block plugins, sandbox, performance
+- [GRC import and export](docs/GRC_IMPORT.md): `foxygnal import flowgraph.grc`,
+  `foxygnal export graph.fox.toml`, the block mappings and their limits
 - [UI](docs/UI.md): UI concept and interaction principles
 
 ## License

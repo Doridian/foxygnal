@@ -261,7 +261,7 @@ impl Shared {
         // Now and then look at the global queue first: a worker whose own
         // queue never runs dry (blocks waking each other) must not starve
         // tasks woken from outside (timers, drivers, parameter changes).
-        if tick % GLOBAL_EVERY == 0
+        if tick.is_multiple_of(GLOBAL_EVERY)
             && let Steal::Success(t) = self.injector.steal()
         {
             return Some(t);

@@ -202,7 +202,7 @@ impl Sync {
             let found = self.recent.iter().any(|&(at, s)| {
                 let d = self.bits - at;
                 at > 0
-                    && d % 26 == 0
+                    && d.is_multiple_of(26)
                     && d <= 26 * 8
                     && (u64::from(s) + d / 26) % 4 == u64::from(slot)
             });
@@ -663,16 +663,16 @@ impl Groups {
             }
             self.queue.line(format_args!(""));
         }
-        if let Some(w) = pi_word {
-            if self.pi.see(w.v, !w.fixed) {
-                // A different station: forget its texts.
-                self.ps.clear();
-                self.ps_sent = None;
-                self.rt.clear();
-                self.rt_ab = None;
-                self.rt_sent_len = None;
-                self.station = Confirmed::default();
-            }
+        if let Some(w) = pi_word
+            && self.pi.see(w.v, !w.fixed)
+        {
+            // A different station: forget its texts.
+            self.ps.clear();
+            self.ps_sent = None;
+            self.rt.clear();
+            self.rt_ab = None;
+            self.rt_sent_len = None;
+            self.station = Confirmed::default();
         }
         let Some(pi) = self.pi.value else { return };
         if pi_word.is_some_and(|w| w.v != pi) {

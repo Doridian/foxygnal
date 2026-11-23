@@ -1,0 +1,4 @@
+# 128-bit SIMD: wasmtime supports it on every platform foxygnal targets, and
+# LLVM vectorizes simple loops with it.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

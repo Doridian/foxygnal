@@ -63,7 +63,7 @@ fn rds_cycle(bits: &mut Vec<u8>) {
     }
     let mut rt = RT.as_bytes().to_vec();
     rt.push(0x0D);
-    while rt.len() % 4 != 0 {
+    while !rt.len().is_multiple_of(4) {
         rt.push(b' ');
     }
     for (s, ch) in rt.chunks(4).enumerate() {

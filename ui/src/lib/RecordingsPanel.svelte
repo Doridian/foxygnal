@@ -1,12 +1,16 @@
 <script lang="ts">
   // The SigMF recordings in the project's `recordings/` folder, in the palette.
-  // "Add" puts a SigMF Source for one onto the canvas.
+  // "Add" puts a SigMF Source for one onto the canvas; each one expands into a
+  // timeline of its captures and annotations, to play from any point.
   import { deleteRecording, listRecordings, type RecordingInfo } from './api';
   import { fmtHz, fmtRate } from './plot';
+  import RecordingTimeline from './RecordingTimeline.svelte';
   import { fmtBytes, session } from './session.svelte';
   import { toast } from './toast.svelte';
 
-  let { onadd }: { onadd: (r: RecordingInfo) => void } = $props();
+  let { onadd }: { onadd: (r: RecordingInfo, start?: number) => void } = $props();
+
+  let expanded = $state<Record<string, boolean>>({});
 
   let open = $state(true);
   let list = $state<RecordingInfo[] | null>(null);
@@ -83,7 +87,18 @@
       <p class="note">Loading…</p>
     {:else}
       {#each list as r (r.name)}
+        {@const canExpand = !r.recording && !r.error}
         <div class="rec" title={details(r)}>
+          <button
+            class="exp"
+            aria-expanded={!!expanded[r.name]}
+            aria-label="{expanded[r.name] ? 'Hide' : 'Show'} the timeline of {r.name}"
+            title={canExpand ? 'Timeline: captures and annotations' : ''}
+            disabled={!canExpand}
+            onclick={() => (expanded[r.name] = !expanded[r.name])}
+          >
+            <svg class:open={expanded[r.name] && canExpand} width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true"><path d="M9 6l6 6-6 6"></path></svg>
+          </button>
           <div class="text">
             <span class="name">{r.name}</span>
             <span class="sub mono">{r.recording ? 'recording…' : summary(r)}</span>
@@ -93,6 +108,9 @@
             <button class="del" title="Delete this recording" aria-label="Delete {r.name}" onclick={() => remove(r)}>×</button>
           {/if}
         </div>
+        {#if expanded[r.name] && canExpand}
+          <RecordingTimeline rec={r} onadd={(start) => onadd(r, start)} />
+        {/if}
       {:else}
         <p class="note">None yet. Select a wire while the graph runs and press Record.</p>
       {/each}
@@ -149,11 +167,32 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 4px 6px 4px 8px;
+    padding: 4px 6px 4px 2px;
     border-radius: 6px;
   }
   .rec:hover {
     background: var(--panel-2);
+  }
+  .exp {
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    flex: none;
+  }
+  .exp:disabled {
+    opacity: 0.3;
+    cursor: default;
+  }
+  .exp svg {
+    transition: transform 0.15s;
+  }
+  .exp svg.open {
+    transform: rotate(90deg);
   }
   .text {
     display: flex;

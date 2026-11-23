@@ -373,7 +373,7 @@ fn io_loop(
         };
         have += n;
         let pairs = have / 2;
-        for (o, iq) in out.iter_mut().zip(buf[..pairs * 2].chunks_exact(2)) {
+        for (o, iq) in out.iter_mut().zip(buf[..pairs * 2].as_chunks::<2>().0) {
             *o = Complex32::new(lut[iq[0] as usize], lut[iq[1] as usize]);
         }
         producer.push(&out[..pairs]);

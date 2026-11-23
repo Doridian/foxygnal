@@ -281,10 +281,10 @@ impl<T: FilterSample + Sample> Block for FirFilter<T> {
         }
         // An invalid live value keeps the old taps: the editor shows the
         // error (it configures every edit), and the radio keeps playing.
-        if let Ok(spec) = cfg.spec(self.rate) {
-            if retune(&spec, &mut self.taps, self.filter.as_mut()) {
-                self.cfg = cfg;
-            }
+        if let Ok(spec) = cfg.spec(self.rate)
+            && retune(&spec, &mut self.taps, self.filter.as_mut())
+        {
+            self.cfg = cfg;
         }
         Ok(())
     }
@@ -463,10 +463,10 @@ impl Block for XlatingFir {
             }
             "cutoff" => {
                 cfg.cutoff = v;
-                if let Ok(spec) = cfg.spec(self.rate) {
-                    if retune(&spec, &mut self.taps, self.filter.as_mut()) {
-                        self.cfg = cfg;
-                    }
+                if let Ok(spec) = cfg.spec(self.rate)
+                    && retune(&spec, &mut self.taps, self.filter.as_mut())
+                {
+                    self.cfg = cfg;
                 }
             }
             _ => return Err(Error::Other(format!("`{name}` is not a live parameter"))),

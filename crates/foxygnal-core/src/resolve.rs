@@ -10,6 +10,11 @@
 //!   the child's blocks, renamed `parent_id/inner_id`, so the runtime never
 //!   sees hierarchy.
 //!
+//! - A block's `const_inputs` give stream inputs a constant instead of a
+//!   wire. Each becomes a hidden [`CONST_KIND`] block `id/const:port` feeding
+//!   that input, so the runtime and the blocks need nothing special. It
+//!   states no sample rate, so the block's other inputs set the rate.
+//!
 //! The result keeps, for each connection, the parent connection it came from,
 //! so a server can report wires the way the user drew them.
 
@@ -20,7 +25,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::expr::Expr;
-use crate::graph::{BlockSpec, ConnectionSpec, GraphSpec, parse_endpoint};
+use crate::graph::{BlockSpec, ConnectionSpec, GraphSpec, param_port, parse_endpoint};
 use crate::registry::{ParamKind, Registry};
 use crate::{Error, StreamType};
 
@@ -29,6 +34,12 @@ pub const GRAPH_KIND: &str = "graph:";
 /// File extension of graph files.
 pub const GRAPH_EXT: &str = ".fox.toml";
 const MAX_NESTING: usize = 16;
+/// The (hidden) block kind that stands in for a constant input. It must take
+/// params `type`, `value` and `imag` (the latter two live) and have one
+/// output, `out`. Provided by `foxygnal-blocks`.
+pub const CONST_KIND: &str = "const_source";
+/// Hidden constant sources are called `block/const:port`.
+pub const CONST_ID: &str = "const:";
 
 /// Finds the graph files hierarchical blocks refer to.
 pub trait GraphLoader {
@@ -123,6 +134,8 @@ fn resolve_inner(
     let mut origins = Vec::new();
     // Hierarchical blocks of this graph: id → their exports, flattened.
     let mut subs: HashMap<&str, Resolved> = HashMap::new();
+    // Inputs given a constant: (block id, port name, port index).
+    let mut consts: Vec<(String, String, usize)> = Vec::new();
 
     for b in &spec.blocks {
         if b.id.contains('/') {
@@ -132,7 +145,19 @@ fn resolve_inner(
             )));
         }
         let Some(file) = b.kind.strip_prefix(GRAPH_KIND) else {
-            graph.blocks.push(eval_block(b, &scope, registry)?);
+            let eb = eval_block(b, &scope, registry)?;
+            if !b.const_inputs.is_empty() {
+                plain_consts(
+                    b,
+                    &eb,
+                    &scope,
+                    registry,
+                    &mut graph,
+                    &mut origins,
+                    &mut consts,
+                )?;
+            }
+            graph.blocks.push(eb);
             continue;
         };
         let in_block = |e: Error| Error::Block {
@@ -178,7 +203,7 @@ fn resolve_inner(
             });
             origins.push(None);
         }
-        let r = Resolved {
+        let sub = Resolved {
             inputs: r
                 .inputs
                 .into_iter()
@@ -189,7 +214,40 @@ fn resolve_inner(
             origins: Vec::new(),
             vars: Vec::new(),
         };
-        subs.insert(&b.id, r);
+        for (port, v) in &b.const_inputs {
+            let (name, idx, eps) = sub
+                .inputs
+                .iter()
+                .enumerate()
+                .find(|(_, (n, _))| n == port)
+                .or_else(|| {
+                    let i = port.parse::<usize>().ok()?;
+                    sub.inputs.get(i).map(|x| (i, x))
+                })
+                .map(|(i, (n, eps))| (n.clone(), i, eps.clone()))
+                .ok_or_else(|| {
+                    in_block(Error::Other(format!(
+                        "there is no input `{port}` to give a constant"
+                    )))
+                })?;
+            let first = eps
+                .first()
+                .ok_or_else(|| in_block(Error::Other(format!("input `{name}` goes nowhere"))))?;
+            let ty = input_type(&graph, registry, first).map_err(in_block)?;
+            add_const(
+                &b.id,
+                &name,
+                ty,
+                v,
+                &scope,
+                registry,
+                &eps,
+                &mut graph,
+                &mut origins,
+            )?;
+            consts.push((b.id.clone(), name, idx));
+        }
+        subs.insert(&b.id, sub);
     }
 
     for c in &spec.connections {
@@ -207,6 +265,14 @@ fn resolve_inner(
             }
             None => (c.from.clone(), c.from.clone()),
         };
+        if let Some((_, name, _)) = consts.iter().find(|(id, name, i)| {
+            id == t.block && (t.port == name || t.port.parse::<usize>().ok() == Some(*i))
+        }) {
+            return Err(edge_err(format!(
+                "`{}` → `{}`: input `{name}` of `{}` is set to a constant; turn that off to wire it",
+                c.from, c.to, t.block
+            )));
+        }
         let (tos, origin_to) = match subs.get(t.block) {
             Some(sub) => {
                 let (name, eps) = find_port(&sub.inputs, t.port)
@@ -301,6 +367,145 @@ fn resolve_inner(
     })
 }
 
+/// The type of input `ep` (`block.port`) of a block already in `graph`.
+fn input_type(graph: &GraphSpec, registry: &Registry, ep: &str) -> Result<StreamType, Error> {
+    let e = parse_endpoint(ep)?;
+    if param_port(e.port).is_some() {
+        return Ok(StreamType::F32);
+    }
+    let b = graph
+        .blocks
+        .iter()
+        .find(|b| b.id == e.block)
+        .ok_or_else(|| Error::Graph(format!("no block `{}`", e.block)))?;
+    let inst = registry.build(&b.kind, &b.params)?;
+    inst.inputs
+        .iter()
+        .find(|(n, _)| n == e.port)
+        .or_else(|| inst.inputs.get(e.port.parse::<usize>().ok()?))
+        .map(|(_, t)| *t)
+        .ok_or_else(|| Error::Graph(format!("block `{}` has no input `{}`", e.block, e.port)))
+}
+
+/// The constant inputs of plain block `b` (`eb`: its params evaluated).
+fn plain_consts(
+    b: &BlockSpec,
+    eb: &BlockSpec,
+    scope: &HashMap<&str, f64>,
+    registry: &Registry,
+    graph: &mut GraphSpec,
+    origins: &mut Vec<Option<ConnectionSpec>>,
+    consts: &mut Vec<(String, String, usize)>,
+) -> Result<(), Error> {
+    if registry.get(&b.kind).is_none() {
+        // `from_resolved` reports the unknown kind.
+        return Ok(());
+    }
+    let in_block = |e: Error| Error::Block {
+        block: b.id.clone(),
+        source: Box::new(e),
+    };
+    let inst = registry.build(&b.kind, &eb.params).map_err(|e| match e {
+        Error::Param { param, msg, .. } => Error::Param {
+            block: b.id.clone(),
+            param,
+            msg,
+        },
+        e => in_block(e),
+    })?;
+    let mut given = 0;
+    for (port, v) in &b.const_inputs {
+        let (idx, (name, ty)) = inst
+            .inputs
+            .iter()
+            .enumerate()
+            .find(|(_, (n, _))| n == port)
+            .or_else(|| {
+                let i = port.parse::<usize>().ok()?;
+                inst.inputs.get(i).map(|x| (i, x))
+            })
+            .ok_or_else(|| {
+                in_block(Error::Other(format!(
+                    "there is no input `{port}` to give a constant"
+                )))
+            })?;
+        let ep = format!("{}.{name}", b.id);
+        add_const(&b.id, name, *ty, v, scope, registry, &[ep], graph, origins)?;
+        consts.push((b.id.clone(), name.clone(), idx));
+        given += 1;
+    }
+    if given == inst.inputs.len() {
+        return Err(in_block(Error::Other(
+            "every input is a constant, so nothing sets the pace: wire at least one input \
+             to a stream"
+                .into(),
+        )));
+    }
+    Ok(())
+}
+
+/// Add the hidden source `id/const:port` with constant `v` (type `ty`),
+/// feeding every endpoint in `to`.
+#[allow(clippy::too_many_arguments)]
+fn add_const(
+    id: &str,
+    port: &str,
+    ty: StreamType,
+    v: &Value,
+    scope: &HashMap<&str, f64>,
+    registry: &Registry,
+    to: &[String],
+    graph: &mut GraphSpec,
+    origins: &mut Vec<Option<ConnectionSpec>>,
+) -> Result<(), Error> {
+    let err = |msg: String| Error::Block {
+        block: id.to_owned(),
+        source: Box::new(Error::Other(format!("constant for input `{port}`: {msg}"))),
+    };
+    if registry.get(CONST_KIND).is_none() {
+        return Err(err(format!(
+            "constant inputs need the `{CONST_KIND}` block, which this engine lacks"
+        )));
+    }
+    let (re, im) = match v {
+        Value::Array(xs) if xs.len() == 2 => {
+            if ty != StreamType::C32 {
+                return Err(err(format!(
+                    "`[re, im]` is for complex (c32) inputs; this one is {ty}: give a number"
+                )));
+            }
+            (
+                eval_value(&xs[0], scope).map_err(&err)?,
+                eval_value(&xs[1], scope).map_err(&err)?,
+            )
+        }
+        Value::Array(_) => {
+            return Err(err("give a number, or `[re, im]` for a c32 input".into()));
+        }
+        v => (eval_value(v, scope).map_err(&err)?, 0.0),
+    };
+    let hid = format!("{id}/{CONST_ID}{port}");
+    let mut params = crate::Params::new();
+    params.insert("type".into(), Value::from(ty.to_string()));
+    params.insert("value".into(), Value::from(re));
+    params.insert("imag".into(), Value::from(im));
+    graph.blocks.push(BlockSpec {
+        id: hid.clone(),
+        kind: CONST_KIND.to_owned(),
+        params,
+        const_inputs: Default::default(),
+        ui: Default::default(),
+    });
+    for ep in to {
+        graph.connections.push(ConnectionSpec {
+            from: format!("{hid}.out"),
+            to: ep.clone(),
+        });
+        origins.push(None);
+    }
+    Ok(())
+}
+
 /// An exported port by name, or by index like any other port.
 fn find_port<'a, T>(ports: &'a [(String, T)], port: &str) -> Option<(&'a str, &'a T)> {
     ports
@@ -346,6 +551,7 @@ fn eval_block(
         id: b.id.clone(),
         kind: b.kind.clone(),
         params: b.params.clone(),
+        const_inputs: Default::default(),
         ui: Default::default(),
     };
     let Some(desc) = registry.get(&b.kind) else {
@@ -585,6 +791,9 @@ pub fn describe(
 
     let port_type = |ep: &str, input: bool| -> Result<StreamType, Error> {
         let e = parse_endpoint(ep)?;
+        if input && param_port(e.port).is_some() {
+            return Ok(StreamType::F32);
+        }
         let b = base
             .graph
             .blocks

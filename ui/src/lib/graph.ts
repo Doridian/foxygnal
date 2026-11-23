@@ -2,9 +2,16 @@
 // connection rules with human-readable rejection reasons.
 
 import type { Connection, Edge, Node } from '@xyflow/svelte';
-import { GRAPH_KIND, portType, type BlockDescriptor, type GraphSpec, type StreamType } from './api';
+import { GRAPH_KIND, PARAM_PORT, portType, type BlockDescriptor, type GraphSpec, type StreamType } from './api';
 
-export type BlockData = { desc: BlockDescriptor; params: Record<string, unknown> };
+export type BlockData = {
+  desc: BlockDescriptor;
+  params: Record<string, unknown>;
+  /** Settings shown as inputs (handle `@name`), connected or not. */
+  wired?: string[];
+  /** Stream inputs set to a constant (no handle). */
+  consts?: Record<string, unknown>;
+};
 export type BlockNode = Node<BlockData, 'block'>;
 export type Wire = Edge<Record<string, unknown>, 'typed'>;
 
@@ -41,7 +48,12 @@ export function fromSpec(g: GraphSpec, catalog: Map<string, BlockDescriptor>, se
       y: typeof b.ui?.y === 'number' ? b.ui.y : Math.floor(i / 4) * 170,
     },
     selected: selected.has(b.id),
-    data: { desc: catalog.get(b.kind) ?? unknownDesc(b.kind), params: { ...b.params } },
+    data: {
+      desc: catalog.get(b.kind) ?? unknownDesc(b.kind),
+      params: { ...b.params },
+      wired: wiredOf(b.id, b.ui?.wired, g),
+      ...(b.const_inputs && Object.keys(b.const_inputs).length ? { consts: { ...b.const_inputs } } : {}),
+    },
   }));
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const edges: Wire[] = g.connect.map((c) => {
@@ -53,6 +65,17 @@ export function fromSpec(g: GraphSpec, catalog: Map<string, BlockDescriptor>, se
   return { nodes, edges };
 }
 
+/** Settings of block `id` shown as inputs: the UI flag plus any `@param` wire. */
+function wiredOf(id: string, flag: unknown, g: GraphSpec): string[] {
+  const names = new Set(Array.isArray(flag) ? flag.filter((x): x is string => typeof x === 'string') : []);
+  for (const c of g.connect) {
+    const dot = c.to.lastIndexOf('.');
+    const port = c.to.slice(dot + 1);
+    if (c.to.slice(0, dot) === id && port.startsWith(PARAM_PORT)) names.add(port.slice(1));
+  }
+  return [...names];
+}
+
 export function toSpec(nodes: BlockNode[], edges: Wire[], extras: GraphExtras = {}): GraphSpec {
   const ex = extras.export;
   return {
@@ -62,13 +85,22 @@ export function toSpec(nodes: BlockNode[], edges: Wire[], extras: GraphExtras = 
       id: n.id,
       kind: n.data.desc.kind,
       params: n.data.params,
-      ui: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
+      ...(n.data.consts && Object.keys(n.data.consts).length ? { const_inputs: n.data.consts } : {}),
+      ui: { x: Math.round(n.position.x), y: Math.round(n.position.y), ...(n.data.wired?.length ? { wired: n.data.wired } : {}) },
     })),
     connect: edges.map((e) => ({ from: `${e.source}.${e.sourceHandle}`, to: `${e.target}.${e.targetHandle}` })),
   };
 }
 
+/** The setting behind handle `@name`, if `handle` is one. */
+export function paramOfHandle(node: BlockNode | undefined, handle: string | null | undefined) {
+  if (!handle?.startsWith(PARAM_PORT)) return undefined;
+  return node?.data.desc.params.find((p) => p.name === handle.slice(1));
+}
+
 export function typeOf(node: BlockNode | undefined, handle: string | null | undefined, dir: 'inputs' | 'outputs'): StreamType | null {
+  // A setting wired as an input takes f32.
+  if (dir === 'inputs' && handle?.startsWith(PARAM_PORT)) return node ? 'f32' : null;
   const p = node?.data.desc[dir].find((p) => p.name === handle);
   return p && node ? portType(p, node.data.params) : null;
 }
@@ -82,6 +114,10 @@ export function rejectReason(c: Connection, nodes: BlockNode[]): string | null {
   const to = typeOf(dst, c.targetHandle, 'inputs');
   if (!from || !to) return null;
   if (from !== to) {
+    const setting = paramOfHandle(dst, c.targetHandle);
+    if (setting) {
+      return `\`${c.source}.${c.sourceHandle}\` produces ${from}, but \`${c.target}.${c.targetHandle}\` (the ${setting.label} setting, wired as an input) expects f32.`;
+    }
     return `\`${c.source}.${c.sourceHandle}\` produces ${from}, but \`${c.target}.${c.targetHandle}\` expects ${to}. Set both blocks to the same type.`;
   }
   return null;
@@ -103,9 +139,11 @@ export function convertersFor(from: StreamType, to: StreamType, catalog: Iterabl
   );
 }
 
-/** Id stem for a new block of `kind`: `signal_source` → `signal`. */
+/** Id stem for a new block of `kind`: `signal_source` → `signal`, plugin `example:gain` → `gain`. */
 export const baseForKind = (kind: string) =>
-  kind.startsWith(GRAPH_KIND) ? kind.slice(GRAPH_KIND.length).replace(/\.fox\.toml$/, '') : kind.replace(/_(source|sink)$/, '');
+  kind.startsWith(GRAPH_KIND)
+    ? kind.slice(GRAPH_KIND.length).replace(/\.fox\.toml$/, '')
+    : kind.slice(kind.indexOf(':') + 1).replace(/_(source|sink)$/, '');
 
 /** Id stem for a copy of block `id`: `gain_3` → `gain`. */
 export const baseForCopy = (id: string) => id.replace(/_\d+$/, '');

@@ -509,11 +509,12 @@ impl Block for Selector {
             "input" => {
                 // Out of range keeps the current input: the editor shows the
                 // error (it builds every edit) and the stream keeps going.
-                if let Some(i) = value.as_u64().map(clamp_usize) {
-                    if i < self.inputs && i != self.selected {
-                        self.selected = i;
-                        self.switched = true;
-                    }
+                if let Some(i) = value.as_u64().map(clamp_usize)
+                    && i < self.inputs
+                    && i != self.selected
+                {
+                    self.selected = i;
+                    self.switched = true;
                 }
             }
             _ => return Err(Error::Other(format!("`{name}` is not a live parameter"))),

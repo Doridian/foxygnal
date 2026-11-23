@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 use crate::block::{InputPort, OutputPort, WorkIo, WorkStatus};
 use crate::buffer::{self, BufferKind, Reader, Tap};
 use crate::graph::GraphSpec;
+use crate::graph::param_port;
 use crate::meta::{Configure, StreamMeta};
-use crate::registry::{Instance, Registry};
+use crate::registry::{Instance, ParamSpec, Registry};
 use crate::resolve::{GraphLoader, NoLoader, resolve};
 use crate::sched::{Job, Next, Pool, thread_waker};
 use crate::tag::TagPropagation;
@@ -31,6 +32,28 @@ pub struct BlockId(usize);
 struct Node {
     name: String,
     inst: Instance,
+    /// Parameters wired as control inputs (`block.@name`). Control input `i`
+    /// is input index `inst.inputs.len() + i` in [`Edge::to`].
+    controls: Vec<ParamSpec>,
+}
+
+impl Node {
+    /// Name and type of input `idx`: a stream input, or a control input
+    /// (`@name`, always f32).
+    fn input(&self, idx: usize) -> Option<(String, StreamType)> {
+        let n = self.inst.inputs.len();
+        match self.inst.inputs.get(idx) {
+            Some((name, ty)) => Some((name.clone(), *ty)),
+            None => self
+                .controls
+                .get(idx - n)
+                .map(|c| (format!("@{}", c.name), StreamType::F32)),
+        }
+    }
+
+    fn input_name(&self, idx: usize) -> String {
+        self.input(idx).map(|(n, _)| n).unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -101,8 +124,15 @@ impl Flowgraph {
         self.nodes.push(Node {
             name: name.into(),
             inst,
+            controls: Vec::new(),
         });
         BlockId(self.nodes.len() - 1)
+    }
+
+    /// The block called `name`, e.g. to wire Rust blocks (sinks in tests)
+    /// into a graph built from a spec.
+    pub fn block_id(&self, name: &str) -> Option<BlockId> {
+        self.nodes.iter().position(|n| n.name == name).map(BlockId)
     }
 
     /// Connect output port `out` of `from` to input port `inp` of `to`.
@@ -121,18 +151,22 @@ impl Flowgraph {
             .get(out)
             .ok_or_else(|| Error::Graph(format!("`{}` has no output port #{out}", src.name)))?;
         let (iname, ity) = dst
-            .inst
-            .inputs
-            .get(inp)
+            .input(inp)
             .ok_or_else(|| Error::Graph(format!("`{}` has no input port #{inp}", dst.name)))?;
+        let (iname, ity) = (&iname, &ity);
         let edge_err = |msg: String| Error::Edge {
             from: format!("{}.{oname}", src.name),
             to: format!("{}.{iname}", dst.name),
             msg,
         };
         if oty != ity {
+            let what = if inp >= dst.inst.inputs.len() {
+                " (a setting wired as an input; add a converter to f32)"
+            } else {
+                ""
+            };
             return Err(edge_err(format!(
-                "type mismatch: `{}.{oname}` produces {oty} but `{}.{iname}` expects {ity}",
+                "type mismatch: `{}.{oname}` produces {oty} but `{}.{iname}` expects {ity}{what}",
                 src.name, dst.name
             )));
         }
@@ -147,6 +181,44 @@ impl Flowgraph {
             to: (to.0, inp),
         });
         Ok(())
+    }
+
+    /// Wire parameter `spec` of block `to` as a control input and connect
+    /// output `out` of `from` to it (an f32 stream). Before each `work` call
+    /// of `to`, the runtime reads everything the control input holds and,
+    /// if the last value changed, applies it with [`crate::Block::set_param`]
+    /// (sample and hold). The parameter must be [`ParamSpec::wireable`].
+    pub fn connect_param(
+        &mut self,
+        from: BlockId,
+        out: usize,
+        to: BlockId,
+        spec: &ParamSpec,
+    ) -> Result<(), Error> {
+        if !spec.wireable() {
+            let src = &self.nodes[from.0];
+            let oname = src.inst.outputs.get(out).map_or("?", |(n, _)| n.as_str());
+            let dst = &self.nodes[to.0].name;
+            return Err(Error::Edge {
+                from: format!("{}.{oname}", src.name),
+                to: format!("{dst}.@{}", spec.name),
+                msg: format!(
+                    "`{}.{oname}` → `{dst}.@{}`: setting `{}` can't be wired as an input \
+                     (only settings that change live and are numbers or on/off can)",
+                    src.name, spec.name, spec.label
+                ),
+            });
+        }
+        let node = &mut self.nodes[to.0];
+        let i = match node.controls.iter().position(|c| c.name == spec.name) {
+            Some(i) => i,
+            None => {
+                node.controls.push(spec.clone());
+                node.controls.len() - 1
+            }
+        };
+        let inp = node.inst.inputs.len() + i;
+        self.connect(from, out, to, inp)
     }
 
     /// Build a flowgraph from a serialized spec using the given registry.
@@ -203,6 +275,20 @@ impl Flowgraph {
             let (fid, tid) = (lookup(f.block)?, lookup(t.block)?);
             let out =
                 resolve_port(&fg.nodes[fid.0].inst.outputs, f.port, f.block).map_err(edge_err)?;
+            if let Some(param) = param_port(t.port) {
+                let kind = &spec.blocks[tid.0].kind;
+                let p = registry
+                    .get(kind)
+                    .and_then(|d| d.params.iter().find(|p| p.name == param))
+                    .ok_or_else(|| {
+                        edge_err(format!(
+                            "`{}` → `{}`: block `{}` has no setting `{param}` to wire",
+                            c.from, c.to, t.block
+                        ))
+                    })?;
+                fg.connect_param(fid, out, tid, p)?;
+                continue;
+            }
             let inp =
                 resolve_port(&fg.nodes[tid.0].inst.inputs, t.port, t.block).map_err(edge_err)?;
             fg.connect(fid, out, tid, inp)?;
@@ -258,7 +344,7 @@ impl Flowgraph {
                 let (src, dst) = (&self.nodes[e.from.0], &self.nodes[e.to.0]);
                 EdgeMeta {
                     from: format!("{}.{}", src.name, src.inst.outputs[e.from.1].0),
-                    to: format!("{}.{}", dst.name, dst.inst.inputs[e.to.1].0),
+                    to: format!("{}.{}", dst.name, dst.input_name(e.to.1)),
                     meta: meta[e.from.0][e.from.1],
                 }
             })
@@ -317,7 +403,11 @@ impl Flowgraph {
         let mut inputs: Vec<Vec<Option<Reader>>> = self
             .nodes
             .iter()
-            .map(|n| n.inst.inputs.iter().map(|_| None).collect())
+            .map(|n| {
+                (0..n.inst.inputs.len() + n.controls.len())
+                    .map(|_| None)
+                    .collect()
+            })
             .collect();
         let mut outputs: Vec<Vec<OutputPort>> = Vec::with_capacity(self.nodes.len());
         let mut taps = Vec::new();
@@ -334,7 +424,7 @@ impl Flowgraph {
                     let dst = &self.nodes[e.to.0];
                     edge_stats.push(EdgeTap {
                         from: format!("{}.{pname}", n.name),
-                        to: format!("{}.{}", dst.name, dst.inst.inputs[e.to.1].0),
+                        to: format!("{}.{}", dst.name, dst.input_name(e.to.1)),
                         tap: tap.clone(),
                         reader,
                     });
@@ -360,6 +450,7 @@ impl Flowgraph {
                 remaining: self.nodes.len(),
             }),
             all_done: Condvar::new(),
+            warnings: Arc::new(Warnings::default()),
         });
         let dedicated: Vec<bool> = self
             .nodes
@@ -385,12 +476,26 @@ impl Flowgraph {
             .zip(dedicated)
             .enumerate()
         {
+            let mut ins = ins.into_iter();
             let inputs: Vec<InputPort> = node
                 .inst
                 .inputs
                 .iter()
-                .zip(ins)
+                .zip(ins.by_ref())
                 .map(|((_, ty), reader)| InputPort::new(*ty, reader))
+                .collect();
+            let controls: Vec<ControlIn> = node
+                .controls
+                .into_iter()
+                .zip(ins)
+                .filter_map(|(spec, reader)| {
+                    Some(ControlIn {
+                        reader: reader?,
+                        spec,
+                        seen: f32::NAN.to_bits(),
+                        reported: false,
+                    })
+                })
                 .collect();
             let (ptx, prx) = mpsc::channel::<ParamMsg>();
             let busy_ns = Arc::new(AtomicU64::new(0));
@@ -402,6 +507,7 @@ impl Flowgraph {
                 name: node.name,
                 inst: node.inst,
                 inputs,
+                controls,
                 outputs: outs,
                 params: prx,
                 busy_ns,
@@ -445,6 +551,7 @@ impl Flowgraph {
                 blocks: names.iter().cloned().zip(busy).collect(),
                 outputs: taps,
                 edges: edge_stats,
+                warnings: ctl.warnings.clone(),
             }),
         };
         Ok(Running {
@@ -521,6 +628,83 @@ struct Control {
     wakers: OnceLock<Vec<Waker>>,
     done: Mutex<Done>,
     all_done: Condvar,
+    warnings: Arc<Warnings>,
+}
+
+/// Problems that don't stop the graph, such as a control input value a
+/// block rejects. Written only when a new problem appears (rarely), read by
+/// [`Monitor::warnings`].
+#[derive(Default)]
+struct Warnings {
+    /// Bumped on every new warning, so readers can tell cheaply whether
+    /// anything changed.
+    count: AtomicU64,
+    list: Mutex<Vec<BlockWarning>>,
+}
+
+/// A problem with a running block that doesn't stop it, see
+/// [`Monitor::warnings`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockWarning {
+    pub block: String,
+    /// What it is about (`setting \`gain\``); one warning per block and key.
+    pub key: String,
+    pub message: String,
+}
+
+impl Warnings {
+    /// Record a warning, replacing an earlier one about the same `key` of
+    /// the same block.
+    fn report(&self, block: &str, key: String, message: String) {
+        let mut list = self.list.lock().unwrap_or_else(PoisonError::into_inner);
+        match list.iter_mut().find(|w| w.block == block && w.key == key) {
+            Some(w) => w.message = message,
+            None => list.push(BlockWarning {
+                block: block.to_owned(),
+                key,
+                message,
+            }),
+        }
+        self.count.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// A parameter wired as a control input, while running.
+struct ControlIn {
+    reader: Reader,
+    spec: ParamSpec,
+    /// Bits of the last control value seen (NaN: none yet), so an unchanged
+    /// value isn't applied again.
+    seen: u32,
+    /// A rejected value was reported; don't report again until a value is
+    /// accepted.
+    reported: bool,
+}
+
+impl ControlIn {
+    /// Read everything available, keeping the last value. `Some` if it
+    /// differs from the last value seen. No allocation, no locks.
+    fn poll(&mut self) -> Option<f32> {
+        let mut last = None;
+        loop {
+            let b = self.reader.slice();
+            let n = b.len() / 4;
+            if n == 0 {
+                break;
+            }
+            let tail = &b[(n - 1) * 4..n * 4];
+            last = Some(f32::from_ne_bytes([tail[0], tail[1], tail[2], tail[3]]));
+            self.reader.consume(n);
+        }
+        // Tags on control streams mean nothing here; don't let them pile up.
+        while self.reader.pop_tag().is_some() {}
+        let v = last?;
+        if v.is_nan() || v.to_bits() == self.seen {
+            return None;
+        }
+        self.seen = v.to_bits();
+        Some(v)
+    }
 }
 
 struct Done {
@@ -574,6 +758,9 @@ struct BlockRun {
     name: String,
     inst: Instance,
     inputs: Vec<InputPort>,
+    /// Parameters wired as inputs. Not in `inputs`: the block never sees
+    /// them, and they never pace or end it.
+    controls: Vec<ControlIn>,
     outputs: Vec<OutputPort>,
     params: mpsc::Receiver<ParamMsg>,
     busy_ns: Arc<AtomicU64>,
@@ -589,6 +776,11 @@ impl BlockRun {
             if let Some(r) = &i.reader {
                 r.register_waker(waker.clone());
             }
+        }
+        // A new control value applies promptly, even while the stream
+        // inputs are idle.
+        for c in &self.controls {
+            c.reader.register_waker(waker.clone());
         }
         for o in &self.outputs {
             o.writer.register_waker(waker.clone());
@@ -610,6 +802,7 @@ impl BlockRun {
         while let Ok((name, value)) = self.params.try_recv() {
             self.inst.block.set_param(&name, &value)?;
         }
+        self.apply_controls();
         for i in &mut self.inputs {
             i.sync();
         }
@@ -666,6 +859,40 @@ impl BlockRun {
                 }
             }
         })
+    }
+
+    /// Apply the latest value of every control input that changed. A value
+    /// the parameter or the block rejects is reported once (a warning, see
+    /// [`Monitor::warnings`]) and otherwise ignored: the block keeps the last
+    /// good value and the graph keeps running. Only that report allocates.
+    fn apply_controls(&mut self) {
+        for c in &mut self.controls {
+            let Some(x) = c.poll() else { continue };
+            let result = match c.spec.control_value(x) {
+                Some(v) => self.inst.block.set_param(c.spec.name, &v).map_err(|e| {
+                    format!(
+                        "value {x} from the wire was rejected ({}); keeping the last good value",
+                        e.detail()
+                    )
+                }),
+                None => Err(format!(
+                    "value {x} from the wire is out of range ({}); keeping the last good value",
+                    c.spec
+                        .check(&serde_json::Value::from(x as f64))
+                        .err()
+                        .unwrap_or_else(|| "not a valid value".into())
+                )),
+            };
+            match result {
+                Ok(()) => c.reported = false,
+                Err(msg) if !c.reported => {
+                    c.reported = true;
+                    let key = format!("setting `{}`", c.spec.name);
+                    self.ctl.warnings.report(&self.name, key, msg);
+                }
+                Err(_) => {}
+            }
+        }
     }
 
     /// [`Self::step`], turning a panic into an error.
@@ -806,6 +1033,7 @@ struct MonitorInner {
     blocks: Vec<(String, Arc<AtomicU64>)>,
     outputs: Vec<OutputTap>,
     edges: Vec<EdgeTap>,
+    warnings: Arc<Warnings>,
 }
 
 /// Cloneable read-only view of a running graph for probes and statistics.
@@ -856,6 +1084,23 @@ impl Monitor {
                 outs().find(|o| o.index == i)
             })
             .map(|o| (o.ty, o.tap.clone()))
+    }
+
+    /// Problems that don't stop the graph (a control input value a block
+    /// rejected), one per block and key, latest message.
+    pub fn warnings(&self) -> Vec<BlockWarning> {
+        self.inner
+            .warnings
+            .list
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Bumped whenever a warning is reported: compare to see whether
+    /// [`Self::warnings`] changed without locking.
+    pub fn warning_count(&self) -> u64 {
+        self.inner.warnings.count.load(Ordering::Acquire)
     }
 
     pub fn stats(&self) -> GraphCounters {

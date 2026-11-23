@@ -221,17 +221,17 @@ impl<'a> Cx<'a> {
         self.vars.eval(&e).ok()?.as_f64()
     }
 
+    /// A string parameter, as GRC reads one: a Python expression when it
+    /// evaluates to a string (`"rtl=" + str(0)`, a variable), else the text
+    /// as written (`/tmp/out.wav`, `rtl=0`, `127.0.0.1`).
     fn string(&mut self, key: &str) -> Option<String> {
-        match self.value(key)? {
-            Value::Str(s) => Some(s),
-            Value::Num(n) => Some(py::fmt_num(n)),
-            other => {
-                self.warn(format!(
-                    "parameter `{key}` isn't a string ({other:?}); left at the default"
-                ));
-                None
-            }
-        }
+        let raw = self.raw(key)?;
+        let value = Py::parse(raw).ok().and_then(|e| self.vars.eval(&e).ok());
+        Some(match value {
+            Some(Value::Str(s)) => s,
+            Some(Value::Num(n)) => py::fmt_num(n),
+            _ => raw.to_owned(),
+        })
     }
 
     fn boolean(&mut self, key: &str) -> Option<bool> {
@@ -338,7 +338,10 @@ fn try_map(cx: &mut Cx<'_>, cfg: &Config) -> Result<Mapped, String> {
     let name = cx.name();
     let id = cx.b.id.clone();
     let out = match id.as_str() {
-        "note" | "import" | "snippet" => return Ok(Mapped::Skip),
+        // Comments, imports and GUI layout (tabs): nothing to convert.
+        "note" | "import" | "import_" | "snippet" | "notebook" | "qtgui_tab_widget" => {
+            return Ok(Mapped::Skip);
+        }
 
         // ---- Sources ----
         "analog_sig_source_x" => {
@@ -360,11 +363,31 @@ fn try_map(cx: &mut Cx<'_>, cfg: &Config) -> Result<Mapped, String> {
             };
             let mut p = params(&[("type", json!(ty)), ("waveform", json!(waveform))]);
             set(&mut p, "frequency", cx.num("freq"));
-            set(&mut p, "amplitude", cx.num("amp"));
-            set(&mut p, "offset", cx.num("offset"));
             set(&mut p, "sample_rate", cx.num("samp_rate"));
-            if cx.f64("phase").is_some_and(|ph| ph != 0.0) {
-                cx.warn("the start phase isn't supported; it starts at 0");
+            let phase = cx.f64("phase").unwrap_or(0.0);
+            let shifted = matches!(waveform, "square" | "triangle" | "sawtooth")
+                && (phase - std::f64::consts::PI).abs() < 1e-9;
+            if shifted {
+                // GNU Radio's 0..amp wave, half a period on (as `foxygnal
+                // export` writes it), is foxygnal's −amp/2..amp/2 one.
+                let (amp, off) = (
+                    cx.f64("amp").unwrap_or(1.0),
+                    cx.f64("offset").unwrap_or(0.0),
+                );
+                p.insert("amplitude".into(), json!(amp / 2.0));
+                p.insert("offset".into(), json!(off + amp / 2.0));
+            } else {
+                set(&mut p, "amplitude", cx.num("amp"));
+                set(&mut p, "offset", cx.num("offset"));
+                if waveform != "sine" && waveform != "constant" {
+                    cx.warn(
+                        "GNU Radio's wave spans 0..amplitude; foxygnal's spans −amplitude..\
+                         amplitude: check amplitude and offset",
+                    );
+                }
+                if phase != 0.0 {
+                    cx.warn("the start phase isn't supported; it starts at 0");
+                }
             }
             Out::single(name, "signal_source", p, false, true)
         }
@@ -447,7 +470,11 @@ fn try_map(cx: &mut Cx<'_>, cfg: &Config) -> Result<Mapped, String> {
         }
         "blocks_wavfile_sink" => {
             let nchan = cx.f64("nchan").unwrap_or(1.0) as usize;
-            let bits = cx.raw("bits_per_sample").unwrap_or("16");
+            // GNU Radio 3.10 has one `bits_per_sample<N>` per file format.
+            let bits = cx
+                .raw("bits_per_sample")
+                .or_else(|| cx.raw("bits_per_sample1"))
+                .unwrap_or("16");
             let fmt = cx.raw("format").unwrap_or("");
             let format = if bits.contains("FLOAT") || bits.contains("DOUBLE") {
                 "float32"
@@ -502,6 +529,18 @@ fn try_map(cx: &mut Cx<'_>, cfg: &Config) -> Result<Mapped, String> {
             }
             o
         }
+        "audio_sink" if !cfg.audio_device && cx.f64("num_inputs") == Some(2.0) => {
+            // Stereo: Browser Audio plays a c32 stream as left = I, right = Q.
+            let mut o = Out::default();
+            let p = params(&[("type", json!("c32")), ("pace", json!(!cfg.has_hardware))]);
+            let sink = o.add(name, "", "browser_audio", p);
+            let pair = o.add(name, "stereo", "f32_pair_to_c32", Params::new());
+            o.offsets[1] = (-240.0, 0.0);
+            o.input(0, format!("{pair}.re"));
+            o.input(1, format!("{pair}.im"));
+            o.link(format!("{pair}.out"), format!("{sink}.in"));
+            o
+        }
         "audio_sink" => {
             let n = cx.f64("num_inputs").unwrap_or(1.0).max(1.0) as usize;
             let mut o = if cfg.audio_device {
@@ -537,12 +576,19 @@ fn try_map(cx: &mut Cx<'_>, cfg: &Config) -> Result<Mapped, String> {
         }
 
         // ---- Math ----
-        "blocks_add_xx" | "blocks_add_vxx" | "blocks_multiply_xx" | "blocks_multiply_vxx" => {
+        "blocks_add_xx"
+        | "blocks_add_vxx"
+        | "blocks_multiply_xx"
+        | "blocks_multiply_vxx"
+        | "blocks_sub_xx"
+        | "blocks_divide_xx" => {
             let ty = cx.stream_type(CF)?;
-            let kind = if id.starts_with("blocks_add") {
-                "add"
-            } else {
-                "multiply"
+            // in0 − in1 − in2 … and in0 / in1 / in2 … chain the same way.
+            let kind = match id.as_str() {
+                "blocks_sub_xx" => "subtract",
+                "blocks_divide_xx" => "divide",
+                _ if id.starts_with("blocks_add") => "add",
+                _ => "multiply",
             };
             let n = cx.f64("num_inputs").unwrap_or(2.0).max(1.0) as usize;
             let mut o = Out::default();
@@ -745,10 +791,380 @@ fn try_map(cx: &mut Cx<'_>, cfg: &Config) -> Result<Mapped, String> {
             Out::single(name, "squelch", p, true, true)
         }
 
+        "blocks_add_const_vxx"
+        | "blocks_add_const_xx"
+        | "blocks_add_const_ff"
+        | "blocks_add_const_cc" => {
+            let ty = if id.ends_with("ff") {
+                "f32"
+            } else if id.ends_with("cc") {
+                "c32"
+            } else {
+                cx.stream_type(CF)?
+            };
+            let mut p = params(&[("type", json!(ty))]);
+            let c = cx.py("const").ok_or("the constant isn't understood")?;
+            set(
+                &mut p,
+                "constant",
+                cx.num_of(&c, "parameter `const`", false),
+            );
+            Out::single(name, "add_const", p, true, true)
+        }
+        "blocks_abs_xx" | "blocks_abs_ff" => {
+            if id == "blocks_abs_xx" {
+                cx.stream_type(&["f32"])?;
+            }
+            Out::single(name, "abs", Params::new(), true, true)
+        }
+        "blocks_conjugate_cc" => Out::single(name, "conjugate", Params::new(), true, true),
+        "blocks_nlog10_ff" => {
+            // n·log10(x) + k. Log Power computes 10·log10(x²) + offset, the
+            // same as 20·log10(x) for x > 0: scale by n / 20 after it.
+            let n = cx.f64("n").unwrap_or(1.0);
+            let k = cx.f64("k").unwrap_or(0.0);
+            if n == 0.0 {
+                return Err("n = 0 has no foxygnal equivalent".into());
+            }
+            let p = params(&[("type", json!("f32")), ("offset", json!(k * 20.0 / n))]);
+            if n == 20.0 {
+                Out::single(name, "log_power", p, true, true)
+            } else {
+                let g = params(&[("type", json!("f32")), ("gain", json!(n / 20.0))]);
+                Out::chain(name, vec![("", "log_power", p), ("scale", "gain", g)])
+            }
+        }
+
+        // ---- Flow (M7 catalog) ----
+        "blocks_skiphead" => {
+            let ty = cx.stream_type(ANY)?;
+            let mut p = params(&[("type", json!(ty))]);
+            set(&mut p, "count", cx.int("num_items"));
+            Out::single(name, "skip", p, true, true)
+        }
+        "blocks_delay" => {
+            let ty = cx.stream_type(ANY)?;
+            if cx.f64("num_ports").is_some_and(|n| n != 1.0) {
+                return Err("only one port is supported".into());
+            }
+            let mut p = params(&[("type", json!(ty))]);
+            set(&mut p, "delay", cx.int("delay"));
+            Out::single(name, "delay", p, true, true)
+        }
+        "blocks_copy" => {
+            let ty = cx.stream_type(ANY)?;
+            let mut p = params(&[("type", json!(ty)), ("when_closed", json!("drop"))]);
+            set(&mut p, "open", cx.boolean("enabled").map(Json::from));
+            Out::single(name, "valve", p, true, true)
+        }
+        "blocks_selector" => {
+            let ty = cx.stream_type(ANY)?;
+            let n_in = cx.f64("num_inputs").unwrap_or(2.0) as usize;
+            if cx.f64("num_outputs").is_some_and(|n| n != 1.0) {
+                return Err("only one output is supported".into());
+            }
+            if !(2..=4).contains(&n_in) {
+                return Err(format!("{n_in} inputs aren't supported (2 to 4)"));
+            }
+            if cx.boolean("enabled") == Some(false) {
+                cx.warn("`enabled` = False isn't supported: the selector always passes");
+            }
+            let mut p = params(&[("type", json!(ty)), ("inputs", json!(n_in))]);
+            set(&mut p, "input", cx.int("input_index"));
+            let mut o = Out::default();
+            let id = o.add(name, "", "selector", p);
+            for i in 0..n_in {
+                o.input(i, format!("{id}.in{i}"));
+            }
+            o.output(0, format!("{id}.out"));
+            o
+        }
+
+        // ---- Filters (M7 catalog) ----
+        "root_raised_cosine_filter" => {
+            let raw = cx.raw("type").unwrap_or("fir_filter_ccf");
+            let ty = filter_type(raw)?;
+            let interp = if raw.starts_with("interp_") {
+                cx.f64("interp").unwrap_or(1.0)
+            } else {
+                1.0
+            };
+            let (Some(fs), Some(sym)) = (cx.py("samp_rate"), cx.py("sym_rate")) else {
+                return Err("the sample and symbol rates aren't understood".into());
+            };
+            let a = RrcArgs {
+                gain: cx.py("gain"),
+                fs,
+                sym,
+                alpha: cx.py("alpha"),
+                ntaps: cx.py("ntaps"),
+            };
+            rrc(cx, ty, a, interp)?
+        }
+        "fir_filter_xxx" | "interp_fir_filter_xxx" => fir_taps(cx, &id)?,
+        "filter_dc_blocker_xx" | "dc_blocker_xx" | "dc_blocker_cc" | "dc_blocker_ff" => {
+            let ty = match id.as_str() {
+                "dc_blocker_cc" => "c32",
+                "dc_blocker_ff" => "f32",
+                _ => cx.stream_type(CF)?,
+            };
+            let len = cx.f64("length").map_or("32".into(), py::fmt_num);
+            cx.warn(format!(
+                "GNU Radio's DC blocker is a {len}-sample moving average; foxygnal's takes a \
+                 cutoff in Hz, left at its default (10 Hz)"
+            ));
+            Out::single(
+                name,
+                "dc_blocker",
+                params(&[("type", json!(ty))]),
+                true,
+                true,
+            )
+        }
+        "hilbert_fc" => {
+            let mut p = Params::new();
+            set(&mut p, "taps", cx.int("num_taps"));
+            let win = cx.py("win");
+            let w = window(cx, win.as_ref());
+            p.insert("window".into(), json!(w));
+            if w == "kaiser"
+                && let Some(beta) = cx.f64("beta")
+            {
+                p.insert(
+                    "attenuation".into(),
+                    json!((kaiser_attenuation(beta) * 10.0).round() / 10.0),
+                );
+            }
+            Out::single(name, "hilbert", p, true, true)
+        }
+        "iir_filter_xxx" | "iir_filter_ffd" | "iir_filter_ccc" | "iir_filter_ccf"
+        | "iir_filter_ccd" | "iir_filter_ccz" => {
+            return Err(
+                "arbitrary IIR taps have no foxygnal equivalent (the IIR Biquad block designs \
+                 its own from a shape, frequency and Q)"
+                    .into(),
+            );
+        }
+
+        // ---- Network ----
+        "network_udp_source" | "blocks_udp_source" => {
+            let ty = cx.stream_type(ANY)?;
+            let mut p = params(&[("type", json!(ty))]);
+            set(&mut p, "port", cx.int("port"));
+            if id == "blocks_udp_source" {
+                set(&mut p, "host", cx.string("ipaddr").map(Json::from));
+            } else {
+                set(&mut p, "header", udp_header(cx));
+                cx.warn(
+                    "GNU Radio listens on every interface; foxygnal's UDP Source listens on \
+                     127.0.0.1 unless you set its host (0.0.0.0 exposes it to the network)",
+                );
+            }
+            Out::single(name, "udp_source", p, false, true)
+        }
+        "network_udp_sink" | "blocks_udp_sink" => {
+            let ty = cx.stream_type(ANY)?;
+            let mut p = params(&[("type", json!(ty))]);
+            let (host, size) = if id == "blocks_udp_sink" {
+                ("ipaddr", "psize")
+            } else {
+                ("addr", "payloadsize")
+            };
+            set(&mut p, "host", cx.string(host).map(Json::from));
+            set(&mut p, "port", cx.int("port"));
+            let header = if id == "network_udp_sink" {
+                udp_header(cx)
+            } else {
+                None
+            };
+            // GNU Radio's size excludes the header; foxygnal's includes it.
+            let extra = match header.as_ref().and_then(Json::as_str) {
+                Some("seq64") => 8.0,
+                Some("seq32") => 4.0,
+                _ => 0.0,
+            };
+            if let Some(n) = cx.f64(size) {
+                p.insert(
+                    "payload".into(),
+                    json!(((n + extra).round() as i64).clamp(16, 65507)),
+                );
+            }
+            set(&mut p, "header", header);
+            Out::single(name, "udp_sink", p, true, false)
+        }
+        "network_tcp_source" => {
+            let ty = cx.stream_type(ANY)?;
+            let server = cx.boolean("server").unwrap_or(false);
+            let mut p = params(&[
+                ("type", json!(ty)),
+                ("mode", json!(if server { "server" } else { "client" })),
+            ]);
+            set(&mut p, "host", cx.string("addr").map(Json::from));
+            set(&mut p, "port", cx.int("port"));
+            Out::single(name, "tcp_source", p, false, true)
+        }
+        "network_tcp_sink" | "blocks_tcp_server_sink" => {
+            let ty = cx.stream_type(ANY)?;
+            let server = if id == "blocks_tcp_server_sink" {
+                true
+            } else {
+                // gr-network: 1 = client, 2 = server.
+                match cx.raw("mode").unwrap_or("2") {
+                    "1" => false,
+                    "2" => true,
+                    m => {
+                        let s = m.to_ascii_lowercase();
+                        if !s.contains("server") && !s.contains("client") {
+                            cx.warn(format!("mode `{m}` isn't understood; using server"));
+                        }
+                        !s.contains("client")
+                    }
+                }
+            };
+            let mut p = params(&[
+                ("type", json!(ty)),
+                ("mode", json!(if server { "server" } else { "client" })),
+            ]);
+            let host = if id == "blocks_tcp_server_sink" {
+                "ipaddr"
+            } else {
+                "addr"
+            };
+            set(&mut p, "host", cx.string(host).map(Json::from));
+            set(&mut p, "port", cx.int("port"));
+            Out::single(name, "tcp_sink", p, true, false)
+        }
+
+        // ---- Converters, demodulators and digital blocks `foxygnal export` writes ----
+        "blocks_short_to_float"
+        | "blocks_float_to_short"
+        | "blocks_interleaved_short_to_complex" => {
+            // GNU Radio divides (or multiplies) by its scale; foxygnal's is
+            // the float value of ±32767.
+            let key = if id == "blocks_interleaved_short_to_complex" {
+                "scale_factor"
+            } else {
+                "scale"
+            };
+            let s = cx.f64(key).unwrap_or(1.0);
+            if s == 0.0 {
+                return Err("a scale of 0 has no foxygnal equivalent".into());
+            }
+            if cx.boolean("swap") == Some(true) || cx.boolean("vector_input") == Some(true) {
+                cx.warn("swapped or vector input isn't supported");
+            }
+            let kind = match id.as_str() {
+                "blocks_short_to_float" => "i16_to_f32",
+                "blocks_float_to_short" => "f32_to_i16",
+                _ => "ci16_to_c32",
+            };
+            Out::single(
+                name,
+                kind,
+                params(&[("scale", json!(32767.0 / s))]),
+                true,
+                true,
+            )
+        }
+        "blocks_uchar_to_float" => Out::single(name, "u8_to_f32", Params::new(), true, true),
+        "analog_am_demod_cf" => {
+            cx.warn(
+                "GNU Radio's AM Demod low-passes the audio (audio_pass / audio_stop); \
+                 foxygnal's doesn't: add a FIR Filter if you need one",
+            );
+            let decim = cx.f64("audio_decim").unwrap_or(1.0);
+            let mut nodes = vec![("", "am_demod", Params::new())];
+            if decim != 1.0 {
+                let mut d = params(&[("type", json!("f32"))]);
+                set(&mut d, "decimation", cx.int("audio_decim"));
+                nodes.push(("audio", "decimator", d));
+            }
+            Out::chain(name, nodes)
+        }
+        "digital_costas_loop_cc" => {
+            let order = match cx.f64("order").map(|o| o as i64) {
+                Some(o @ (2 | 4 | 8)) => o.to_string(),
+                o => {
+                    cx.warn(format!(
+                        "order {} isn't supported (2, 4 or 8); using 2",
+                        o.map_or("?".into(), |o| o.to_string())
+                    ));
+                    "2".into()
+                }
+            };
+            let mut p = params(&[("order", json!(order))]);
+            set(&mut p, "loop_bw", cx.num("w"));
+            if cx.used_outputs.contains(&1) {
+                cx.warn(
+                    "the frequency output is in radians per sample in GNU Radio, in Hz in \
+                     foxygnal: scale what uses it (× 2π / rate)",
+                );
+            }
+            if cx.used_outputs.iter().any(|&o| o > 1) {
+                cx.warn("the phase and error outputs aren't supported");
+            }
+            let mut o = Out::single(name, "costas_loop", p, true, true);
+            o.output(1, format!("{name}.freq"));
+            o
+        }
+        "digital_symbol_sync_xx" => {
+            let ty = match cx.raw("type").unwrap_or("cc") {
+                "ff" => "f32",
+                _ => "c32",
+            };
+            let ted = cx.raw("ted_type").unwrap_or("digital.TED_GARDNER");
+            let ted = if ted.contains("GARDNER") {
+                "gardner"
+            } else if ted.ends_with("TED_MUELLER_AND_MULLER") {
+                "mueller_muller"
+            } else {
+                cx.warn(format!(
+                    "timing error detector `{ted}` isn't available; using Gardner"
+                ));
+                "gardner"
+            };
+            let mut p = params(&[("type", json!(ty)), ("ted", json!(ted))]);
+            set(&mut p, "sps", cx.num("sps"));
+            set(&mut p, "loop_bw", cx.num("loop_bw"));
+            if cx.f64("osps").is_some_and(|o| o != 1.0) {
+                cx.warn("only one output sample per symbol is supported");
+            }
+            Out::single(name, "clock_recovery", p, true, true)
+        }
+        "digital_binary_slicer_fb" => Out::single(name, "binary_slicer", Params::new(), true, true),
+        "digital_correlate_access_code_tag_xx" | "digital_correlate_access_code_tag_bb" => {
+            if id.ends_with("_xx") && cx.raw("type").is_some_and(|t| t != "byte") {
+                return Err("only the byte (hard bits) version is supported".into());
+            }
+            let code = cx.string("access_code").unwrap_or_default();
+            if code.is_empty() || code.len() > 64 || !code.bytes().all(|b| b == b'0' || b == b'1') {
+                return Err(format!(
+                    "access code `{code}` isn't a bit string of up to 64 bits"
+                ));
+            }
+            // Whole nibbles read better as hex.
+            let code = if code.len().is_multiple_of(4) {
+                let v = u64::from_str_radix(&code, 2).expect("checked bits");
+                format!("0x{v:0width$X}", width = code.len() / 4)
+            } else {
+                code
+            };
+            let mut p = params(&[("access_code", json!(code))]);
+            set(&mut p, "threshold", cx.int("threshold"));
+            if cx.string("tagname").is_some_and(|t| t != "packet") {
+                cx.warn("the tag is always named `packet` in foxygnal");
+            }
+            Out::single(name, "correlate_access_code", p, true, true)
+        }
+        "epy_block" => match placeholder(cx) {
+            Some(o) => o,
+            None => return Ok(Mapped::Unmapped),
+        },
+
         // ---- Hardware ----
         _ if is_hardware_source(&id) => sdr_source(cx, &id)?,
 
-        // ---- QT GUI instruments ----
+        // ---- GUI instruments (QT, and 3.7's WX GUI) ----
         "qtgui_freq_sink_x"
         | "qtgui_time_sink_x"
         | "qtgui_waterfall_sink_x"
@@ -758,12 +1174,20 @@ fn try_map(cx: &mut Cx<'_>, cfg: &Config) -> Result<Mapped, String> {
         | "qtgui_histogram_sink_x"
         | "qtgui_time_raster_sink_x"
         | "qtgui_vector_sink_f"
-        | "qtgui_eye_sink_x" => {
+        | "qtgui_eye_sink_x"
+        | "wxgui_fftsink2"
+        | "wxgui_scopesink2"
+        | "wxgui_waterfallsink2"
+        | "wxgui_constellationsink2"
+        | "wxgui_numbersink2"
+        | "wxgui_histosink2" => {
             let instrument = match id.as_str() {
-                "qtgui_freq_sink_x" | "qtgui_sink_x" => "Spectrum",
-                "qtgui_waterfall_sink_x" | "qtgui_time_raster_sink_x" => "Waterfall",
-                "qtgui_const_sink_x" => "Constellation",
-                "qtgui_number_sink" => "Meter",
+                "qtgui_freq_sink_x" | "qtgui_sink_x" | "wxgui_fftsink2" => "Spectrum",
+                "qtgui_waterfall_sink_x" | "qtgui_time_raster_sink_x" | "wxgui_waterfallsink2" => {
+                    "Waterfall"
+                }
+                "qtgui_const_sink_x" | "wxgui_constellationsink2" => "Constellation",
+                "qtgui_number_sink" | "wxgui_numbersink2" => "Meter",
                 _ => "Scope",
             };
             let raw = cx.raw("type").unwrap_or("complex");
@@ -771,12 +1195,19 @@ fn try_map(cx: &mut Cx<'_>, cfg: &Config) -> Result<Mapped, String> {
                 cx.warn("message-input instrument left out (foxygnal has no message ports yet)");
                 return Ok(Mapped::Skip);
             }
-            let ty = if id == "qtgui_const_sink_x" {
+            let ty = if matches!(
+                id.as_str(),
+                "qtgui_const_sink_x" | "wxgui_constellationsink2"
+            ) {
                 Ok("c32")
             } else {
                 cx.stream_type(CF)
             }?;
-            let n = cx.f64("nconnections").unwrap_or(1.0).max(1.0) as usize;
+            let n = cx
+                .first(&["nconnections", "num_inputs"])
+                .and_then(|k| cx.f64(k))
+                .unwrap_or(1.0)
+                .max(1.0) as usize;
             let mut o = Out::default();
             for i in 0..n {
                 let id = o.add(
@@ -788,8 +1219,9 @@ fn try_map(cx: &mut Cx<'_>, cfg: &Config) -> Result<Mapped, String> {
                 o.offsets[i] = (0.0, i as f64 * 90.0);
                 o.input(i, format!("{id}.in"));
             }
+            let gui = if id.starts_with("wxgui") { "WX" } else { "QT" };
             cx.warn(format!(
-                "QT GUI sink became a Null Sink: instruments in foxygnal attach to wires, so \
+                "{gui} GUI sink became a Null Sink: instruments in foxygnal attach to wires, so \
                  click the wire into it and open a {instrument}"
             ));
             o
@@ -797,6 +1229,45 @@ fn try_map(cx: &mut Cx<'_>, cfg: &Config) -> Result<Mapped, String> {
         _ => return Ok(Mapped::Unmapped),
     };
     Ok(Mapped::Nodes(out))
+}
+
+/// The marker `foxygnal export` writes into a placeholder Python block.
+const MARKER: &str = "# foxygnal-block: ";
+
+/// A placeholder Python block written by `foxygnal export` → the foxygnal
+/// block it stands for (kind, params and port names are in its source).
+fn placeholder(cx: &mut Cx<'_>) -> Option<Out> {
+    let src = cx.b.params.get("_source_code")?;
+    let line = src.lines().find_map(|l| l.trim().strip_prefix(MARKER))?;
+    let Ok(Json::Object(orig)) = serde_json::from_str::<Json>(line) else {
+        cx.warn("the foxygnal placeholder line isn't readable");
+        return None;
+    };
+    let kind = orig.get("kind")?.as_str()?;
+    let p: Params = match orig.get("params") {
+        Some(Json::Object(m)) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        _ => Params::new(),
+    };
+    let ports = |key: &str| -> Vec<String> {
+        orig.get(key)
+            .and_then(Json::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let name = cx.name();
+    let mut o = Out::default();
+    let id = o.add(name, "", kind, p);
+    for (k, port) in ports("inputs").iter().enumerate() {
+        o.input(k, format!("{id}.{port}"));
+    }
+    for (k, port) in ports("outputs").iter().enumerate() {
+        o.output(k, format!("{id}.{port}"));
+    }
+    Some(o)
 }
 
 /// De-emphasis time constant → `off` / `50us` / `75us`.
@@ -930,6 +1401,202 @@ fn fir(cx: &mut Cx<'_>, id: &str) -> Result<Out, String> {
         rename_primary(&mut o, name, "filter");
     }
     Ok(o)
+}
+
+/// The stream type of a filter from its GNU Radio type code
+/// (`fir_filter_ccf`, `interp_fir_filter_fff`, `ccc`, …).
+fn filter_type(raw: &str) -> Result<&'static str, String> {
+    let code = raw.rsplit('_').next().unwrap_or("");
+    match code {
+        "ccf" | "ccc" => Ok("c32"),
+        "fff" => Ok("f32"),
+        _ => Err(format!(
+            "filter type `{raw}` isn't supported (ccf, ccc or fff)"
+        )),
+    }
+}
+
+/// `firdes.root_raised_cosine(gain, sampling_freq, symbol_rate, alpha, ntaps)`.
+struct RrcArgs {
+    gain: Option<Py>,
+    fs: Py,
+    sym: Py,
+    alpha: Option<Py>,
+    ntaps: Option<Py>,
+}
+
+/// A root-raised-cosine filter → `rrc_filter` (interpolating when GRC
+/// interpolates by the samples per symbol), with a decimator after when
+/// the block decimates.
+fn rrc(cx: &mut Cx<'_>, ty: &str, a: RrcArgs, interp: f64) -> Result<Out, String> {
+    let name = cx.name();
+    let sps_e = Py::Bin(BinOp::Div, Box::new(a.fs), Box::new(a.sym));
+    let sps = cx
+        .vars
+        .eval(&sps_e)
+        .ok()
+        .and_then(|v| v.as_f64())
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .ok_or("the samples per symbol (sample rate / symbol rate) can't be evaluated")?;
+    let mut p = params(&[("type", json!(ty))]);
+    set(
+        &mut p,
+        "sps",
+        cx.num_of(&sps_e, "samples per symbol", false),
+    );
+    if let Some(alpha) = &a.alpha {
+        set(
+            &mut p,
+            "rolloff",
+            cx.num_of(alpha, "roll-off (alpha)", false),
+        );
+    }
+    if let Some(n) = a
+        .ntaps
+        .as_ref()
+        .and_then(|n| cx.vars.eval(n).ok()?.as_f64())
+    {
+        p.insert("span".into(), json!(((n / sps).round() as i64).max(1)));
+    }
+    let gain = a.gain.as_ref().and_then(|g| cx.vars.eval(g).ok()?.as_f64());
+    if interp != 1.0 {
+        if (interp - sps).abs() > 1e-9 {
+            return Err(format!(
+                "interpolation by {} with {} samples per symbol isn't supported (they must \
+                 be equal)",
+                py::fmt_num(interp),
+                py::fmt_num(sps)
+            ));
+        }
+        p.insert("mode".into(), json!("interpolate"));
+        // GNU Radio's taps sum to the gain (usually sps, for unit peaks);
+        // foxygnal's interpolating RRC already peaks at 1.
+        if let Some(g) = gain.map(|g| g / sps)
+            && (g - 1.0).abs() > 1e-9
+        {
+            p.insert("gain".into(), json!(g));
+        }
+    } else {
+        p.insert("mode".into(), json!("filter"));
+        if let Some(g) = &a.gain {
+            set(&mut p, "gain", cx.num_of(g, "taps gain", false));
+        }
+    }
+    let mut nodes = vec![("filter", "rrc_filter", p)];
+    if cx.f64("decim").is_some_and(|d| d != 1.0) {
+        let mut dp = params(&[("type", json!(ty))]);
+        set(&mut dp, "decimation", cx.int("decim"));
+        nodes.push(("decim", "decimator", dp));
+    }
+    let mut o = Out::chain(name, nodes);
+    if o.nodes.len() > 1 {
+        rename_primary(&mut o, name, "filter");
+    }
+    Ok(o)
+}
+
+/// `fir_filter_xxx` / `interp_fir_filter_xxx` with taps from
+/// `firdes.root_raised_cosine(…)` (→ `rrc_filter`) or
+/// `firdes.low_pass(…)` / `high_pass(…)` (→ `fir_filter`).
+fn fir_taps(cx: &mut Cx<'_>, id: &str) -> Result<Out, String> {
+    let name = cx.name();
+    let ty = filter_type(cx.raw("type").unwrap_or("ccc"))?;
+    let interp = if id == "interp_fir_filter_xxx" {
+        cx.f64("interp").unwrap_or(1.0)
+    } else {
+        1.0
+    };
+    let taps = cx.py("taps").ok_or("the taps aren't understood")?;
+    let taps = cx.deref(taps);
+    let Py::Call(f, args, kwargs) = &taps else {
+        return Err(format!(
+            "taps `{}` aren't a firdes.low_pass / high_pass / root_raised_cosine(…) call",
+            short(&py::show(&taps))
+        ));
+    };
+    if f.ends_with("root_raised_cosine") {
+        let (Some(fs), Some(sym)) = (
+            arg(args, kwargs, 1, "sampling_freq").cloned(),
+            arg(args, kwargs, 2, "symbol_rate").cloned(),
+        ) else {
+            return Err("root_raised_cosine taps without sample and symbol rates".into());
+        };
+        let a = RrcArgs {
+            gain: arg(args, kwargs, 0, "gain").cloned(),
+            fs,
+            sym,
+            alpha: arg(args, kwargs, 3, "alpha").cloned(),
+            ntaps: arg(args, kwargs, 4, "ntaps").cloned(),
+        };
+        return rrc(cx, ty, a, interp);
+    }
+    let mode = if f.ends_with("low_pass") {
+        "low_pass"
+    } else if f.ends_with("high_pass") {
+        "high_pass"
+    } else {
+        return Err(format!(
+            "taps `{}` aren't a firdes.low_pass / high_pass / root_raised_cosine(…) call",
+            short(&py::show(&taps))
+        ));
+    };
+    let mut p = params(&[("type", json!(ty)), ("mode", json!(mode))]);
+    if let Some(g) = arg(args, kwargs, 0, "gain") {
+        set(&mut p, "gain", cx.num_of(g, "taps gain", false));
+    }
+    if let Some(c) = arg(args, kwargs, 2, "cutoff_freq") {
+        set(&mut p, "cutoff", cx.num_of(c, "taps cutoff", false));
+    }
+    if let Some(t) = arg(args, kwargs, 3, "transition_width") {
+        set(&mut p, "transition", cx.num_of(t, "taps transition", false));
+    }
+    let w = arg(args, kwargs, 4, "window").cloned();
+    let w = window(cx, w.as_ref());
+    p.insert("window".into(), json!(w));
+    if w == "kaiser"
+        && let Some(beta) = arg(args, kwargs, 5, "beta")
+        && let Some(b) = cx.vars.eval(beta).ok().and_then(|v| v.as_f64())
+    {
+        p.insert(
+            "attenuation".into(),
+            json!((kaiser_attenuation(b) * 10.0).round() / 10.0),
+        );
+    }
+    let mut nodes = Vec::new();
+    if interp != 1.0 {
+        let mut ip = params(&[("type", json!(ty))]);
+        set(&mut ip, "interpolation", cx.int("interp"));
+        nodes.push(("interp", "interpolator", ip));
+        cx.warn("interpolation is done by a separate Interpolator before the filter");
+    }
+    nodes.push(("filter", "fir_filter", p));
+    if cx.f64("decim").is_some_and(|d| d != 1.0) {
+        let mut dp = params(&[("type", json!(ty))]);
+        set(&mut dp, "decimation", cx.int("decim"));
+        nodes.push(("decim", "decimator", dp));
+    }
+    let mut o = Out::chain(name, nodes);
+    if o.nodes.len() > 1 {
+        rename_primary(&mut o, name, "filter");
+    }
+    Ok(o)
+}
+
+/// gr-network's UDP `header`: 0 none, 1 a 64-bit sequence number; the
+/// other formats have no foxygnal equivalent.
+fn udp_header(cx: &mut Cx<'_>) -> Option<Json> {
+    let h = cx.f64("header")?;
+    Some(json!(if h == 1.0 {
+        "seq64"
+    } else {
+        if h != 0.0 {
+            cx.warn(format!(
+                "UDP header type {} isn't supported; using none (raw samples)",
+                py::fmt_num(h)
+            ));
+        }
+        "none"
+    }))
 }
 
 /// Give the node with `suffix` the GRC name and the first node its suffix
@@ -1420,6 +2087,10 @@ fn sdr_source(cx: &mut Cx<'_>, id: &str) -> Result<Out, String> {
                 if let Some(s) = cx.string(k).filter(|s| !s.is_empty()) {
                     if !a.is_empty() {
                         a.push(',');
+                    }
+                    // soapy_custom_source's `driver` is the bare name.
+                    if k == "driver" && !s.contains('=') {
+                        a.push_str("driver=");
                     }
                     a.push_str(&s);
                 }

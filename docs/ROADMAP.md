@@ -78,7 +78,10 @@ Goal: credible numbers on a Raspberry Pi.
 
 ## M6: Ecosystem
 
-- [ ] Out-of-tree block plugins (decide: WASM components vs. Rust dylibs vs. compiled-in crates)
+- [x] Out-of-tree block plugins: WebAssembly components (WIT `foxygnal:block`, wasmtime), with
+      a Rust SDK, an example plugin, sandboxing (no WASI, memory limit, call deadline) and
+      benchmarks against native blocks ([PLUGINS.md](PLUGINS.md)). Not yet: reloading plugins
+      without a restart, an on-disk compile cache
 - [x] Digital modes: FSK/PSK modems, clock recovery, packet framing, a few decoders (ADS-B, POCSAG, …)
       — clock recovery (Gardner / M&M), Costas loop, slicer, PSK demapper, 2-FSK, access
       code + packet decoder, ADS-B (DF17/18 only, no Mode S phase correction or local CPR);
@@ -98,7 +101,24 @@ Goal: the blocks people reach for first, and a broadcast FM receiver that shows 
 - [x] Broadcast FM stereo and RDS (PS, RadioText, clock), stereo browser audio, "FM stereo + RDS" template
 - [x] Easier wire selection in the editor; resamplers place tags exactly
 
+## M8: More decoders and polish
+
+- [x] Stereo sound-card audio (`audio_sink` / `audio_source` with `type = c32`); recording
+      timelines with annotation markers, and SigMF playback from any sample (`start`)
+- [x] POCSAG pager decoder (512/1200/2400 Bd, BCH repair); AFSK 1200 demodulator, HDLC deframer,
+      AX.25 / APRS decoding; "POCSAG" and "APRS" templates
+- [x] `.grc` import reads GNU Radio 3.7 XML too (WX GUI sinks and widgets included), and maps
+      the M7 catalog and network blocks
+- [x] Settings as inputs (`block.@param`, any live number setting, sample and hold per `work`
+      call) and inputs as constants (`const_inputs`); `peak_frequency` and the auto-tuning FM
+      template (`fm-autotune`)
+- [x] `.grc` export (GRC 3.10 YAML): `foxygnal export`, `POST /api/export` and a file-menu
+      action; blocks without an equivalent become placeholder Python blocks that re-import
+      exactly
+
 ## Open questions
 
-- **Plugin strategy** (M6). WASM gives sandboxing and portability at some per-call cost.
+- ~~**Plugin strategy** (M6).~~ Decided: WASM components for out-of-tree blocks (sandboxed,
+  portable, one file for every platform); blocks that turn out performance-critical move into
+  `foxygnal-blocks` (native). Rust dylibs were rejected (no stable ABI, no sandbox).
 - **Name casing**: `foxygnal` vs `Foxygnal` in the UI.

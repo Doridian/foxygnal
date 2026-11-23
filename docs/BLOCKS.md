@@ -10,8 +10,8 @@
 | File Source | `file_source` | any: raw interleaved LE, loop | ✅ |
 | Vector Source | `testing::VectorSource` | any (Rust API only) | ✅ |
 | WAV Source | `wav_source` | f32 (one channel), c32 (stereo as I/Q), i16; rate from the header, loop | ✅ |
-| SigMF Source | `sigmf_source` | c32 / f32 from any `c…` / `r…` datatype; i16 / u8 raw (ci16 / cu8 as interleaved pairs); rate and centre frequency from the metadata; capture segments → `rx_freq` tags, annotations → tags (again on every loop) | ✅ |
-| Audio Source | `audio_source` | f32, one channel of the sound card (`audio` feature) | ✅ |
+| SigMF Source | `sigmf_source` | c32 / f32 from any `c…` / `r…` datatype; i16 / u8 raw (ci16 / cu8 as interleaved pairs); rate and centre frequency from the metadata; capture segments → `rx_freq` tags, annotations → tags (again on every loop); `start` = sample index (I/Q pairs for complex recordings, as in the annotations) to seek to and loop back to: earlier tags are skipped except `hw` and the active capture's `rx_freq`, tagged on item 0 | ✅ |
+| Audio Source | `audio_source` | f32 (one channel of the sound card) or c32 (stereo: first two channels as real = left, imaginary = right) (`audio` feature) | ✅ |
 | SDR Source | `sdr_source` | c32 from any device (`sim:`, RTL-SDR, rtl_tcp, SpyServer, SoapySDR…); live frequency / gain / AGC / ppm, tags `hw` (first item), `rx_freq`, `rx_gain`, `overflow` | ✅ |
 
 ## Sinks
@@ -20,7 +20,7 @@
 | Null Sink | `null_sink` | any | ✅ |
 | File Sink | `file_sink` | any | ✅ |
 | Vector Sink | `testing::VectorSink` | any (Rust API only) | ✅ |
-| Audio Sink | `audio_sink` | f32 at the stream's rate; the sound card paces the graph (`audio` feature) | ✅ |
+| Audio Sink | `audio_sink` | f32 (mono, on every speaker) or c32 (stereo: real = left, imaginary = right; mixed down on a mono device) at the stream's rate; the sound card paces the graph (`audio` feature) | ✅ |
 | Browser Audio | `browser_audio` | f32 (mono) or c32 (stereo: real = left, imaginary = right) at 3–768 kS/s, played in the tab that pressed Run (WebAudio); paces at the stream rate unless `pace` is off | ✅ |
 | WAV Sink | `wav_sink` | f32, c32 (stereo I/Q), i16 → float32 or pcm16 WAV at the stream's rate | ✅ |
 | SigMF Sink | `sigmf_sink` | any: `.sigmf-data` + `.sigmf-meta` with rate, frequency, datetime; tags kept (`rx_freq` → capture segment, `hw` → `core:hw`, others → annotations); metadata written at start, ~1 s while tags arrive, and at stop | ✅ |
@@ -150,13 +150,29 @@ ARCHITECTURE.md): watch it with the **Messages** instrument or end it in a Messa
 | Packet Decoder | `packet_decoder` | u8 bits → u8: N payload bytes after each `packet` tag, as hex text lines or raw bytes | ✅ |
 | ADS-B Decoder | `adsb_decoder` | f32 magnitude at 2 MS/s → u8 text: Mode S DF17/18, CRC-24 with 1-bit repair, address, call sign, altitude, velocity, global CPR position | ✅ |
 | RDS Decoder | `rds_decoder` | f32 MPX (≥ 120 kS/s, whole-number rate) → u8 text: 57 kHz BPSK, Costas loop, biphase matched filter, differential decoding, block sync with offset words A/B/C/C'/D, optional 1-bit / 2-bit-burst repair; PI, PTY (RDS or RBDS names), TP, PS (0A/0B), RadioText (2A/2B), clock time (4A); a line when something new is complete, `verbose` adds one per group | ✅ |
-| Multi-level FSK, GFSK/GMSK shaping, FEC, AX.25/HDLC, POCSAG | | | 🔜 later |
+| POCSAG Decoder | `pocsag_decoder` | f32 FM discriminator (de-emphasis off) or NRZ baseband, ≥ 9.6 kS/s → u8 text: 512 / 1200 / 2400 Bd (or `auto`: all three at once), either polarity, sync 0x7CD215D8 and batches, BCH(31,21) repair of up to 2 bits + parity, RIC and function bits, numeric / alphanumeric / both / auto (function bits plus a plausibility check); `t=… baud=1200 ric=… func=3 type=alpha msg="…"` | ✅ |
+| AFSK 1200 Demodulator | `afsk1200_demod` | f32 audio (≥ ~7 kS/s) → u8 bits (mark = 1) or f32 soft at 1200/s: Bell 202 quadrature correlators with per-tone level tracking (pre-/de-emphasis tilt doesn't matter), bit-timing PLL; tones and baud adjustable | ✅ |
+| HDLC Deframer | `hdlc_deframer` | u8 bits → u8: NRZI (optional), 0x7E flags, bit unstuffing, abort on seven 1s, CRC-16-CCITT FCS check (or pass bad frames marked `fcs=bad`); output AX.25 text (call signs, path, control/PID, APRS: positions with/without timestamp, uncompressed and compressed, Mic-E, status, message, object, item, others raw), hex lines, or raw bytes tagged `packet` | ✅ |
+| Multi-level FSK, GFSK/GMSK shaping, FEC | | | 🔜 later |
 
 ## Level
 | block | kind | types | status |
 |---|---|---|---|
 | AGC | `agc` | f32, c32: peak-following, target, attack/decay (s), max gain; all live | ✅ |
 | Power Squelch | `squelch` | f32, c32: threshold dB with hysteresis, averaging, fade ramp; outputs zeros when closed (rate unchanged) | ✅ |
+
+## Measurement
+| block | kind | types | status |
+|---|---|---|---|
+| Peak Frequency | `peak_frequency` | c32 → f32: offset (Hz) of the strongest signal, `update_rate` values/s (the output's rate); averages Hann FFT spectra (`fft_size`) over each update; centre of power over `bandwidth` (mean shift from the peak bin); `hysteresis` dB before jumping to another signal; holds on noise (`min_snr` over the median bin); optional search range `min_offset`…`max_offset`; outputs nothing until it first finds a signal. Made for control inputs, e.g. `freq_xlating_fir.@offset` | ✅ |
+
+**Control inputs and constants (any block).** Every setting marked live that is a number or
+on/off can be driven by an f32 wire instead: connect to `block.@name` (in the editor: the
+"⇢ input" toggle). The value is applied before each `work` call (sample and hold), the value
+in the file is the initial one, and a rejected value is a warning, not an error. Any stream
+input can instead be a constant (`const_inputs = { b = 1.5 }`, c32: `[re, im]`), which runs
+in step with the block's other inputs. See ARCHITECTURE.md, "Control inputs and constant
+inputs".
 
 ## Instruments (M2)
 These are not graph blocks: they are probes you attach to any edge from the UI. They include

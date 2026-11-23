@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ComponentProps } from 'svelte';
-  import { GRAPH_KIND, portType } from './api';
+  import { GRAPH_KIND, portType, wireable, type StreamType } from './api';
+  import { parseSi } from './si';
   import type { BlockNode, Wire } from './graph';
   import { indexErrors } from './errors';
   import type { Scope } from './expr';
@@ -14,6 +15,8 @@
     node,
     edge,
     onparam,
+    onwire,
+    onconst,
     onrename,
     ondelete,
     scope,
@@ -23,6 +26,10 @@
     node: BlockNode | undefined;
     edge: Wire | undefined;
     onparam: (id: string, name: string, value: unknown) => void;
+    /** Show setting `name` as an input (handle `@name`), or stop. */
+    onwire: (id: string, name: string, on: boolean) => void;
+    /** Give stream input `port` a constant, or (`undefined`) a wire again. */
+    onconst: (id: string, port: string, value: unknown) => void;
     onrename: (from: string, to: string) => string | null;
     ondelete: () => void;
     /** Graph variables, for params written as expressions. */
@@ -38,6 +45,16 @@
   /** Why the graph doesn't build right now (variables, sub-graphs…), from the engine. */
   const buildError = $derived(session.metaError);
   let renameProblem = $state<string | null>(null);
+
+  /** A constant as typed: a number (SI prefixes allowed), an expression,
+   *  or for c32 `re, im`. */
+  function parseConst(text: string, t: StreamType): unknown {
+    const one = (s: string) => parseSi(s.trim()) ?? s.trim();
+    const parts = text.split(',');
+    if (t === 'c32' && parts.length === 2) return [one(parts[0]), one(parts[1])];
+    return one(text);
+  }
+  const showConst = (v: unknown) => (Array.isArray(v) ? v.join(', ') : String(v ?? ''));
 
   function rename(e: Event & { currentTarget: HTMLInputElement }) {
     if (!node) return;
@@ -72,8 +89,48 @@
         {#if renameProblem}<p class="problem">{renameProblem}</p>{/if}
       </div>
       {#each d.params as p (p.name)}
-        <ParamField spec={p} value={node.data.params[p.name] ?? p.default} {running} {scope} onchange={(v) => onparam(node.id, p.name, v)} />
+        {@const isWired = node.data.wired?.includes(p.name) ?? false}
+        <div class="param">
+          <ParamField spec={p} value={node.data.params[p.name] ?? p.default} {running} {scope} wired={isWired} onchange={(v) => onparam(node.id, p.name, v)} />
+          {#if wireable(p)}
+            <button
+              class="wire"
+              class:on={isWired}
+              aria-pressed={isWired}
+              title={isWired
+                ? 'Stop using this setting as an input (removes its wire)'
+                : 'Turn this setting into an input: an f32 wire sets it while running'}
+              onclick={() => onwire(node.id, p.name, !isWired)}>⇢ input</button
+            >
+          {/if}
+        </div>
       {/each}
+      {#if d.inputs.length}
+        <div class="inputs">
+          <h3 class="small muted">Inputs</h3>
+          {#each d.inputs as p (p.name)}
+            {@const t = portType(p, node.data.params)}
+            {@const c = node.data.consts?.[p.name]}
+            <div class="input">
+              <label class="small">
+                <input type="checkbox" checked={c !== undefined} onchange={(e) => onconst(node.id, p.name, e.currentTarget.checked ? (t === 'c32' ? [1, 0] : 1) : undefined)} />
+                <span class="mono">{p.name}</span> <span class="muted">· {t} ·</span> constant
+              </label>
+              {#if c !== undefined}
+                <input
+                  class="mono"
+                  type="text"
+                  aria-label="Constant for input {p.name}"
+                  value={showConst(c)}
+                  placeholder={t === 'c32' ? 're, im' : 'value or $var'}
+                  onchange={(e) => onconst(node.id, p.name, parseConst(e.currentTarget.value, t))}
+                />
+              {/if}
+            </div>
+          {/each}
+          <p class="muted tiny">A constant input needs no wire. It runs in step with the block's other inputs, which set the rate. Changes apply live.</p>
+        </div>
+      {/if}
       {#if d.response}
         <ResponsePlot id={node.id} desc={d} params={node.data.params} {scope} />
       {/if}
@@ -171,6 +228,50 @@
     grid-template-columns: 1fr auto;
     gap: 4px 10px;
     font-size: 12px;
+  }
+  .param {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .wire {
+    align-self: flex-start;
+    padding: 1px 6px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .wire.on {
+    color: var(--warn);
+    border-color: var(--warn);
+  }
+  .inputs {
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .inputs h3 {
+    margin: 0;
+    font-weight: 600;
+  }
+  .input {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .input label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .input input[type='checkbox'] {
+    width: auto;
+  }
+  .tiny {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.4;
   }
   .danger,
   .open {

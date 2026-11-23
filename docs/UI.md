@@ -39,6 +39,9 @@ Sketch: <https://claude.ai/artifact/4Yfp1PBSy1oBjfevL9daHW> (private until share
    *Graphs*. Double-click such a block (or use *Open* in the inspector) to edit its file.
 6. **Live where possible.** Params that can change while running show a small live dot and
    apply instantly. Others show "applies on restart".
+   A live number setting can become an input: "⇢ input" under it adds a diamond handle to
+   the block (wire an f32 stream into it; the field then holds the initial value). Any stream
+   input can be a constant instead (inspector, *Inputs*), shown on the block as `b = 1.5`.
 7. **Instruments are first-class.** They dock at the bottom, can split side by side, pop out
    into their own browser window (for a second monitor), and remember their settings per
    graph file.

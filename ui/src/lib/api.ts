@@ -37,9 +37,19 @@ export interface BlockDescriptor {
   response?: boolean;
   /** The block transmits RF: running it needs TX armed. */
   tx?: boolean;
+  /** The plugin that provides the block (kind `<plugin>:<name>`). */
+  plugin?: string;
   /** Extra words the palette search matches (aliases, the operation). */
   keywords?: string[];
+  /** An internal block (the source behind a constant input): not in the palette. */
+  hidden?: boolean;
 }
+
+/** Ports named `@param` are a block's setting wired as an input (f32). */
+export const PARAM_PORT = '@';
+
+/** A setting that can be wired as an input: live, and a number or on/off. */
+export const wireable = (p: ParamSpec) => !!p.live && (p.kind === 'float' || p.kind === 'int' || p.kind === 'bool');
 
 /** A filter's magnitude response (`POST /api/blocks/{kind}/response`). */
 export interface FrequencyResponse {
@@ -54,6 +64,11 @@ export interface BlockSpec {
   id: string;
   kind: string;
   params: Record<string, unknown>;
+  /** Stream inputs given a constant instead of a wire: a number or
+   *  expression, or `[re, im]` for c32. */
+  const_inputs?: Record<string, unknown>;
+  /** Editor-only. `wired`: settings shown as inputs (also those not yet
+   *  connected). */
   ui?: Record<string, unknown>;
 }
 
@@ -97,6 +112,9 @@ export interface Status {
   started_at?: number;
   stale: boolean;
   errors: ErrorInfo[];
+  /** Problems that don't stop the run (a wired setting got a value the
+   *  block rejected), pinned to blocks. */
+  warnings?: ErrorInfo[];
   /** The current run transmits (TX was armed for it). */
   tx_armed?: boolean;
 }
@@ -171,6 +189,8 @@ export interface RecordStatus {
   bytes: number;
   /** Stretches of samples lost (only possible right after starting). */
   gaps: number;
+  /** Annotations so far (overflows, gaps, packets, other tags). */
+  annotations?: number;
   done: boolean;
   error?: string;
 }
@@ -278,8 +298,25 @@ export const isGrc = (name: string) => name.toLowerCase().endsWith('.grc');
 export const importFile = (name: string) => call<Imported>('GET', `/api/import/${encodeURIComponent(name)}`);
 /** Convert uploaded `.grc` text. */
 export const importText = (text: string) => call<Imported>('POST', '/api/import', text, 'text/plain');
+/** A graph converted to a GNU Radio Companion 3.10 `.grc` (download it as `name`). */
+export interface Exported {
+  grc: string;
+  /** What didn't convert exactly (placeholders, approximations), one message each. */
+  warnings: string[];
+  name: string;
+}
+/** Convert a graph to a `.grc`; `name` is its `.fox.toml` name. */
+export const exportGrc = (g: GraphSpec, name?: string) =>
+  call<Exported>('POST', `/api/export${name ? `?name=${encodeURIComponent(name)}` : ''}`, json(g), 'application/json');
 export const renderToml = (g: GraphSpec) => call<string>('POST', '/api/toml/render', json(g), 'application/json');
 export const listRecordings = () => call<RecordingInfo[]>('GET', '/api/recordings');
+/** A recording's SigMF metadata (`GET /api/recordings/{name}`): the parts the timeline reads. */
+export interface SigmfMeta {
+  global?: Record<string, unknown>;
+  captures?: Record<string, unknown>[];
+  annotations?: Record<string, unknown>[];
+}
+export const getRecording = (name: string) => call<SigmfMeta>('GET', `/api/recordings/${encodeURIComponent(name)}`);
 export const deleteRecording = (name: string) => call<string>('DELETE', `/api/recordings/${encodeURIComponent(name)}`);
 /** The frequency response a block would have with `params` at input rate `sample_rate`. */
 export const fetchResponse = (kind: string, params: Record<string, unknown>, sample_rate: number) =>

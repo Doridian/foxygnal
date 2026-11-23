@@ -49,6 +49,8 @@ pub struct RecordStatus {
     pub bytes: u64,
     /// Stretches of samples lost (only possible right after starting).
     pub gaps: u64,
+    /// Annotations written so far (overflows, gaps, packets, other tags).
+    pub annotations: u64,
     /// The recording has ended (stopped, the run ended, or an error).
     pub done: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +71,7 @@ impl RecordStatus {
             samples: 0,
             bytes: 0,
             gaps: 0,
+            annotations: 0,
             done: true,
             error: Some(error),
         }
@@ -83,6 +86,7 @@ struct Active {
     samples: AtomicU64,
     bytes: AtomicU64,
     gaps: AtomicU64,
+    annotations: AtomicU64,
     stop: AtomicBool,
 }
 
@@ -97,6 +101,7 @@ impl Active {
             samples: self.samples.load(Ordering::Relaxed),
             bytes: self.bytes.load(Ordering::Relaxed),
             gaps: self.gaps.load(Ordering::Relaxed),
+            annotations: self.annotations.load(Ordering::Relaxed),
             done,
             error,
         }
@@ -206,6 +211,7 @@ pub fn start(
         samples: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
         gaps: AtomicU64::new(0),
+        annotations: AtomicU64::new(0),
         stop: AtomicBool::new(false),
     });
     recorders.lock().insert(edge_key(&edge), active.clone());
@@ -271,6 +277,9 @@ fn record(
                 }
             }
         }
+        active
+            .annotations
+            .store(w.annotations() as u64, Ordering::Relaxed);
         if got.items > 0 {
             if let Err(e) = w.write(&buf[..got.items * size]) {
                 break Err(e.to_string());
@@ -521,10 +530,11 @@ fn names(dir: &Path) -> std::io::Result<Vec<String>> {
         let Ok(file) = entry.file_name().into_string() else {
             continue;
         };
-        if let Some(name) = file.strip_suffix(".sigmf-meta") {
-            if valid_name(name).is_ok() && entry.file_type()?.is_file() {
-                out.push(name.to_owned());
-            }
+        if let Some(name) = file.strip_suffix(".sigmf-meta")
+            && valid_name(name).is_ok()
+            && entry.file_type()?.is_file()
+        {
+            out.push(name.to_owned());
         }
     }
     Ok(out)

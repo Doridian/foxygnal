@@ -24,7 +24,7 @@
     <span class="mono muted">{fmtBytes(rec.bytes)}</span>
     <button type="button" class="stop" onclick={() => session.stopRecording(edge)}>Stop</button>
   </div>
-  <p class="note mono" title={rec.path}>{rec.path}{rec.gaps ? ` · ${rec.gaps} gap(s)` : ''}</p>
+  <p class="note mono" title={rec.path}>{rec.path}{rec.annotations ? ` · ${rec.annotations} annotation${rec.annotations === 1 ? '' : 's'}` : ''}{rec.gaps ? ` · ${rec.gaps} gap(s)` : ''}</p>
 {:else}
   <button type="button" class="start" disabled={!running} onclick={() => session.startRecording(edge)}>
     <span class="dot idle" aria-hidden="true"></span>Record to SigMF

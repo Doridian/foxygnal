@@ -1,11 +1,13 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Plugin sources build for wasm32 in a workspace of their own (docs/PLUGINS.md).
+exclude = ["plugins"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.97"
 license = "AGPL-3.0-or-later"
 repository = "https://git.foxden.network/FoxDen/foxygnal"
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Handle, Position } from '@xyflow/svelte';
-  import { portType } from './api';
+  import { PARAM_PORT, portType } from './api';
   import type { BlockData } from './graph';
   import { session } from './session.svelte';
   import { indexErrors } from './errors';
@@ -12,10 +12,15 @@
   const ROW = 22;
   const TOP = 42;
   const rowTop = (i: number) => TOP + i * ROW;
-  const rows = $derived(Math.max(data.desc.inputs.length, data.desc.outputs.length, 1));
+  /** Settings wired as inputs: rows below the stream inputs. */
+  const wired = $derived((data.wired ?? []).map((n) => data.desc.params.find((p) => p.name === n)).filter((p) => p !== undefined));
+  const rows = $derived(Math.max(data.desc.inputs.length + wired.length, data.desc.outputs.length, 1));
   const error = $derived(
     data.desc.category === 'Unknown' ? `Unknown block kind \`${data.desc.kind}\`` : indexErrors(session.status.errors).blocks.get(id),
   );
+  const warning = $derived(indexErrors(session.status.warnings ?? []).blocks.get(id));
+  /** A constant input's value, short. */
+  const constText = (v: unknown) => (Array.isArray(v) ? `${v[0]}${Number(v[1]) < 0 ? '−' : '+'}${Math.abs(Number(v[1])) || v[1]}j` : String(v));
   const running = $derived(session.status.state === 'running');
   const cpu = $derived(prefs.overlay ? session.stats?.cpu.get(id) : undefined);
 
@@ -47,8 +52,26 @@
   </header>
   {#each data.desc.inputs as p, i (p.name)}
     {@const t = portType(p, data.params)}
-    <Handle type="target" position={Position.Left} id={p.name} style="top:{rowTop(i)}px; --port: var(--t-{t})" title="{p.name} · {t}" />
-    <span class="port in" style:top="{rowTop(i) - 8}px">{p.name}</span>
+    {#if data.consts && p.name in data.consts}
+      <span class="port in const" style:top="{rowTop(i) - 8}px" title="Input {p.name} is the constant {constText(data.consts[p.name])} (edit it in the inspector)"
+        >{p.name} = {constText(data.consts[p.name])}</span
+      >
+    {:else}
+      <Handle type="target" position={Position.Left} id={p.name} style="top:{rowTop(i)}px; --port: var(--t-{t})" title="{p.name} · {t}" />
+      <span class="port in" style:top="{rowTop(i) - 8}px">{p.name}</span>
+    {/if}
+  {/each}
+  {#each wired as p, k (p.name)}
+    {@const i = data.desc.inputs.length + k}
+    <Handle
+      type="target"
+      position={Position.Left}
+      id="{PARAM_PORT}{p.name}"
+      class="setting"
+      style="top:{rowTop(i)}px"
+      title="Setting {p.label}, wired as an input (f32). Until a value arrives it is {String(data.params[p.name] ?? p.default)}."
+    />
+    <span class="port in setting" style:top="{rowTop(i) - 8}px">{p.label}</span>
   {/each}
   {#each data.desc.outputs as p, i (p.name)}
     {@const t = portType(p, data.params)}
@@ -60,6 +83,11 @@
       <span class="err" title={error}>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 7v6M12 17h.01"></path></svg>
         <span>{error}</span>
+      </span>
+    {:else if warning}
+      <span class="warn" title={warning}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M12 3l10 18H2z"></path><path d="M12 10v4M12 18h.01"></path></svg>
+        <span>{warning}</span>
       </span>
     {:else}
       <span class="id">{id}</span>
@@ -135,6 +163,25 @@
   .port.out {
     right: 12px;
   }
+  .port.const {
+    left: 8px;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+    font-style: italic;
+  }
+  .port.setting {
+    color: var(--warn);
+    font-family: inherit;
+  }
+  /* A setting wired as an input: a diamond, not a dot. */
+  .block :global(.svelte-flow__handle.setting) {
+    --port: var(--warn);
+    border-radius: 2px;
+    transform: translate(-50%, -50%) rotate(45deg);
+  }
   footer {
     position: absolute;
     left: 10px;
@@ -159,6 +206,20 @@
     white-space: nowrap;
   }
   .err svg {
+    flex: none;
+  }
+  .warn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--warn);
+  }
+  .warn span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .warn svg {
     flex: none;
   }
   :global(.svelte-flow__handle) {

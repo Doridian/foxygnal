@@ -656,3 +656,577 @@ fn toml_has_a_header_and_parses() {
     assert_eq!(back.blocks.len(), i.graph.blocks.len());
     let _: Value = serde_json::to_value(&back).unwrap();
 }
+
+// ---- GNU Radio 3.7 (XML) ----------------------------------------------------
+
+/// Rename block ids (and the endpoints naming them) in a graph.
+fn renamed(g: &GraphSpec, map: &[(&str, &str)]) -> GraphSpec {
+    let swap = |id: &str| -> String {
+        map.iter()
+            .find(|(from, _)| *from == id)
+            .map_or_else(|| id.to_owned(), |(_, to)| (*to).to_owned())
+    };
+    let ep = |e: &str| -> String {
+        let (b, p) = e.rsplit_once('.').unwrap();
+        format!("{}.{p}", swap(b))
+    };
+    let mut g = g.clone();
+    for b in &mut g.blocks {
+        b.id = swap(&b.id);
+    }
+    for c in &mut g.connections {
+        c.from = ep(&c.from);
+        c.to = ep(&c.to);
+    }
+    g
+}
+
+/// Same vars, blocks (kind, params, position) and connections, in any order.
+fn assert_equivalent(xml: &GraphSpec, yaml: &GraphSpec) {
+    assert_eq!(xml.vars, yaml.vars);
+    let sorted = |g: &GraphSpec| {
+        let mut b: Vec<String> = g
+            .blocks
+            .iter()
+            .map(|b| format!("{} {} {:?} {:?}", b.id, b.kind, b.params, b.ui))
+            .collect();
+        b.sort();
+        let mut c: Vec<String> = g
+            .connections
+            .iter()
+            .map(|c| format!("{} -> {}", c.from, c.to))
+            .collect();
+        c.sort();
+        (b, c)
+    };
+    let (xb, xc) = sorted(xml);
+    let (yb, yc) = sorted(yaml);
+    assert_eq!(xb, yb);
+    assert_eq!(xc, yc);
+}
+
+fn sim(g: &GraphSpec) -> GraphSpec {
+    let mut g = g.clone();
+    for b in &mut g.blocks {
+        if b.kind == "sdr_source" {
+            b.params.insert("device".into(), json!("sim:"));
+        }
+    }
+    g
+}
+
+#[test]
+fn fm_receiver_37() {
+    let i = imp(&fixture("fm_receiver_37.grc"));
+    let g = &i.graph;
+    assert_eq!(i.title.as_deref(), Some("FM receiver"));
+    // WX widgets are variables; the WX FFT sink a null sink with a note.
+    assert_eq!(g.vars["freq"], json!(100300000));
+    assert_eq!(g.vars["volume"], json!(0.8));
+    assert_eq!(block(g, "wxgui_fftsink2_0").kind, "null_sink");
+    assert!(warned(&i, &["wxgui_fftsink2_0", "WX GUI", "Spectrum"]));
+    // 3.7 writes osmosdr args unquoted.
+    assert_eq!(
+        block(g, "osmosdr_source_0").params["device"],
+        json!("rtlsdr:")
+    );
+    assert!(warned(&i, &["osmosdr_source_0", "`rtl=0`"]));
+
+    let yaml = imp(&fixture("fm_receiver.grc"));
+    assert_equivalent(
+        &renamed(g, &[("wxgui_fftsink2_0", "qtgui_freq_sink_x_0")]),
+        &yaml.graph,
+    );
+    assert_eq!(i.warnings.len(), yaml.warnings.len(), "{:#?}", i.warnings);
+
+    resolves(g);
+    run_briefly(&sim(g));
+}
+
+#[test]
+fn tone_scope_37() {
+    let i = imp(&fixture("tone_scope_37.grc"));
+    assert_eq!(i.title.as_deref(), Some("Tone on a scope"));
+    assert_eq!(i.warnings.len(), 1, "{:#?}", i.warnings);
+    assert!(warned(&i, &["qtgui_time_sink_x_0", "Scope"]));
+    let yaml = imp(&fixture("tone_scope.grc"));
+    assert_equivalent(
+        &renamed(&i.graph, &[("blocks_throttle_0", "blocks_throttle2_0")]),
+        &yaml.graph,
+    );
+    resolves(&i.graph);
+    run_briefly(&i.graph);
+}
+
+#[test]
+fn disabled_and_bypassed_37() {
+    // `_enabled` as 1 / True (enabled), 0 / False (disabled), 2 (bypassed).
+    let i = imp(&fixture("disabled_blocks_37.grc"));
+    let g = &i.graph;
+    assert!(g.blocks.iter().all(|b| b.id != "blocks_file_sink_0"));
+    assert!(!g.vars.contains_key("unused_gain"));
+    assert!(g.blocks.iter().all(|b| b.id != "low_pass_filter_0"));
+    assert!(has_edge(g, "blocks_add_xx_0.out", "blocks_throttle_0.in"));
+    // Named (message) ports.
+    assert!(warned(&i, &["message connection", "strobe", "print"]));
+    let yaml = imp(&fixture("unknown_blocks.grc"));
+    assert_equivalent(g, &yaml.graph);
+    assert_eq!(i.warnings, yaml.warnings);
+    resolves(g);
+}
+
+/// A minimal GRC 3.7 XML file; `state` is the `_enabled` value.
+fn grc37(blocks: &[Blk<'_>], conns: &[[&str; 4]]) -> String {
+    let param = |k: &str, v: &str| {
+        let v = v
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        format!("    <param>\n      <key>{k}</key>\n      <value>{v}</value>\n    </param>\n")
+    };
+    let mut s = String::from(
+        "<?xml version='1.0' encoding='utf-8'?>\n<?grc format='1' created='3.7.13'?>\n\
+         <flow_graph>\n  <timestamp>now</timestamp>\n  <block>\n    <key>options</key>\n",
+    );
+    s.push_str(&param("id", "t"));
+    s.push_str(&param("generate_options", "no_gui"));
+    s.push_str("  </block>\n");
+    for (i, (name, id, params, state)) in blocks.iter().enumerate() {
+        s.push_str(&format!("  <block>\n    <key>{id}</key>\n"));
+        s.push_str(&param("id", name));
+        s.push_str(&param("_enabled", state));
+        s.push_str(&param("_coordinate", &format!("({}, 100)", i * 200)));
+        s.push_str(&param("_rotation", "0"));
+        for (k, v) in *params {
+            s.push_str(&param(k, v));
+        }
+        s.push_str("  </block>\n");
+    }
+    for c in conns {
+        s.push_str(&format!(
+            "  <connection>\n    <source_block_id>{}</source_block_id>\n    \
+             <sink_block_id>{}</sink_block_id>\n    <source_key>{}</source_key>\n    \
+             <sink_key>{}</sink_key>\n  </connection>\n",
+            c[0], c[2], c[1], c[3]
+        ));
+    }
+    s.push_str("</flow_graph>\n");
+    s
+}
+
+#[test]
+fn catalog_blocks() {
+    let text = grc37(
+        &[
+            ("samp_rate", "variable", &[("value", "48000")], "1"),
+            (
+                "src",
+                "analog_sig_source_x",
+                &[
+                    ("type", "float"),
+                    ("samp_rate", "samp_rate"),
+                    ("freq", "1000"),
+                    ("amp", "1"),
+                    ("waveform", "analog.GR_COS_WAVE"),
+                ],
+                "1",
+            ),
+            (
+                "src2",
+                "analog_sig_source_x",
+                &[
+                    ("type", "float"),
+                    ("samp_rate", "samp_rate"),
+                    ("freq", "300"),
+                    ("amp", "0.5"),
+                    ("waveform", "analog.GR_SQR_WAVE"),
+                ],
+                "1",
+            ),
+            (
+                "th",
+                "blocks_throttle",
+                &[("type", "float"), ("samples_per_second", "samp_rate")],
+                "1",
+            ),
+            (
+                "sub",
+                "blocks_sub_xx",
+                &[("type", "float"), ("num_inputs", "2")],
+                "1",
+            ),
+            (
+                "ac",
+                "blocks_add_const_vxx",
+                &[("type", "float"), ("const", "2")],
+                "1",
+            ),
+            (
+                "div",
+                "blocks_divide_xx",
+                &[("type", "float"), ("num_inputs", "2")],
+                "1",
+            ),
+            (
+                "dc",
+                "filter_dc_blocker_xx",
+                &[("type", "ff"), ("length", "64"), ("long_form", "True")],
+                "1",
+            ),
+            (
+                "skip",
+                "blocks_skiphead",
+                &[("type", "float"), ("num_items", "100")],
+                "1",
+            ),
+            (
+                "dly",
+                "blocks_delay",
+                &[("type", "float"), ("delay", "10"), ("num_ports", "1")],
+                "1",
+            ),
+            (
+                "cp",
+                "blocks_copy",
+                &[("type", "float"), ("enabled", "True")],
+                "1",
+            ),
+            (
+                "sel",
+                "blocks_selector",
+                &[
+                    ("type", "float"),
+                    ("num_inputs", "2"),
+                    ("num_outputs", "1"),
+                    ("input_index", "1"),
+                    ("output_index", "0"),
+                    ("enabled", "True"),
+                ],
+                "1",
+            ),
+            (
+                "lpf",
+                "fir_filter_xxx",
+                &[
+                    ("type", "fff"),
+                    ("decim", "1"),
+                    (
+                        "taps",
+                        "firdes.low_pass(1, samp_rate, 5e3, 1e3, firdes.WIN_KAISER, 5.653)",
+                    ),
+                    ("samp_delay", "0"),
+                ],
+                "1",
+            ),
+            ("abs", "blocks_abs_xx", &[("type", "float")], "1"),
+            (
+                "hil",
+                "hilbert_fc",
+                &[
+                    ("num_taps", "65"),
+                    ("win", "firdes.WIN_BLACKMAN"),
+                    ("beta", "6.76"),
+                ],
+                "1",
+            ),
+            ("conj", "blocks_conjugate_cc", &[], "1"),
+            (
+                "rrc",
+                "root_raised_cosine_filter",
+                &[
+                    ("type", "fir_filter_ccf"),
+                    ("decim", "1"),
+                    ("interp", "1"),
+                    ("gain", "1"),
+                    ("samp_rate", "samp_rate"),
+                    ("sym_rate", "samp_rate / 4"),
+                    ("alpha", "0.35"),
+                    ("ntaps", "11 * 4"),
+                ],
+                "1",
+            ),
+            (
+                "fir",
+                "fir_filter_xxx",
+                &[
+                    ("type", "ccc"),
+                    ("decim", "2"),
+                    (
+                        "taps",
+                        "firdes.root_raised_cosine(1, samp_rate, samp_rate/8, 0.22, 88)",
+                    ),
+                    ("samp_delay", "0"),
+                ],
+                "1",
+            ),
+            ("mag", "blocks_complex_to_mag_squared", &[], "1"),
+            ("nlog", "blocks_nlog10_ff", &[("n", "10"), ("k", "-3")], "1"),
+            (
+                "head",
+                "blocks_head",
+                &[("type", "float"), ("num_items", "4800")],
+                "1",
+            ),
+            ("snk", "blocks_null_sink", &[("type", "float")], "1"),
+            (
+                "iir",
+                "iir_filter_ffd",
+                &[
+                    ("fftaps", "[1, 2, 1]"),
+                    ("fbtaps", "[1, -0.5]"),
+                    ("oldstyle", "True"),
+                ],
+                "1",
+            ),
+        ],
+        &[
+            ["src", "0", "th", "0"],
+            ["th", "0", "sub", "0"],
+            ["src2", "0", "sub", "1"],
+            ["src2", "0", "ac", "0"],
+            ["th", "0", "div", "0"],
+            ["ac", "0", "div", "1"],
+            ["div", "0", "dc", "0"],
+            ["dc", "0", "skip", "0"],
+            ["skip", "0", "dly", "0"],
+            ["dly", "0", "cp", "0"],
+            ["sub", "0", "sel", "0"],
+            ["cp", "0", "sel", "1"],
+            ["sel", "0", "lpf", "0"],
+            ["lpf", "0", "abs", "0"],
+            ["abs", "0", "hil", "0"],
+            ["hil", "0", "conj", "0"],
+            ["conj", "0", "rrc", "0"],
+            ["rrc", "0", "fir", "0"],
+            ["fir", "0", "mag", "0"],
+            ["mag", "0", "nlog", "0"],
+            ["nlog", "0", "head", "0"],
+            ["head", "0", "snk", "0"],
+        ],
+    );
+    let i = imp(&text);
+    let g = &i.graph;
+    let kinds: Vec<(&str, &str)> = g
+        .blocks
+        .iter()
+        .map(|b| (b.id.as_str(), b.kind.as_str()))
+        .collect();
+    for want in [
+        ("sub", "subtract"),
+        ("ac", "add_const"),
+        ("div", "divide"),
+        ("dc", "dc_blocker"),
+        ("skip", "skip"),
+        ("dly", "delay"),
+        ("cp", "valve"),
+        ("sel", "selector"),
+        ("lpf", "fir_filter"),
+        ("abs", "abs"),
+        ("hil", "hilbert"),
+        ("conj", "conjugate"),
+        ("rrc", "rrc_filter"),
+        ("fir", "rrc_filter"),
+        ("fir_decim", "decimator"),
+        ("nlog", "log_power"),
+        ("nlog_scale", "gain"),
+    ] {
+        assert!(kinds.contains(&want), "{want:?} in {kinds:?}");
+    }
+    assert_eq!(block(g, "ac").params["constant"], json!(2.0));
+    assert_eq!(block(g, "skip").params["count"], json!(100));
+    assert_eq!(block(g, "dly").params["delay"], json!(10));
+    assert_eq!(block(g, "cp").params["open"], json!(true));
+    assert_eq!(block(g, "sel").params["input"], json!(1));
+    assert!(has_edge(g, "cp.out", "sel.in1"));
+    assert!(has_edge(g, "sub.out", "sel.in0"));
+    let lpf = block(g, "lpf");
+    assert_eq!(lpf.params["mode"], json!("low_pass"));
+    assert_eq!(lpf.params["cutoff"], json!(5000.0));
+    assert_eq!(lpf.params["window"], json!("kaiser"));
+    assert_eq!(lpf.params["attenuation"], json!(60.0));
+    assert_eq!(block(g, "hil").params["window"], json!("blackman"));
+    let rrc = block(g, "rrc");
+    assert_eq!(rrc.params["rolloff"], json!(0.35));
+    assert_eq!(rrc.params["span"], json!(11));
+    assert_eq!(rrc.params["mode"], json!("filter"));
+    let fir = block(g, "fir");
+    assert_eq!(fir.params["rolloff"], json!(0.22));
+    assert_eq!(fir.params["span"], json!(11));
+    assert!(has_edge(g, "fir.out", "fir_decim.in"));
+    assert!(has_edge(g, "fir_decim.out", "mag.in"));
+    // 10·log10(x) − 3 = (10·log10(x²) − 6) / 2.
+    assert_eq!(block(g, "nlog").params["offset"], json!(-6.0));
+    assert_eq!(block(g, "nlog_scale").params["gain"], json!(0.5));
+    assert!(has_edge(g, "nlog_scale.out", "head.in"));
+    assert!(warned(&i, &["`dc`", "moving average"]));
+    assert!(warned(&i, &["`iir`", "IIR"]));
+    resolves(g);
+    run_briefly(g);
+}
+
+#[test]
+fn network_blocks() {
+    let text = grc37(
+        &[
+            (
+                "usrc",
+                "network_udp_source",
+                &[
+                    ("type", "complex"),
+                    ("port", "52001"),
+                    ("header", "1"),
+                    ("payloadsize", "1472"),
+                ],
+                "1",
+            ),
+            (
+                "usnk",
+                "network_udp_sink",
+                &[
+                    ("type", "complex"),
+                    ("addr", "127.0.0.1"),
+                    ("port", "52002"),
+                    ("header", "1"),
+                    ("payloadsize", "1464"),
+                ],
+                "1",
+            ),
+            (
+                "osrc",
+                "blocks_udp_source",
+                &[
+                    ("type", "float"),
+                    ("ipaddr", "127.0.0.1"),
+                    ("port", "52003"),
+                    ("psize", "1472"),
+                ],
+                "1",
+            ),
+            (
+                "osnk",
+                "blocks_udp_sink",
+                &[
+                    ("type", "float"),
+                    ("ipaddr", "10.0.0.2"),
+                    ("port", "52004"),
+                    ("psize", "1472"),
+                ],
+                "1",
+            ),
+            (
+                "tsrc",
+                "network_tcp_source",
+                &[
+                    ("type", "short"),
+                    ("addr", "127.0.0.1"),
+                    ("port", "52005"),
+                    ("server", "False"),
+                ],
+                "1",
+            ),
+            (
+                "tsnk",
+                "blocks_tcp_server_sink",
+                &[
+                    ("type", "short"),
+                    ("ipaddr", "127.0.0.1"),
+                    ("port", "52006"),
+                ],
+                "1",
+            ),
+            (
+                "tsnk2",
+                "network_tcp_sink",
+                &[
+                    ("type", "complex"),
+                    ("addr", "127.0.0.1"),
+                    ("port", "52007"),
+                    ("mode", "1"),
+                ],
+                "1",
+            ),
+        ],
+        &[
+            ["usrc", "0", "usnk", "0"],
+            ["usrc", "0", "tsnk2", "0"],
+            ["osrc", "0", "osnk", "0"],
+            ["tsrc", "0", "tsnk", "0"],
+        ],
+    );
+    let i = imp(&text);
+    let g = &i.graph;
+    let usrc = block(g, "usrc");
+    assert_eq!(usrc.kind, "udp_source");
+    assert_eq!(usrc.params["header"], json!("seq64"));
+    assert!(!usrc.params.contains_key("host")); // stays on loopback
+    assert!(warned(&i, &["`usrc`", "127.0.0.1"]));
+    // GNU Radio's payload size excludes the 8-byte header; foxygnal's includes it.
+    assert_eq!(block(g, "usnk").params["payload"], json!(1472));
+    assert_eq!(block(g, "osrc").params["host"], json!("127.0.0.1"));
+    assert_eq!(block(g, "osnk").params["host"], json!("10.0.0.2"));
+    let tsrc = block(g, "tsrc");
+    assert_eq!(tsrc.kind, "tcp_source");
+    assert_eq!(tsrc.params["mode"], json!("client"));
+    assert_eq!(tsrc.params["type"], json!("i16"));
+    assert_eq!(block(g, "tsnk").params["mode"], json!("server"));
+    assert_eq!(block(g, "tsnk2").params["mode"], json!("client"));
+    assert_eq!(g.connections.len(), 4);
+    resolves(g);
+}
+
+#[test]
+fn rejects_malformed_xml() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "<?xml version='1.0'?>\n<flow_graph>\n  <block>\n",
+            "not valid XML",
+        ),
+        (
+            "<flow_graph><block><key>x</key></blok></flow_graph>",
+            "not valid XML",
+        ),
+        ("<<<<", "not valid XML"),
+        ("<?xml version='1.0'?><foo/>", "<foo>"),
+        (
+            "<flow_graph><block><param><key>id</key><value>a</value></param></block></flow_graph>",
+            "no <key>",
+        ),
+        (
+            "<flow_graph><block><key>blocks_head</key><param><value>1</value></param></block>\
+             </flow_graph>",
+            "<param>",
+        ),
+        (
+            "<flow_graph><connection><source_block_id>a</source_block_id><sink_block_id>b\
+             </sink_block_id><source_key>0</source_key></connection></flow_graph>",
+            "<sink_key>",
+        ),
+        // Entity expansion is refused, not attempted.
+        (
+            "<?xml version='1.0'?><!DOCTYPE flow_graph [<!ENTITY a \"aaaaaaaaaa\">\
+             <!ENTITY b \"&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;\">]><flow_graph>&b;</flow_graph>",
+            "XML",
+        ),
+    ];
+    for (text, needle) in cases {
+        let e = import(text, &Options::default())
+            .err()
+            .unwrap_or_else(|| panic!("{text:?} imported"));
+        assert!(e.0.contains(needle), "{text:?}: {e}");
+    }
+    // Well-formed but odd: imports, with warnings rather than panics.
+    let i = imp("<flow_graph/>");
+    assert!(i.graph.blocks.is_empty());
+    let i = imp(
+        "\u{feff}<?xml version='1.0'?>\n<flow_graph><block><key>blocks_head</key>\
+         <param><key>id</key><value>h</value></param>\
+         <param><key>_coordinate</key><value>garbage</value></param>\
+         <param><key>type</key><value>float</value></param>\
+         <param><key>num_items</key><value>nope(</value></param></block>\
+         <connection><source_block_id>ghost</source_block_id><sink_block_id>h</sink_block_id>\
+         <source_key>0</source_key><sink_key>0</sink_key></connection></flow_graph>",
+    );
+    assert_eq!(block(&i.graph, "h").kind, "head");
+    assert!(warned(&i, &["`h`", "num_items"]), "{:#?}", i.warnings);
+    assert!(warned(&i, &["ghost", "doesn't exist"]), "{:#?}", i.warnings);
+}

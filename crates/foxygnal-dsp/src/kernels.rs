@@ -21,6 +21,11 @@
 //! reassociated across lanes, and FMA rounds once where `a * b + c` rounds
 //! twice.
 
+// The kernels are shaped around `chunks_exact` (with its remainder) so LLVM
+// vectorizes them; they are benchmarked that way, so the newer `as_chunks`
+// suggestion is not applied here.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 use std::sync::OnceLock;
 
 use num_complex::Complex32;
@@ -658,7 +663,9 @@ mod tests {
 
     fn cnoise(n: usize, seed: u32) -> Vec<Complex32> {
         noise(2 * n, seed)
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| Complex32::new(p[0], p[1]))
             .collect()
     }

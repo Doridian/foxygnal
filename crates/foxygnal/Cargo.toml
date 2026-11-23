@@ -12,6 +12,7 @@ clap = { version = "4.6.9", features = ["derive"] }
 foxygnal-blocks = { version = "0.1.0", path = "../foxygnal-blocks" }
 foxygnal-core = { version = "0.1.0", path = "../foxygnal-core" }
 foxygnal-grc = { version = "0.1.0", path = "../foxygnal-grc" }
+foxygnal-plugin = { version = "0.1.0", path = "../foxygnal-plugin", optional = true }
 foxygnal-sdr = { version = "0.1.0", path = "../foxygnal-sdr" }
 foxygnal-server = { version = "0.1.0", path = "../foxygnal-server" }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -24,6 +25,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 libc = "0.2.191"
 
 [features]
+default = ["plugins"]
+# Out-of-tree block plugins (WebAssembly components, via wasmtime). See
+# docs/PLUGINS.md. Adds wasmtime to the build.
+plugins = ["dep:foxygnal-plugin"]
 # Ship the browser UI inside the binary. Build it first: `cd ui && npm run build`.
 embed-ui = ["foxygnal-server/embed-ui"]
 # Audio sink/source blocks (cpal). Needs the ALSA headers on Linux.

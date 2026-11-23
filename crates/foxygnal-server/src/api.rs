@@ -220,6 +220,12 @@ const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/fm-live.fox.toml"),
     },
     Example {
+        name: "fm-autotune",
+        title: "Auto-tuning FM",
+        description: "Live FM that latches onto the strongest station in the band: a peak finder wired into the channel filter's offset setting. Uses the first device found, or a simulated FM band.",
+        toml: include_str!("../../../examples/fm-autotune.fox.toml"),
+    },
+    Example {
         name: "fm-stereo-rds",
         title: "FM stereo + RDS",
         description: "Live FM in stereo in this tab, plus the station's RDS name, RadioText and clock in a message log. Uses the first device found, or a simulated FM band.",
@@ -232,6 +238,18 @@ const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/adsb.fox.toml"),
     },
     Example {
+        name: "pocsag",
+        title: "POCSAG pager decoder",
+        description: "An SDR on a paging channel → FM demod → POCSAG decoder (512/1200/2400 Bd, numeric and alphanumeric). Needs a real receiver; set `freq` to a paging channel in your area.",
+        toml: include_str!("../../../examples/pocsag.fox.toml"),
+    },
+    Example {
+        name: "aprs",
+        title: "APRS packet decoder",
+        description: "An SDR at 144.39 MHz (144.8 MHz in Europe) → FM demod → AFSK 1200 → HDLC/AX.25 → APRS positions, messages and objects. Needs a real receiver.",
+        toml: include_str!("../../../examples/aprs.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",
@@ -242,6 +260,12 @@ const EXAMPLES: &[Example] = &[
         title: "Variables + sub-graphs",
         description: "Two copies of a tone + noise sub-graph, tuned from graph variables. Change `base` while it runs.",
         toml: include_str!("../../../examples/hier-tones.fox.toml"),
+    },
+    Example {
+        name: "add-constant",
+        title: "Constant inputs + wired settings",
+        description: "An adder with a constant on one input (change `dc` while it runs), and a slow sine wired into a gain's setting. No hardware needed.",
+        toml: include_str!("../../../examples/add-constant.fox.toml"),
     },
     Example {
         name: "noisy-tone",
@@ -417,6 +441,50 @@ pub async fn import_file(
 /// Convert an uploaded `.grc` (the body) without touching the session.
 pub async fn import_upload(body: String) -> Result<Json<Imported>, ApiError> {
     import_grc(&body, "upload.grc").map(Json)
+}
+
+// ---- GNU Radio export ---------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ExportQuery {
+    /// The graph's `.fox.toml` name, for the `.grc` name and options id.
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct Exported {
+    /// GNU Radio Companion 3.10 YAML.
+    grc: String,
+    /// What didn't convert exactly, one message each.
+    warnings: Vec<String>,
+    /// The `.grc` name to download it as.
+    name: String,
+}
+
+/// Convert a graph (the body) to a `.grc`; sub-graphs load from the project.
+pub async fn export_grc(
+    State(s): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+    Json(g): Json<GraphSpec>,
+) -> Result<Json<Exported>, ApiError> {
+    let file = q.name.unwrap_or_else(|| "flowgraph.fox.toml".into());
+    let name = foxygnal_grc::grc_name(Path::new(&file))
+        .to_string_lossy()
+        .into_owned();
+    let stem = name.strip_suffix(GRC_EXT).unwrap_or(&name).to_owned();
+    let loader = crate::graphs::ProjectGraphs {
+        dir: s.project_dir.clone(),
+    };
+    let opts = foxygnal_grc::ExportOptions {
+        loader: Some(&loader),
+        name: Some(stem),
+    };
+    let exp = foxygnal_grc::export(&g, &opts).map_err(bad_request)?;
+    Ok(Json(Exported {
+        grc: exp.grc,
+        warnings: exp.warnings,
+        name,
+    }))
 }
 
 #[cfg(test)]

@@ -65,6 +65,38 @@ impl ParamSpec {
         self
     }
 
+    /// Whether this parameter can be wired as a control input (`block.@name`):
+    /// live, and a number or a bool. See docs/ARCHITECTURE.md, "Control
+    /// inputs and constant inputs".
+    pub fn wireable(&self) -> bool {
+        self.live
+            && matches!(
+                self.kind,
+                ParamKind::Float { .. } | ParamKind::Int { .. } | ParamKind::Bool
+            )
+    }
+
+    /// The parameter value for a control input sample `x`: a float as is,
+    /// an int rounded, a bool `x > 0.5`. `None` if `x` is not finite or out
+    /// of range, or the parameter is not numeric. Never allocates.
+    pub fn control_value(&self, x: f32) -> Option<Value> {
+        if !x.is_finite() {
+            return None;
+        }
+        match &self.kind {
+            ParamKind::Float { min, max, .. } => {
+                let v = x as f64;
+                (min.is_none_or(|m| v >= m) && max.is_none_or(|m| v <= m)).then(|| Value::from(v))
+            }
+            ParamKind::Int { min, max } => {
+                let v = x.round() as i64;
+                (min.is_none_or(|m| v >= m) && max.is_none_or(|m| v <= m)).then(|| Value::from(v))
+            }
+            ParamKind::Bool => Some(Value::Bool(x > 0.5)),
+            _ => None,
+        }
+    }
+
     /// Check that `value` has the right JSON shape for this parameter.
     pub fn check(&self, value: &Value) -> Result<(), String> {
         let ok = match &self.kind {
@@ -130,6 +162,14 @@ pub struct Instance {
 
 pub type Factory = fn(&ParamReader<'_>) -> Result<Instance, Error>;
 
+/// A factory that carries state, for blocks registered at run time (plugins).
+pub type DynFactory = Box<dyn Fn(&ParamReader<'_>) -> Result<Instance, Error> + Send + Sync>;
+
+enum Make {
+    Fn(Factory),
+    Dyn(DynFactory),
+}
+
 /// A filter's magnitude response, for previews in the UI.
 #[derive(Debug, Clone, Serialize)]
 pub struct FrequencyResponse {
@@ -147,10 +187,12 @@ pub type ResponseFn = fn(&ParamReader<'_>, f64) -> Result<FrequencyResponse, Err
 
 struct Entry {
     descriptor: BlockDescriptor,
-    factory: Factory,
+    factory: Make,
     response: Option<ResponseFn>,
     tx: bool,
+    plugin: Option<&'static str>,
     keywords: &'static [&'static str],
+    hidden: bool,
 }
 
 /// A descriptor as the catalog API serves it: the descriptor plus what the
@@ -166,10 +208,17 @@ pub struct CatalogEntry<'a> {
     /// it must arm TX first.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub tx: bool,
+    /// The plugin that provides the block ([`Registry::register_plugin`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<&'a str>,
     /// Extra words the palette search matches ([`Registry::set_keywords`]),
     /// e.g. `abs` and `envelope` for a block labelled "Complex → Float".
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub keywords: &'static [&'static str],
+    /// Internal block the palette doesn't offer ([`Registry::set_hidden`]),
+    /// e.g. the constant sources that stand in for constant inputs.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 #[derive(Default)]
@@ -183,13 +232,32 @@ impl Registry {
     }
 
     pub fn register(&mut self, descriptor: BlockDescriptor, factory: Factory) {
-        self.insert(descriptor, factory, None, false);
+        self.insert(descriptor, Make::Fn(factory), None, false, None);
+    }
+
+    /// Register a block provided by a plugin loaded at run time. The catalog
+    /// names the plugin. Unlike [`Self::register`], a kind that is already
+    /// taken is an error rather than a panic: plugins can't replace blocks.
+    pub fn register_plugin(
+        &mut self,
+        descriptor: BlockDescriptor,
+        plugin: &'static str,
+        factory: DynFactory,
+    ) -> Result<(), Error> {
+        if self.entries.contains_key(descriptor.kind) {
+            return Err(Error::Other(format!(
+                "block kind `{}` is already registered",
+                descriptor.kind
+            )));
+        }
+        self.insert(descriptor, Make::Dyn(factory), None, false, Some(plugin));
+        Ok(())
     }
 
     /// Register a block that transmits RF. Servers and the CLI refuse to
     /// start a graph containing one unless TX was explicitly armed.
     pub fn register_tx(&mut self, descriptor: BlockDescriptor, factory: Factory) {
-        self.insert(descriptor, factory, None, true);
+        self.insert(descriptor, Make::Fn(factory), None, true, None);
     }
 
     /// Whether blocks of `kind` transmit (see [`Self::register_tx`]).
@@ -204,15 +272,16 @@ impl Registry {
         factory: Factory,
         response: ResponseFn,
     ) {
-        self.insert(descriptor, factory, Some(response), false);
+        self.insert(descriptor, Make::Fn(factory), Some(response), false, None);
     }
 
     fn insert(
         &mut self,
         descriptor: BlockDescriptor,
-        factory: Factory,
+        factory: Make,
         response: Option<ResponseFn>,
         tx: bool,
+        plugin: Option<&'static str>,
     ) {
         let kind = descriptor.kind;
         let prev = self.entries.insert(
@@ -222,7 +291,9 @@ impl Registry {
                 factory,
                 response,
                 tx,
+                plugin,
                 keywords: &[],
+                hidden: false,
             },
         );
         assert!(prev.is_none(), "block kind `{kind}` registered twice");
@@ -238,7 +309,9 @@ impl Registry {
             descriptor: &e.descriptor,
             response: e.response.is_some(),
             tx: e.tx,
+            plugin: e.plugin,
             keywords: e.keywords,
+            hidden: e.hidden,
         })
     }
 
@@ -251,6 +324,15 @@ impl Registry {
             .get_mut(kind)
             .unwrap_or_else(|| panic!("set_keywords: block kind `{kind}` is not registered"));
         e.keywords = keywords;
+    }
+
+    /// Mark an already registered block as internal: the catalog serves it
+    /// with `"hidden": true` and the palette leaves it out.
+    pub fn set_hidden(&mut self, kind: &str) {
+        self.entries
+            .get_mut(kind)
+            .unwrap_or_else(|| panic!("set_hidden: block kind `{kind}` is not registered"))
+            .hidden = true;
     }
 
     /// The search keywords of `kind` (empty if none or unknown).
@@ -293,10 +375,14 @@ impl Registry {
             .entries
             .get(kind)
             .ok_or_else(|| Error::UnknownBlock(kind.to_owned()))?;
-        (e.factory)(&ParamReader {
+        let p = ParamReader {
             spec: &e.descriptor,
             values: params,
-        })
+        };
+        match &e.factory {
+            Make::Fn(f) => f(&p),
+            Make::Dyn(f) => f(&p),
+        }
     }
 }
 
@@ -343,6 +429,12 @@ impl ParamReader<'_> {
         self.raw(name)?
             .as_u64()
             .ok_or_else(|| self.err(name, "expected a non-negative integer"))
+    }
+
+    pub fn i64(&self, name: &str) -> Result<i64, Error> {
+        self.raw(name)?
+            .as_i64()
+            .ok_or_else(|| self.err(name, "expected an integer"))
     }
 
     pub fn bool(&self, name: &str) -> Result<bool, Error> {

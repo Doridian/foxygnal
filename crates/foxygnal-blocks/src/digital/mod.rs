@@ -15,9 +15,14 @@
 //! queue below is preallocated, so in practice it doesn't.
 
 mod adsb;
+mod afsk;
+pub mod ax25;
+pub mod hdlc;
 mod modem;
 mod packet;
+pub mod pocsag;
 mod sync;
+mod text;
 
 use std::time::Duration;
 
@@ -30,6 +35,9 @@ pub fn register(r: &mut Registry) {
     modem::register(r);
     packet::register(r);
     adsb::register(r);
+    pocsag::register(r);
+    afsk::register(r);
+    hdlc::register(r);
 }
 
 /// Text (or packet bytes) waiting to go out on a `u8` port, one message at a

@@ -1,5 +1,5 @@
-//! Import GNU Radio Companion flowgraphs (`.grc`, the YAML format of GNU
-//! Radio 3.8 and later) as foxygnal graphs.
+//! Import GNU Radio Companion flowgraphs (`.grc`: the YAML format of GNU
+//! Radio 3.8 and later, and the XML format of 3.7) as foxygnal graphs.
 //!
 //! [`import`] turns the file into a [`GraphSpec`] plus a list of warnings:
 //! variables become graph `[vars]` (their Python expressions translated to
@@ -8,9 +8,17 @@
 //! positions, disabled blocks are skipped and bypassed ones wired through.
 //! Anything that can't be mapped is named in a warning; nothing is dropped
 //! silently.
+//!
+//! [`export`] goes the other way: a graph to GNU Radio Companion 3.10 YAML,
+//! with blocks that have no GNU Radio equivalent written as placeholder
+//! embedded Python blocks that [`import`] restores (see `export/`).
 
+mod export;
 mod map;
 pub mod py;
+mod xml;
+
+pub use export::{Export, ExportOptions, export, grc_name};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -54,7 +62,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+pub(crate) enum State {
     Enabled,
     Disabled,
     Bypassed,
@@ -67,23 +75,25 @@ pub(crate) struct GrcBlock {
     pub id: String,
     /// Parameter values as written (Python expressions).
     pub params: BTreeMap<String, String>,
-    state: State,
-    coord: Option<(f64, f64)>,
+    pub state: State,
+    pub coord: Option<(f64, f64)>,
 }
 
+/// A connection; ports are indices for streams, names for message ports.
 #[derive(Debug, Clone)]
-struct GrcConn {
-    src: String,
-    src_port: String,
-    dst: String,
-    dst_port: String,
+pub(crate) struct GrcConn {
+    pub src: String,
+    pub src_port: String,
+    pub dst: String,
+    pub dst_port: String,
 }
 
-struct GrcFile {
-    title: Option<String>,
-    generate: Option<String>,
-    blocks: Vec<GrcBlock>,
-    connections: Vec<GrcConn>,
+/// The flowgraph as read from either format, before mapping.
+pub(crate) struct GrcFile {
+    pub title: Option<String>,
+    pub generate: Option<String>,
+    pub blocks: Vec<GrcBlock>,
+    pub connections: Vec<GrcConn>,
 }
 
 /// A YAML scalar as the Python text GRC wrote.
@@ -100,7 +110,18 @@ fn scalar(y: &Yaml) -> String {
     }
 }
 
+/// Read either format: GRC 3.7 files are XML (they start with an XML
+/// declaration or the `<flow_graph>` element), later ones YAML.
 fn parse(text: &str) -> Result<GrcFile, Error> {
+    let body = text.trim_start_matches('\u{feff}').trim_start();
+    if body.starts_with('<') {
+        xml::parse(body)
+    } else {
+        parse_yaml(text)
+    }
+}
+
+fn parse_yaml(text: &str) -> Result<GrcFile, Error> {
     let docs =
         YamlLoader::load_from_str(text).map_err(|e| Error(format!("not valid YAML: {e}")))?;
     let doc = docs
@@ -109,8 +130,8 @@ fn parse(text: &str) -> Result<GrcFile, Error> {
         .ok_or_else(|| Error("the file is empty".into()))?;
     if !doc.is_hash() || doc["blocks"].is_badvalue() && doc["options"].is_badvalue() {
         return Err(Error(
-            "not a GNU Radio Companion flowgraph (no `options` or `blocks`); only the YAML \
-             format of GNU Radio 3.8 and later can be imported"
+            "not a GNU Radio Companion flowgraph (no `options` or `blocks`): expected the \
+             YAML format of GNU Radio 3.8 and later, or the XML of 3.7"
                 .into(),
         ));
     }
@@ -189,6 +210,13 @@ fn variable_param(id: &str) -> Option<&'static str> {
         | "qtgui_check_box"
         | "variable_qtgui_push_button"
         | "variable_qtgui_toggle_button_msg"
+        | "variable_qtgui_label"
+        // GNU Radio 3.7's WX GUI widgets.
+        | "variable_slider"
+        | "variable_text_box"
+        | "variable_chooser"
+        | "variable_check_box"
+        | "variable_static_text"
         | "parameter" => "value",
         _ => return None,
     })
@@ -334,7 +362,11 @@ const SCALE: f64 = 1.25;
 pub fn import(text: &str, opts: &Options) -> Result<Import, Error> {
     let file = parse(text)?;
     let mut warnings = Vec::new();
-    if file.generate.as_deref() == Some("hb") {
+    if file
+        .generate
+        .as_deref()
+        .is_some_and(|g| g.starts_with("hb"))
+    {
         warnings.push(
             "this .grc is a hierarchical block: its pad_source / pad_sink blocks aren't \
              converted to [export] ports"
@@ -495,6 +527,80 @@ pub fn import(text: &str, opts: &Options) -> Result<Import, Error> {
         }
     }
 
+    // A Quadrature Demod feeding only an FM Deemphasis is foxygnal's FM
+    // demodulator with de-emphasis (what `foxygnal export` writes).
+    let mut deemph: HashMap<&str, f64> = HashMap::new();
+    for b in file
+        .blocks
+        .iter()
+        .filter(|b| b.id == "analog_fm_deemph" && b.state == State::Enabled)
+    {
+        let ins: Vec<&GrcConn> = file
+            .connections
+            .iter()
+            .filter(|c| c.dst == b.name)
+            .collect();
+        let [c] = ins.as_slice() else { continue };
+        let from_demod = enabled
+            .get(c.src.as_str())
+            .is_some_and(|s| s.id == "analog_quadrature_demod_cf" && s.state == State::Enabled);
+        let only_here = file
+            .connections
+            .iter()
+            .filter(|x| x.src == c.src)
+            .all(|x| x.dst == b.name);
+        let tau = match b.params.get("tau").map(|t| Py::parse(t)) {
+            None => Some(75e-6),
+            Some(Ok(e)) => vars.eval(&e).ok().and_then(|v| v.as_f64()),
+            Some(Err(_)) => None,
+        };
+        if let (true, true, Some(tau)) = (from_demod, only_here, tau)
+            && !deemph.contains_key(c.src.as_str())
+        {
+            deemph.insert(c.src.as_str(), tau);
+            alias.insert(
+                (b.name.clone(), "0".into()),
+                (c.src.clone(), c.src_port.clone()),
+            );
+            absorbed.insert(&b.name);
+        }
+    }
+
+    // A Constant Source becomes a constant on each input it feeds
+    // (`const_inputs`, what `foxygnal export` writes them from).
+    let mut consts: HashMap<&str, serde_json::Value> = HashMap::new();
+    for b in file
+        .blocks
+        .iter()
+        .filter(|b| b.id == "analog_const_source_x" && b.state == State::Enabled)
+    {
+        let num = |e: &Py| vars.eval(e).ok().and_then(|v| v.as_f64());
+        let value = match b.params.get("const").map(|t| Py::parse(t)) {
+            None => Some(json!(0)),
+            Some(Ok(Py::Call(f, args, kw))) if f == "complex" && kw.is_empty() => {
+                match args.as_slice() {
+                    [re] => num(re).map(|re| json!([re, 0])),
+                    [re, im] => num(re).zip(num(im)).map(|(re, im)| json!([re, im])),
+                    _ => None,
+                }
+            }
+            Some(Ok(e)) => num(&e).map(|v| json!(v)),
+            Some(Err(_)) => None,
+        };
+        let feeds_something = file.connections.iter().any(|c| c.src == b.name);
+        match value {
+            Some(v) if feeds_something => {
+                consts.insert(&b.name, v);
+                absorbed.insert(&b.name);
+            }
+            _ => warnings.push(format!(
+                "constant source `{}` has a value that doesn't evaluate, or feeds nothing: \
+                 left out",
+                b.name
+            )),
+        }
+    }
+
     let mut mapped: HashMap<&str, map::Out> = HashMap::new();
     let mut unmapped: HashSet<&str> = HashSet::new();
     for b in &file.blocks {
@@ -517,7 +623,20 @@ pub fn import(text: &str, opts: &Options) -> Result<Import, Error> {
         let used_out = ports(|c| (&c.src, &c.src_port));
         let mut cx = map::Cx::new(b, &vars, &mut warnings, used_in, used_out);
         match map::map(&mut cx, &cfg) {
-            map::Mapped::Nodes(out) => {
+            map::Mapped::Nodes(mut out) => {
+                if let Some(&tau) = deemph.get(b.name.as_str())
+                    && let Some(n) = out.nodes.first_mut()
+                {
+                    let pick = if tau < 62.5e-6 { "50us" } else { "75us" };
+                    if (tau - 50e-6).abs() > 1e-7 && (tau - 75e-6).abs() > 1e-7 {
+                        cx.warn(format!(
+                            "de-emphasis {} µs (the FM Deemphasis after it) isn't available; \
+                             using {pick}",
+                            py::fmt_num(tau * 1e6)
+                        ));
+                    }
+                    n.params.insert("deemphasis".into(), json!(pick));
+                }
                 mapped.insert(&b.name, out);
             }
             map::Mapped::Skip => {}
@@ -567,6 +686,36 @@ pub fn import(text: &str, opts: &Options) -> Result<Import, Error> {
         // Connections into a bypassed block or a virtual sink are carried by
         // the alias; those out of them are resolved below.
         if absorbed.contains(c.dst.as_str()) {
+            continue;
+        }
+        if let Some(v) = consts.get(c.src.as_str()) {
+            let to = c
+                .dst_port
+                .parse::<usize>()
+                .ok()
+                .and_then(|dp| mapped.get(c.dst.as_str())?.inputs.get(dp).cloned())
+                .unwrap_or_default();
+            for ep in &to {
+                let Ok(e) = foxygnal_core::graph::parse_endpoint(ep) else {
+                    continue;
+                };
+                if let Some(blk) = graph.blocks.iter_mut().find(|b| b.id == e.block) {
+                    let v = match (v, blk.kind.as_str()) {
+                        // `[re, 0]` only matters on a complex input.
+                        (serde_json::Value::Array(xs), _) if xs.get(1) == Some(&json!(0.0)) => {
+                            xs[0].clone()
+                        }
+                        _ => v.clone(),
+                    };
+                    blk.const_inputs.insert(e.port.to_owned(), v);
+                }
+            }
+            if to.is_empty() && !unmapped.contains(c.dst.as_str()) {
+                warnings.push(format!(
+                    "constant `{}` → {}:{} left out: that input has no foxygnal equivalent",
+                    c.src, c.dst, c.dst_port
+                ));
+            }
             continue;
         }
         let (src, sport) = resolve(&c.src, &c.src_port);
@@ -647,6 +796,7 @@ pub(crate) fn node(id: String, kind: &str, params: foxygnal_core::Params) -> Blo
         id,
         kind: kind.to_owned(),
         params,
+        const_inputs: Default::default(),
         ui: BTreeMap::new(),
     }
 }

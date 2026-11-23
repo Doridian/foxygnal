@@ -61,10 +61,9 @@ fn presented_token(headers: &HeaderMap) -> Option<&str> {
     if let Some(v) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
+        && let Some(t) = v.strip_prefix("Bearer ")
     {
-        if let Some(t) = v.strip_prefix("Bearer ") {
-            return Some(t.trim());
-        }
+        return Some(t.trim());
     }
     headers
         .get_all(header::COOKIE)
