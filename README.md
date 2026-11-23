@@ -48,6 +48,22 @@ header, with slant correction) draws pictures in the Image instrument as they ar
 saves each one as a PNG with an Image Sink. Templates: "SSTV pictures" (the ISS on 145.8 MHz,
 `examples/sstv.fox.toml`) and "SSTV from a recording" (a WAV file, `examples/sstv-wav.fox.toml`).
 
+**AI assistants (MCP).** foxygnal is also a [Model Context Protocol](https://modelcontextprotocol.io)
+server. An assistant can look up blocks, build and check graphs, run them, and measure what's
+on a wire: the signals in a spectrum, levels, decoded messages, pictures. With
+`foxygnal serve` running, point it at `http://127.0.0.1:7355/api/mcp`. It then works on the
+graph open in your browser: its edits appear live, and Undo takes them back. Or let the
+assistant start `foxygnal mcp --project-dir <dir>` itself (stdio, with a session of its
+own). For example, with Claude Code:
+
+```sh
+claude mcp add --transport http foxygnal http://127.0.0.1:7355/api/mcp   # shares the browser's graph
+claude mcp add foxygnal -- foxygnal mcp --project-dir ~/radio            # headless
+```
+
+Nothing over MCP can transmit: a graph that transmits must be armed by a person in the
+browser. See "Assistant: the MCP server" in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 **Settings ⇄ inputs.** Any live number setting can be driven by a wire (`to = "channel.@offset"`;
 "⇢ input" in the inspector), and any stream input can be a constant (`const_inputs = { b = 1.5 }`).
 The "Auto-tuning FM" template wires a peak finder into a channel filter's offset, so it latches

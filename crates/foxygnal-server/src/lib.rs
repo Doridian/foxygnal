@@ -3,6 +3,7 @@
 
 mod api;
 pub mod graphs;
+pub mod mcp;
 pub mod probe;
 pub mod record;
 mod security;
@@ -56,10 +57,12 @@ pub struct Config {
 pub(crate) struct AppState {
     pub session: Arc<Session>,
     pub project_dir: PathBuf,
+    pub mcp: Arc<mcp::Mcp>,
 }
 
 pub fn router(cfg: &Config, session: Arc<Session>) -> Router {
     let state = Arc::new(AppState {
+        mcp: mcp::Mcp::new(session.clone(), cfg.project_dir.clone()),
         session,
         project_dir: cfg.project_dir.clone(),
     });
@@ -85,6 +88,10 @@ pub fn router(cfg: &Config, session: Arc<Session>) -> Router {
             get(record::get).delete(record::delete),
         )
         .route("/ws", get(ws::upgrade))
+        .route(
+            "/mcp",
+            post(mcp::http).get(mcp::http_other).delete(mcp::http_other),
+        )
         .with_state(state);
     let app = Router::new().nest("/api", api);
     let app = match &cfg.ui {

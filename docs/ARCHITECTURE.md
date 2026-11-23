@@ -776,6 +776,75 @@ non-derived variable, `live` when changing it only changes live params inside). 
 don't resolve are left out. Not done yet: watching inner wires of a hierarchical block,
 units/help per variable, and string (path) variables.
 
+## Assistant: the MCP server (M10)
+
+An AI assistant can build graphs, run them and look at signals through a
+[Model Context Protocol](https://modelcontextprotocol.io) server (`server/src/mcp/`). It
+uses the same session as the browser, not a parallel API, so an assistant's work is
+ordinary edits that a person sees and can undo.
+
+- **Transports.**
+  - Streamable HTTP at `POST /api/mcp` on `foxygnal serve`: the browser's session.
+    Answers are plain JSON (no server-sent events, no MCP sessions). A notification gets
+    202, and `GET` / `DELETE` get 405.
+  - `foxygnal mcp`: newline-delimited JSON-RPC on stdin/stdout with a headless session of
+    its own. Requests are handled in order. Logs go to stderr. On Unix, file descriptor 1
+    is pointed at stderr once the real stdout is duplicated for the protocol, so a Message
+    Log with "print to stdout" can't corrupt it.
+  - Protocol versions 2024-11-05 through 2025-11-25; a client asking for another one gets
+    the newest. Batches are accepted.
+- **Tools** (`mcp/tools.rs`), grouped by job:
+  - **Catalog:** `list_blocks` (word search over kind, label, help and keywords),
+    `describe_block` (the descriptor, marking `wireable` settings), `list_examples` /
+    `get_example`.
+  - **Graphs:** `get_graph`, `set_graph`, `check_graph`, and `edit_graph`, which applies
+    operations all or nothing: add or remove blocks, set settings (unknown names are refused,
+    listing the real ones), connect and disconnect (a port may be left out if the block has
+    only one), constant inputs, variables. Every graph tool answers with a **check report**:
+    - whether the graph builds, or the first error, pinned like in the editor
+    - the sample rate and centre frequency on every wire
+    - unconnected inputs (they only fail at `run` otherwise)
+    - transmitting blocks
+    - the run state, including whether edits are waiting for a restart.
+  - **Files:** `list_files` / `open_file` (`.grc` imports) / `save_file` (project directory
+    only, same file-name rules as the REST API), `import_grc` / `export_grc`.
+  - **Running:** `run` (never arms TX), `stop`, `status` (errors, warnings, CPU per block,
+    throughput and buffer fill per wire over half a second).
+  - **Signals:** `measure` (a spectrum, level or messages summary), `watch` / `read_watch` /
+    `stop_watch` (a decoder's text lines or pictures over time; pictures come back as PNG
+    image content), `list_devices`, and `record` (a SigMF capture of n seconds).
+- **Probes.** MCP is one more client of the probe hub (client id `u64::MAX`). Its probes are
+  ordinary probes: they bind to each new run, rewind to the history the ring holds, and
+  never slow the graph down. Frames come back to `mcp/probes.rs` and are folded per probe:
+  - spectra averaged in linear power
+  - meter readings accumulated
+  - text lines kept (up to 5000)
+  - picture rows assembled (the last 4 pictures).
+
+  Summaries are built from that, never raw samples:
+  - The noise floor is the median bin.
+  - A *signal* is a stretch of bins more than 6 dB above the floor, bridging gaps of up to
+    3 bins, whose strongest bin clears `min_snr_db`. So an FM broadcast station is one
+    signal 200 kHz wide, not a carrier plus sideband lumps.
+  - Only bins within 100 dB of the strongest count; below that, a noiseless digital signal
+    has float rounding spurs.
+  - Each signal reports its strongest point (a parabola through three bins), its
+    power-weighted centre, its bandwidth and its level.
+  - A 48-slice outline gives the overall shape.
+- **The editor.** A graph changed over MCP is sent to tabs with `by: "assistant"`. The editor
+  puts the previous graph on its undo stack and shows a toast with an Undo button, once per
+  burst of edits.
+- **Resources:** `foxygnal://graph` (the open graph), `foxygnal://blocks` (the catalog),
+  `foxygnal://docs/*` (README, architecture, blocks, hardware, GRC, roadmap) and
+  `foxygnal://examples/*`.
+- **Prompts:** `build_receiver`, `find_signals`, `decode_recording`.
+- **Limits:**
+  - Nothing over MCP can arm TX: a graph with a transmitting block is refused like any
+    unarmed run, and the check report says so.
+  - The file tools stay in the project directory. A graph's own settings (a File Sink's
+    path) work as in the editor.
+  - `/api/mcp` is behind the same Host / Origin / token checks as the rest of the API.
+
 ## Security
 
 A local server that can write files (file sink) and later transmit RF needs care:
@@ -790,6 +859,8 @@ A local server that can write files (file sink) and later transmit RF needs care
   `/?token=…` sets an `HttpOnly; SameSite=Strict` cookie; API clients can send
   `Authorization: Bearer …`.
   Recommend a reverse proxy with TLS.
+- **MCP** (`/api/mcp`, `foxygnal mcp`) can edit and run graphs but never arm TX, and its file
+  tools stay in the project directory. See "Assistant: the MCP server".
 - **Transmit is opt-in twice**: per server (`--allow-tx`) and per run (arm TX, confirmed in
   a dialog); TX blocks also refuse to start unless armed, and the UI shows a red TX indicator
   while armed. See "TX arming". The user is responsible for staying legal.

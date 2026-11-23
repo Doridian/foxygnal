@@ -182,16 +182,27 @@ pub fn write_png(
 ) -> Result<(), Error> {
     let err = |e: &dyn std::fmt::Display| Error::Other(format!("{}: {e}", path.display()));
     let file = File::create(path).map_err(|e| err(&e))?;
-    let mut enc = png::Encoder::new(BufWriter::new(file), width, height);
+    encode_png(BufWriter::new(file), width, height, channels, pixels).map_err(|e| err(&e))
+}
+
+/// Encode 8-bit grey (1 channel) or RGB (3) pixels as PNG into `out`.
+pub fn encode_png<W: std::io::Write>(
+    out: W,
+    width: u32,
+    height: u32,
+    channels: u8,
+    pixels: &[u8],
+) -> Result<(), png::EncodingError> {
+    let mut enc = png::Encoder::new(out, width, height);
     enc.set_color(if channels == 3 {
         png::ColorType::Rgb
     } else {
         png::ColorType::Grayscale
     });
     enc.set_depth(png::BitDepth::Eight);
-    let mut w = enc.write_header().map_err(|e| err(&e))?;
-    w.write_image_data(pixels).map_err(|e| err(&e))?;
-    w.finish().map_err(|e| err(&e))
+    let mut w = enc.write_header()?;
+    w.write_image_data(pixels)?;
+    w.finish()
 }
 
 /// `YYYYMMDD-HHMMSS` in UTC.

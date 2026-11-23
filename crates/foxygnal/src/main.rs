@@ -118,6 +118,15 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Model Context Protocol server on stdin/stdout, for AI assistants that
+    /// start their tools as subprocesses. It has a session of its own; to
+    /// share the browser's session instead, point the assistant at
+    /// `http://127.0.0.1:7355/api/mcp` on a running `foxygnal serve`.
+    Mcp {
+        /// Where graphs are listed, opened and saved, and recordings go.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+    },
     /// List available blocks.
     Blocks {
         #[arg(long)]
@@ -126,12 +135,18 @@ enum Cmd {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
     let cli = Cli::parse();
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    if matches!(cli.cmd, Cmd::Mcp { .. }) {
+        // stdout carries the protocol: logs go to stderr.
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
     // The DSP runs on its own threads, so tokio only needs a few: one per
     // core (the default) would be 4 idle threads on a Pi, 32 on a big desktop.
     let rt = match &cli.cmd {
@@ -139,11 +154,40 @@ fn main() -> anyhow::Result<()> {
             .worker_threads((*threads).max(1))
             .enable_all()
             .build()?,
+        Cmd::Mcp { .. } => tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?,
         _ => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?,
     };
     rt.block_on(run(cli))
+}
+
+/// Where MCP messages go. Anything else that writes to stdout (a Message
+/// Log with "print to stdout", a plugin) would corrupt the protocol, so on
+/// Unix the real stdout is kept for MCP alone and file descriptor 1 is
+/// pointed at stderr.
+fn protocol_stdout() -> anyhow::Result<Box<dyn std::io::Write + Send>> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::FromRawFd;
+        // SAFETY: plain descriptor juggling at startup, before any thread
+        // writes to stdout. `dup` gives us a new descriptor we own.
+        unsafe {
+            let fd = libc::dup(1);
+            if fd < 0 || libc::dup2(2, 1) < 0 {
+                bail!(
+                    "can't set up stdout for MCP: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            Ok(Box::new(std::fs::File::from_raw_fd(fd)))
+        }
+    }
+    #[cfg(not(unix))]
+    Ok(Box::new(std::io::stdout()))
 }
 
 /// Read a graph file and resolve it (sub-graphs sit next to the file).
@@ -169,7 +213,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let mut registry = foxygnal_blocks::registry();
     // Plugins come from the project (serve) or the graph's directory.
     let base = match &cli.cmd {
-        Cmd::Serve { project_dir, .. } => project_dir.clone(),
+        Cmd::Serve { project_dir, .. } | Cmd::Mcp { project_dir } => project_dir.clone(),
         Cmd::Run { graph, .. } | Cmd::Bench { graph, .. } => {
             graph.parent().map(PathBuf::from).unwrap_or_default()
         }
@@ -220,6 +264,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 allow_tx,
             };
             foxygnal_server::serve(cfg, registry).await?;
+        }
+        Cmd::Mcp { project_dir } => {
+            if !project_dir.is_dir() {
+                bail!("project dir {} does not exist", project_dir.display());
+            }
+            let out = protocol_stdout()?;
+            let session =
+                foxygnal_server::session::Session::new(Arc::new(registry), project_dir.clone());
+            let mcp = foxygnal_server::mcp::Mcp::new(session.clone(), project_dir);
+            tracing::info!("foxygnal MCP server on stdio");
+            let input = tokio::io::BufReader::new(tokio::io::stdin());
+            foxygnal_server::mcp::serve_stdio(mcp, input, out).await?;
+            session.stop_and_wait().await;
         }
         Cmd::Run { graph, arm_tx } => {
             let resolved = load(&graph, &registry)?;

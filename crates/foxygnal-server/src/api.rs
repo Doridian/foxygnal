@@ -156,6 +156,11 @@ static DISCOVERING: Mutex<Vec<&str>> = Mutex::new(Vec::new());
 /// with a timeout, so a slow or stuck one can't hang the request; its error
 /// (library not installed, timed out, …) comes back in its entry.
 pub async fn devices() -> Json<Vec<Discovery>> {
+    Json(discover().await)
+}
+
+/// Ask every driver for its devices (each with a timeout), in parallel.
+pub(crate) async fn discover() -> Vec<Discovery> {
     let lock = || DISCOVERING.lock().unwrap_or_else(|e| e.into_inner());
     let tasks = foxygnal_sdr::drivers().iter().map(|d| {
         let (driver, label) = (d.name(), d.label());
@@ -194,19 +199,19 @@ pub async fn devices() -> Json<Vec<Discovery>> {
             }
         }
     });
-    Json(futures_util::future::join_all(tasks).await)
+    futures_util::future::join_all(tasks).await
 }
 
 // ---- Examples -------------------------------------------------------------
 
-struct Example {
-    name: &'static str,
-    title: &'static str,
-    description: &'static str,
-    toml: &'static str,
+pub(crate) struct Example {
+    pub name: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub toml: &'static str,
 }
 
-const EXAMPLES: &[Example] = &[
+pub(crate) const EXAMPLES: &[Example] = &[
     Example {
         name: "two-tones",
         title: "Two tones + noise → instruments",
@@ -321,8 +326,13 @@ pub async fn example(UrlPath(name): UrlPath<String>) -> Result<Json<GraphSpec>, 
 
 // ---- Project directory ----------------------------------------------------
 
-const EXT: &str = ".fox.toml";
-const GRC_EXT: &str = ".grc";
+pub(crate) const EXT: &str = ".fox.toml";
+pub(crate) const GRC_EXT: &str = ".grc";
+
+/// [`project_file_ext`] for code outside the HTTP handlers (MCP).
+pub(crate) fn project_path(dir: &Path, name: &str, ext: &str) -> Result<PathBuf, String> {
+    project_file_ext(dir, name, ext).map_err(|e| e.1)
+}
 
 /// A file name in the project dir: no paths, no hidden files, `.fox.toml`.
 fn project_file(dir: &Path, name: &str) -> Result<PathBuf, ApiError> {

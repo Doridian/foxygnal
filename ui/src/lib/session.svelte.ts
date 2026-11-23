@@ -6,7 +6,7 @@ import { toast } from './toast.svelte';
 import { graphView } from './graphview.svelte';
 import { decodeFrame, type Frame } from './frames';
 
-export type GraphHandler = (graph: GraphSpec, name: string | null, kind: 'hello' | 'remote') => void;
+export type GraphHandler = (graph: GraphSpec, name: string | null, kind: 'hello' | 'remote' | 'assistant') => void;
 export type FrameHandler = (frame: Frame) => void;
 
 interface ProbeEntry {
@@ -91,7 +91,7 @@ export class Session {
         this.#onGraph(ev.graph, ev.name, 'hello');
         break;
       case 'graph':
-        if (ev.from !== this.#client) this.#onGraph(ev.graph, ev.name, 'remote');
+        if (ev.from !== this.#client) this.#onGraph(ev.graph, ev.name, ev.by === 'assistant' ? 'assistant' : 'remote');
         break;
       case 'status': {
         const { op: _, ...status } = ev;

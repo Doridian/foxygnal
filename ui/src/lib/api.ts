@@ -219,7 +219,7 @@ export interface RecordingInfo {
 
 export type ServerEvent =
   | { op: 'hello'; client: number; graph: GraphSpec; name: string | null; version: number; status: Status; meta: Meta; allow_tx: boolean; recordings?: RecordStatus[] }
-  | { op: 'graph'; graph: GraphSpec; name: string | null; version: number; from: number }
+  | { op: 'graph'; graph: GraphSpec; name: string | null; version: number; from: number; /** `assistant` for edits over MCP. */ by?: string }
   | ({ op: 'status' } & Status)
   | ({ op: 'stats' } & Stats)
   | ({ op: 'meta' } & Meta)

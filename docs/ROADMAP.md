@@ -141,23 +141,24 @@ Goal: watch an SSTV picture being drawn in the browser, from the ISS or a record
 Goal: ask an AI assistant "build me a receiver for X" or "what is on this wire?" and have it
 do the work through the same engine the UI uses.
 
-- [ ] `foxygnal mcp`: a Model Context Protocol server over stdio (for desktop assistants and
+- [x] `foxygnal mcp`: a Model Context Protocol server over stdio (for desktop assistants and
       coding agents), plus the same tools at `/api/mcp` (streamable HTTP) on a running
       `foxygnal serve`, under the same loopback, Host/Origin and token rules as the rest of
       the API
-- [ ] Tools for building graphs: list and search blocks (descriptors, help text, ports,
-      settings), list examples and templates, read, validate (the same type-checked errors
-      as the editor, naming both endpoints), create and edit `.fox.toml` graphs, insert
-      converters, import and export `.grc`
-- [ ] Tools for signals: run and stop, change live settings, read per-block and per-wire stats,
+- [x] Tools for building graphs: list and search blocks (descriptors, help text, ports,
+      settings), list examples and templates, read, check (the same type-checked errors
+      as the editor, naming both endpoints, plus unconnected inputs), create and edit
+      `.fox.toml` graphs, import and export `.grc`. Not yet: inserting converters
+      automatically (the error names both types)
+- [x] Tools for signals: run and stop, change live settings, read per-block and per-wire stats,
       attach a probe and get a *summary* rather than raw samples (strongest peaks and their
-      levels, noise floor, occupied bandwidth, level meter, constellation spread), read decoded
-      messages, fetch the current picture as a PNG, list SDR devices, record a short SigMF
-      capture
-- [ ] Resources: the block catalog, docs, the open graph; prompts for common jobs ("find
-      signals in this band", "decode this recording")
-- [ ] Safety: transmitting is never possible over MCP: TX blocks stay disarmed until a person
-      arms them in the UI. File access stays inside the project directory. Edits made through
+      levels, noise floor, occupied bandwidth, level meter), read decoded messages, fetch the
+      current picture as a PNG, list SDR devices, record a short SigMF capture. Not yet: a
+      constellation summary (spread, symbol rate)
+- [x] Resources: the block catalog, docs, the open graph, examples; prompts for common jobs
+      ("build a receiver", "find signals in this band", "decode this recording")
+- [x] Safety: transmitting is never possible over MCP: TX blocks stay disarmed until a person
+      arms them in the UI. File tools stay inside the project directory. Edits made through
       MCP show up live in an open editor and can be undone there
 
 ## M11: Everyday decoders

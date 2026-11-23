@@ -132,6 +132,10 @@ pub enum Event {
         version: u64,
         /// The client that made the change.
         from: u64,
+        /// Who made the change, if not a person in a browser tab: `"assistant"`
+        /// for edits over MCP. Editors put such changes on their undo stack.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        by: Option<&'static str>,
     },
     Status(Status),
     /// Per-block CPU and per-wire throughput of the running graph.
@@ -530,6 +534,28 @@ impl Session {
         self.lock().graph.clone()
     }
 
+    /// The run status right now.
+    pub fn status_now(&self) -> Status {
+        Self::status(&self.lock())
+    }
+
+    /// Stream metadata of every wire of the current graph (and why it
+    /// couldn't be worked out, if it couldn't).
+    pub fn meta_now(&self) -> Meta {
+        self.lock().meta.clone()
+    }
+
+    /// Build and configure `graph` without touching the session: its wires'
+    /// metadata, or the first error, as [`Self::meta_now`] would report it.
+    pub fn check(&self, graph: &GraphSpec) -> Meta {
+        Self::meta_of(&self.build(graph))
+    }
+
+    /// Server events (JSON), for code that waits on one (MCP recordings).
+    pub fn events(&self) -> broadcast::Receiver<Arc<str>> {
+        self.events.subscribe()
+    }
+
     pub fn name(&self) -> Option<String> {
         self.lock().name.clone()
     }
@@ -554,6 +580,17 @@ impl Session {
     /// Replace the graph. While running, changed live parameters apply
     /// immediately; any other change marks the run as stale.
     pub fn set_graph(&self, client: u64, graph: GraphSpec, name: Option<String>) {
+        self.set_graph_by(client, graph, name, None);
+    }
+
+    /// [`Self::set_graph`], saying who made the change (see [`Event::Graph`]).
+    pub fn set_graph_by(
+        &self,
+        client: u64,
+        graph: GraphSpec,
+        name: Option<String>,
+        by: Option<&'static str>,
+    ) {
         let built = self.build(&graph);
         let mut inner = self.lock();
         let stale_before = inner.stale;
@@ -586,6 +623,7 @@ impl Session {
             name: inner.name.clone(),
             version: inner.version,
             from: client,
+            by,
         });
         if inner.stale != stale_before || inner.run.is_none() {
             self.emit(&Event::Status(Self::status(&inner)));

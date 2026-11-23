@@ -116,10 +116,24 @@
     return JSON.stringify(toSpec(r.nodes, r.edges, extras));
   }
 
-  function onGraph(graph: GraphSpec, name: string | null, kind: 'hello' | 'remote') {
+  /** When the assistant last got a toast, so a burst of its edits gets one. */
+  let assistantToastAt = -Infinity;
+
+  function onGraph(graph: GraphSpec, name: string | null, kind: 'hello' | 'remote' | 'assistant') {
     if (!descriptors.length) {
       pendingGraph = [graph, name, kind];
       return;
+    }
+    if (kind === 'assistant' && helloSeen) {
+      // An AI assistant (over MCP) changed the graph: undoable like our own
+      // edits. (Not `commit()` first: that would send our older graph after
+      // the assistant's and undo its change.)
+      undoStack.push(synced);
+      if (undoStack.length > 200) undoStack.shift();
+      redoStack = [];
+      const now = performance.now();
+      if (now - assistantToastAt > 5000) toast('The assistant changed the graph.', 'info', [{ label: 'Undo', run: undo }]);
+      assistantToastAt = now;
     }
     if (kind === 'hello' && helloSeen && graph.block.length === 0 && nodes.length > 0) {
       // The engine restarted and lost the graph: give it ours back.
