@@ -1,0 +1,14 @@
+[package]
+name = "foxygnal-mpeg2"
+description = "A compact MPEG-1/MPEG-2 video decoder (main profile, 4:2:0) for the browser's Video instrument, built to WebAssembly"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No dependencies: the WebAssembly build (scripts/build-mpeg2-wasm.sh) imports
+# nothing from its host.
+
+[lints]
+workspace = true
