@@ -8,11 +8,15 @@ repository.workspace = true
 
 [dependencies]
 bytemuck = "1.25.2"
+crossbeam-deque = "0.8.8"
 num-complex = { version = "0.4.6", features = ["bytemuck", "serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 thiserror = "2.0.21"
 toml = { version = "1.2.2", features = ["preserve_order"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
 
 [lints]
 workspace = true

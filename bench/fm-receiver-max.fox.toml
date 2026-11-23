@@ -1,0 +1,64 @@
+# Benchmark: raw throughput of the FM receiver chain.
+#
+# The same chain as fm-receiver-sim, fed by a generated c32 tone with nothing
+# pacing it, so it runs as fast as the slowest block allows. The `items/s` of
+# `src.out` is the input rate the receiver could sustain; `×realtime` says how
+# many 2.4 MS/s receivers' worth that is. The generator's own cost shows up as
+# the `src` block (it computes a sine per sample, so it is not free).
+#
+#   tone ──xlate ÷10──▶ FM demod ──▶ resample 48k ──▶ null
+#
+#   foxygnal bench bench/fm-receiver-max.fox.toml
+#
+# `foxygnal bench --max bench/fm-receiver-sim.fox.toml` gives the same graph
+# (--max swaps an SDR source for an unpaced generator and bypasses throttles).
+
+[vars]
+samp_rate = "2.4M"
+audio_rate = "48k"
+
+[[block]]
+id = "src"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = "100k", amplitude = 0.5, sample_rate = "$samp_rate" }
+ui = { x = 40, y = 120 }
+
+[[block]]
+id = "channel"
+kind = "freq_xlating_fir"
+params = { offset = "250k", cutoff = 100000.0, transition = 40000.0, decimation = 10, window = "hamming" }
+ui = { x = 290, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "fm_demod"
+params = { deviation = 75000.0, deemphasis = "50us" }
+ui = { x = 540, y = 120 }
+
+[[block]]
+id = "resample"
+kind = "rational_resampler"
+params = { type = "f32", output_rate = "$audio_rate" }
+ui = { x = 790, y = 120 }
+
+[[block]]
+id = "audio"
+kind = "null_sink"
+params = { type = "f32" }
+ui = { x = 1040, y = 120 }
+
+[[connect]]
+from = "src.out"
+to = "channel.in"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.out"
+to = "resample.in"
+
+[[connect]]
+from = "resample.out"
+to = "audio.in"

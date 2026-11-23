@@ -25,6 +25,7 @@ Think GNU Radio Companion, but:
 cargo build --release
 ./target/release/foxygnal blocks                            # list blocks
 ./target/release/foxygnal run examples/noisy-tone.fox.toml  # headless run, writes noisy-tone.c32
+./target/release/foxygnal bench bench/fm-receiver-sim.fox.toml  # CPU, memory, items/s for 10 s
 
 # UI
 (cd ui && npm install && npm run build)
@@ -76,9 +77,10 @@ crates/
   foxygnal-blocks   standard block library
   foxygnal-sdr      SDR device API, drivers, discovery, simulator, TX arm switch
   foxygnal-server   HTTP/WebSocket server (axum) for the UI
-  foxygnal          the CLI binary (serve / run / blocks)
+  foxygnal          the CLI binary (serve / run / bench / blocks)
 ui/                 Svelte 5 + Vite + Svelte Flow browser editor
 examples/           *.fox.toml flowgraphs
+bench/              graphs for `foxygnal bench` (docs/PERFORMANCE.md)
 docs/               plans and design notes
 ```
 
@@ -86,6 +88,7 @@ docs/               plans and design notes
 
 - [Architecture](docs/ARCHITECTURE.md): runtime model, buffers, probes, protocol, security
 - [Roadmap](docs/ROADMAP.md): milestones M0–M6
+- [Performance](docs/PERFORMANCE.md): `foxygnal bench`, Raspberry Pi builds and targets
 - [Blocks](docs/BLOCKS.md): block catalog, implemented and planned
 - [UI](docs/UI.md): UI concept and interaction principles
 

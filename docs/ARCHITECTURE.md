@@ -10,7 +10,7 @@ frames of a few KB each.
 ```
 ┌──────────── browser ────────────┐        ┌──────────────── foxygnal ────────────────┐
 │ Svelte UI: editor, inspector,   │  HTTP  │ axum server ── session ── Flowgraph       │
-│ instruments (WebGL2 canvases)   │◄──────►│   /api/*        │          │ block threads│
+│ instruments (WebGL2 canvases)   │◄──────►│   /api/*        │          │ worker pool  │
 │                                 │   WS   │   /api/ws  ◄────┴─ probes ─┘ ring buffers │
 └─────────────────────────────────┘        └───────────────────────────────────────────┘
 ```
@@ -23,7 +23,7 @@ frames of a few KB each.
 |---|---|---|
 | `foxygnal-core` | `StreamType`/`Sample`, ring buffers, `Block` trait, `Registry`, `GraphSpec`, runtime | — |
 | `foxygnal-blocks` | standard blocks + `registry()` | core, dsp, sdr |
-| `foxygnal-dsp` | DSP math shared by blocks and probes: windows, FFT power spectra, FIR design and responses, polyphase resampler, rotator | — |
+| `foxygnal-dsp` | DSP math shared by blocks and probes: windows, FFT power spectra, FIR design and responses, polyphase resampler, rotator, SIMD kernels | — |
 | `foxygnal-sdr` | SDR device API, device strings, drivers and discovery, the TX arm switch | — |
 | `foxygnal-server` | REST + WebSocket API, probes and instruments, static UI | core, dsp, sdr |
 | `foxygnal` | CLI | all |
@@ -46,6 +46,7 @@ pub trait Block: Send + 'static {
     fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error>;
     fn start(&mut self) -> Result<(), Error> { Ok(()) }
     fn stop(&mut self) -> Result<(), Error> { Ok(()) }
+    fn dedicated_thread(&self) -> bool { false } // see "Scheduler"
 }
 ```
 
@@ -116,22 +117,117 @@ writer may have overwritten meanwhile (the seqlock pattern). `Running::monitor()
 taps by output port, plus raw counters: items written and backlog per connection, and time
 spent in `work` per block.
 
-M0 limitation: slices are contiguous only up to the wrap point. **M5** replaces the backing
-store with a *double-mapped* buffer (a memfd mapped twice back to back, the same trick as GNU
-Radio's vmcircbuf), so every slice is contiguous. The `Reader`/`Writer` API stays the same.
+**Double mapping (M5).** The ring's storage is mapped twice, back to back, in virtual memory
+(`core/src/vmem.rs`; the same trick as GNU Radio's vmcircbuf): a `memfd` on Linux, an unlinked
+`shm_open` object on other Unix systems, mapped `MAP_SHARED | MAP_FIXED` over both halves of a
+`PROT_NONE` reservation. Byte `i` and byte `i + size` are the same memory, so a slice that
+starts near the end simply runs on into the second copy: `Reader::slice` returns *every*
+available item as one slice, and a block that needs N items at a time (a decimator, an
+interleaved-pair converter) can never stall at the wrap point. The capacity is rounded up to
+whole pages (item sizes 1/2/4/8 divide any page size; 32768 items is the default). A
+`Writer::slice_mut` hands out at most **half** the ring at once: a tap can't trust slots the
+writer may be writing into, and this keeps the newest half visible to probes.
+
+Where the mapping is unavailable (Windows, for now, or if the OS refuses), the ring falls back
+at run time to one plain allocation whose slices stop at the wrap point
+(`BufferKind::Plain`; `Flowgraph::with_buffer_kind` forces it, which tests use to keep both
+paths covered). Note that RSS counts a double-mapped page twice although it uses one page of
+memory.
 
 ## Scheduler
 
-**M0: one OS thread per block.** A blocked block parks. Producing data unparks its readers and
-consuming data unparks its writer. A 50 ms park timeout is the safety net. End of stream works
-like this: a block whose input is exhausted (writer done and drained) and which returns
-`Blocked` finishes, and dropping its ports propagates the end of stream downstream.
+**A pool of worker threads (M5)** runs the blocks (`core/src/sched.rs`). Each block is a task;
+`Flowgraph::with_workers(n)` sets the pool size (default: one worker per core, never more than
+there are pooled blocks). Workers are named `fox:worker-N`.
 
-**M5: pooled scheduler.** N worker threads (default: number of cores) run blocks as tasks. A
-block becomes runnable when its inputs have data and its outputs have space. Blocks that call
-blocking APIs (hardware, audio, files) can request a dedicated thread. Options: core pinning,
-larger quanta for throughput or smaller ones for latency. The thread-per-block model stays
-available as a fallback.
+- **Waking.** The ring buffers wake through a `std::task::Waker` registered per read cursor
+  and per writer: publishing items wakes the readers, consuming (or a reader leaving) wakes the
+  writer, finishing wakes the readers. A pooled block's waker schedules its task; a dedicated
+  block's waker unparks its thread. Parameter changes and `stop()` wake the block too.
+- **Task states.** `IDLE → SCHEDULED → RUNNING → IDLE`, plus `NOTIFIED`: a wake that arrives
+  while the block runs marks it, and the worker queues it again instead of letting it go
+  idle, so no wake-up is lost. Only waking an idle task queues it, so a task is queued at most
+  once and a block never runs on two workers at once (the job sits behind a lock that is
+  never contended; `try_lock` checks the invariant). The wake path is one compare-and-swap,
+  plus a lock-free queue push when the task was idle.
+- **Queues.** Each worker has a FIFO queue (crossbeam-deque). A wake from a worker thread
+  goes to that worker's queue (the data the downstream block needs is hot in its cache), other
+  wakes to a global queue. Idle workers steal from the global queue and each other; every 31
+  tasks a worker looks at the global queue first, so blocks that keep waking each other can't
+  starve the rest. A worker out of work searches briefly, then sleeps; a push wakes a sleeper
+  only if nobody is searching.
+- **Turns.** A block runs until `work` returns something other than `Ok`, or for at most 32
+  calls or 2 ms, then goes to the back of the queue.
+- **Timers.** `WorkStatus::Wait(d)` arms a timer on the pool's timer thread (`fox:timer`, a
+  binary heap); when it fires the block is scheduled. A wake before then runs it early, and
+  every run invalidates older timers.
+- **Dedicated threads.** A block whose `Block::dedicated_thread()` returns true gets its own
+  thread (`fox:<block id>`) that parks while idle (no timeout). `start`, `work`, `set_param`
+  and `stop` all run there, so `std::thread::current()` is a valid way to wake it: the SDR and
+  sound card blocks use this, as their driver threads and device callbacks unpark the thread
+  that ran `start`. Pooled blocks are called by whichever worker runs them (one call at a
+  time). File blocks stay pooled: a slow disk occupies one worker, not the graph (a FIFO that
+  never delivers would hold its worker until the graph stops).
+- **End of stream** is unchanged: a block whose input is exhausted (writer done and drained)
+  and which returns `Blocked` finishes, as does one whose readers all left, and dropping its
+  ports propagates it. A block returning an error or panicking finishes with an error naming
+  it and stops the graph (every block is woken to notice).
+- `Flowgraph::with_thread_per_block()` keeps the M0 model (every block dedicated) for
+  comparison and as a fallback.
+
+**Idle CPU (M5).** Nothing polls: idle workers and dedicated threads park without a timeout
+until a wake or a timer. The throttle passes 2 ms of stream at a time and sleeps until the
+next batch is due (passing each item as soon as it was due made it ping-pong with its
+neighbours, each of which wakes it). Measured on a 32-core x86-64 desktop (release build,
+process CPU from `getrusage` over 3 s; before = thread-per-block with 50 ms polling):
+
+| graph | before | after |
+|---|---|---|
+| 48 kS/s tone → throttle → null sink | 1.7% of a core | ≈1.1% |
+| 1 MS/s c32 tone → throttle → head → null sink | 84% | ≈3% |
+| 2.4 MS/s tone → throttle → null sink | 120–170% | ≈5% |
+| source that never produces → 5 gains → null sink | 0.05% | 0.00% |
+| sim SDR (2.4 MS/s) → FM receiver → null sink | 6.5% | 6.4% |
+
+Most of what is left in the throttled graphs is generating the tone. `idle_cpu.rs` in the
+blocks' tests asserts that the 48 kS/s graph stays under 5% of a core and a stalled graph
+under 1%.
+
+## DSP kernels (M5)
+
+The inner loops live in `foxygnal-dsp/src/kernels.rs`: FIR dot products (real taps × real or
+complex samples), the rotator (complex multiply by a running phasor), complex multiply, window
+multiply, |x|², dB, magnitude, phase, the FM discriminator and u8/i16 → f32 conversion.
+
+- **One source, compiled per instruction set.** Each kernel body is plain Rust shaped so LLVM
+  vectorizes it: fixed-width accumulator arrays, `chunks_exact`, no branches in the loop body
+  (selects instead), FMA only where the target has it. A macro compiles the bodies into a
+  *baseline* set (SSE2 on x86_64, NEON on aarch64) and, on x86_64, an *avx2* set: the same code
+  inside `#[target_feature(enable = "avx2,fma")]` functions. The one exception is the AVX2 dot
+  product, written with intrinsics because LLVM builds the portable version from 128-bit
+  vectors (it was half the speed).
+- **Dispatch once.** `Kernels` is a table of function pointers to one set. `kernels()` picks
+  the best set the CPU supports on first use (`is_x86_feature_detected!`) and caches it; blocks
+  and `Resampler`/`Rotator`/`PowerSpectrum` copy the pointers they need when they are built.
+  The hot path is an indirect call, with no feature checks. `FOXYGNAL_SIMD=baseline` forces the
+  baseline set (for comparisons); `Kernels::all()` lists every set the CPU can run, which the
+  tests use to check each one against scalar code.
+- **Data layout.** `Resampler` stores each polyphase branch's taps padded with zeros to a whole
+  number of 8-float vectors, and for complex samples each tap twice (`h0 h0 h1 h1 …`), so a
+  complex dot product is a plain float dot product over the interleaved samples with even lanes
+  summing to the real part and odd lanes to the imaginary part. Its delay line stores every
+  sample twice so the window is always one contiguous slice.
+- **Rotator.** Eight phasors one step apart advance by `step⁸` per group of eight samples
+  (`step⁰…step⁸` from f64, so the lanes don't drift) and are renormalized every 512 samples.
+  `freq_xlating_fir` mixes a chunk of exactly `Resampler::inputs_for(room)` samples, then
+  filters it, so the mixer's phase stays in step with what the filter consumes.
+- **Fast atan2** (phase, FM discriminator): octant reduction plus the Abramowitz & Stegun
+  4.4.49 polynomial, branch-free; worst error 3e-7 rad (measured), i.e. about −130 dB of full
+  deviation at the FM demodulator's output.
+- Results differ from a sequential loop only by rounding (sums are reassociated; FMA rounds
+  once).
+
+Benchmarks and numbers: [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Probes and instruments (M2, done)
 
@@ -179,7 +275,7 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
   range; tunable: 24 MHz–1.766 GHz").
 - **Threading.** A driver moves samples on its own thread into a lock-free SPSC ring
   (`ring.rs`) and unparks the block's thread, which it registered with `set_waker` in
-  `start()`. `work()` only copies what is in the ring and returns `Blocked` when it's empty,
+  `start()` (SDR blocks ask for a dedicated thread, see "Scheduler"). `work()` only copies what is in the ring and returns `Blocked` when it's empty,
   so a device never blocks the scheduler. When the graph falls behind, the driver drops whole
   chunks and counts them (`overflows`). Control calls (retune, gain) may take milliseconds and
   run from `set_param`, between `work` calls. TX is the mirror image: `work()` writes what

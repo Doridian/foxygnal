@@ -1,0 +1,68 @@
+# Benchmark: the Raspberry Pi target scenario.
+#
+# The live FM receiver chain fed by the built-in simulated RTL-SDR (`sim:`) at
+# 2.4 MS/s, paced in real time by the simulator, audio into a null sink. No
+# hardware or files needed. Target: under 25% of one Raspberry Pi 4 core.
+#
+#   2.4 MS/s ──xlate ÷10──▶ 240 kS/s ──FM demod──▶ resample ──▶ 48 kS/s ──▶ null
+#
+#   foxygnal bench bench/fm-receiver-sim.fox.toml
+#
+# The simulator synthesizes its stations on its own thread (`fox:sim-rx`),
+# which is not a block: `foxygnal bench` lists it under "other threads" and it
+# counts towards process CPU. A real SDR's driver thread only converts
+# samples, so subtract it for an estimate of the receiver alone. Set `device`
+# to `rtlsdr:` (or leave it empty for the first device found) to bench real
+# hardware.
+
+[vars]
+station = "100.3M"
+offset = "250k"
+samp_rate = "2.4M"
+audio_rate = "48k"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "sim:", frequency = "$station - $offset", sample_rate = "$samp_rate", gain = 30.0 }
+ui = { x = 40, y = 120 }
+
+[[block]]
+id = "channel"
+kind = "freq_xlating_fir"
+params = { offset = "$offset", cutoff = 100000.0, transition = 40000.0, decimation = 10, window = "hamming" }
+ui = { x = 290, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "fm_demod"
+params = { deviation = 75000.0, deemphasis = "50us" }
+ui = { x = 540, y = 120 }
+
+[[block]]
+id = "resample"
+kind = "rational_resampler"
+params = { type = "f32", output_rate = "$audio_rate" }
+ui = { x = 790, y = 120 }
+
+[[block]]
+id = "audio"
+kind = "null_sink"
+params = { type = "f32" }
+ui = { x = 1040, y = 120 }
+
+[[connect]]
+from = "sdr.out"
+to = "channel.in"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.out"
+to = "resample.in"
+
+[[connect]]
+from = "resample.out"
+to = "audio.in"

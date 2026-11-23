@@ -516,7 +516,7 @@ impl Device for SpyServerDevice {
             .map_err(|e| SdrError::Device(format!("SpyServer at {hp}: sending settings: {e}")))?;
         let io_hp = hp.clone();
         let io_sync = self.sync.clone();
-        let rx = NetRx::spawn("spyserver-rx", sock, move |s, p| {
+        let rx = NetRx::spawn("spyserver-rx", sock, cfg.sample_rate, move |s, p| {
             io_loop(s, p, &io_hp, &io_sync)
         })?;
         Ok(Box::new(SpyServerRx {

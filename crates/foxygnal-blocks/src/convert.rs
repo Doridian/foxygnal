@@ -5,6 +5,7 @@ use foxygnal_core::{
     Block, BlockDescriptor, Complex32, Configure, Error, Instance, ParamKind, ParamReader,
     ParamSpec, PortSpec, Registry, Sample, StreamType, WorkIo, WorkStatus,
 };
+use foxygnal_dsp::{Kernels, kernels};
 use serde_json::json;
 
 const CATEGORY: &str = "Converters";
@@ -109,7 +110,8 @@ pub fn register(r: &mut Registry) {
         vec![scale_param()],
         |p| {
             let k = p.f64("scale")? as f32 / 32767.0;
-            Ok(map_instance(move |x: i16| x as f32 * k))
+            let f = kernels().i16_to_f32;
+            Ok(bulk_instance(move |x: &[i16], y: &mut [f32]| f(x, k, y)))
         },
     );
     simple(
@@ -132,7 +134,12 @@ pub fn register(r: &mut Registry) {
         "Unsigned bytes to float, unscaled (0..255).",
         (U8, F32),
         vec![],
-        |_| Ok(map_instance(|x: u8| x as f32)),
+        |_| {
+            let f = kernels().u8_to_f32;
+            Ok(bulk_instance(move |x: &[u8], y: &mut [f32]| {
+                f(x, 1.0, 0.0, y)
+            }))
+        },
     );
     simple(
         r,
@@ -143,11 +150,10 @@ pub fn register(r: &mut Registry) {
         (U8, C32),
         vec![],
         |_| {
-            Ok(pairs_instance(|i: u8, q: u8| {
-                Complex32::new(
-                    (i as f32 - 127.5) * (1.0 / 127.5),
-                    (q as f32 - 127.5) * (1.0 / 127.5),
-                )
+            // (x − 127.5) / 127.5 = x / 127.5 − 1, on the interleaved floats.
+            let f = kernels().u8_to_f32;
+            Ok(pairs_instance(move |x: &[u8], y: &mut [f32]| {
+                f(x, 1.0 / 127.5, -1.0, y)
             }))
         },
     );
@@ -161,9 +167,8 @@ pub fn register(r: &mut Registry) {
         vec![scale_param()],
         |p| {
             let k = p.f64("scale")? as f32 / 32767.0;
-            Ok(pairs_instance(move |i: i16, q: i16| {
-                Complex32::new(i as f32 * k, q as f32 * k)
-            }))
+            let f = kernels().i16_to_f32;
+            Ok(pairs_instance(move |x: &[i16], y: &mut [f32]| f(x, k, y)))
         },
     );
 }
@@ -192,6 +197,38 @@ impl<I: Sample, O: Sample, F: Fn(I) -> O + Send + 'static> Block for Map<I, O, F
         io.consume(0, n);
         io.produce(0, n);
         Ok(WorkStatus::Ok)
+    }
+}
+
+/// Conversion of whole slices with a kernel (`f(input, output)`, same
+/// length).
+pub struct Bulk<I, O, F> {
+    f: F,
+    _t: std::marker::PhantomData<fn(I) -> O>,
+}
+
+impl<I: Sample, O: Sample, F: Fn(&[I], &mut [O]) + Send + 'static> Block for Bulk<I, O, F> {
+    fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
+        let (inp, out) = io.in_out::<I, O>(0, 0);
+        let n = inp.len().min(out.len());
+        if n == 0 {
+            return Ok(WorkStatus::Blocked);
+        }
+        (self.f)(&inp[..n], &mut out[..n]);
+        io.consume(0, n);
+        io.produce(0, n);
+        Ok(WorkStatus::Ok)
+    }
+}
+
+fn bulk_instance<I: Sample, O: Sample>(f: impl Fn(&[I], &mut [O]) + Send + 'static) -> Instance {
+    Instance {
+        block: Box::new(Bulk {
+            f,
+            _t: std::marker::PhantomData,
+        }),
+        inputs: vec![("in".into(), I::TYPE)],
+        outputs: vec![("out".into(), O::TYPE)],
     }
 }
 
@@ -230,6 +267,7 @@ impl Part {
 
 pub struct ComplexToFloat {
     part: Part,
+    k: &'static Kernels,
 }
 
 impl Block for ComplexToFloat {
@@ -244,9 +282,9 @@ impl Block for ComplexToFloat {
         match self.part {
             Part::Real => out.iter_mut().zip(inp).for_each(|(o, x)| *o = x.re),
             Part::Imag => out.iter_mut().zip(inp).for_each(|(o, x)| *o = x.im),
-            Part::Magnitude => out.iter_mut().zip(inp).for_each(|(o, x)| *o = x.norm()),
-            Part::MagnitudeSquared => out.iter_mut().zip(inp).for_each(|(o, x)| *o = x.norm_sqr()),
-            Part::Phase => out.iter_mut().zip(inp).for_each(|(o, x)| *o = x.arg()),
+            Part::Magnitude => (self.k.magnitude)(inp, out),
+            Part::MagnitudeSquared => (self.k.power)(inp, 1.0, out),
+            Part::Phase => (self.k.phase)(inp, out),
         }
         io.consume(0, n);
         io.produce(0, n);
@@ -266,6 +304,7 @@ fn build_c32_to_f32(p: &ParamReader<'_>) -> Result<Instance, Error> {
     Ok(Instance {
         block: Box::new(ComplexToFloat {
             part: Part::parse(p.str("part")?)?,
+            k: kernels(),
         }),
         inputs: vec![("in".into(), StreamType::C32)],
         outputs: vec![("out".into(), StreamType::F32)],
@@ -294,13 +333,15 @@ impl Block for PairToComplex {
 }
 
 /// Interleaved pairs of `I` to one complex sample each. Halves the rate.
+/// `f` converts a run of interleaved values to the interleaved floats of
+/// the complex output (one float per value).
 pub struct Pairs<I, F> {
     f: F,
     /// The first half of a pair split across a buffer wrap.
     pending: Option<I>,
 }
 
-impl<I: Sample, F: Fn(I, I) -> Complex32 + Send + 'static> Block for Pairs<I, F> {
+impl<I: Sample, F: Fn(&[I], &mut [f32]) + Send + 'static> Block for Pairs<I, F> {
     fn configure(&mut self, cx: &mut Configure<'_>) -> Result<(), Error> {
         if let Some(r) = cx.inputs[0].sample_rate {
             cx.set_rate(r / 2.0);
@@ -315,16 +356,14 @@ impl<I: Sample, F: Fn(I, I) -> Complex32 + Send + 'static> Block for Pairs<I, F>
         }
         let (mut used, mut made) = (0, 0);
         if let Some(i) = self.pending.take() {
-            out[0] = (self.f)(i, inp[0]);
+            let mut re_im = [0.0f32; 2];
+            (self.f)(&[i, inp[0]], &mut re_im);
+            out[0] = Complex32::new(re_im[0], re_im[1]);
             (used, made) = (1, 1);
         }
         let n = ((inp.len() - used) / 2).min(out.len() - made);
-        for (o, pair) in out[made..made + n]
-            .iter_mut()
-            .zip(inp[used..used + 2 * n].chunks_exact(2))
-        {
-            *o = (self.f)(pair[0], pair[1]);
-        }
+        let floats: &mut [f32] = bytemuck::cast_slice_mut(&mut out[made..made + n]);
+        (self.f)(&inp[used..used + 2 * n], floats);
         used += 2 * n;
         made += n;
         // A lone item (at a buffer wrap) waits for its partner. One left
@@ -339,7 +378,7 @@ impl<I: Sample, F: Fn(I, I) -> Complex32 + Send + 'static> Block for Pairs<I, F>
     }
 }
 
-fn pairs_instance<I: Sample>(f: impl Fn(I, I) -> Complex32 + Send + 'static) -> Instance {
+fn pairs_instance<I: Sample>(f: impl Fn(&[I], &mut [f32]) + Send + 'static) -> Instance {
     Instance {
         block: Box::new(Pairs { f, pending: None }),
         inputs: vec![("in".into(), I::TYPE)],
@@ -349,15 +388,35 @@ fn pairs_instance<I: Sample>(f: impl Fn(I, I) -> Complex32 + Send + 'static) -> 
 
 #[cfg(test)]
 mod tests {
-    use foxygnal_core::{Flowgraph, Params, StreamMeta};
+    use foxygnal_core::{BufferKind, Flowgraph, Params, StreamMeta};
     use serde_json::json;
 
     use super::*;
     use crate::testing::{VectorSink, VectorSource};
 
-    fn run<I: Sample, O: Sample>(kind: &str, params: serde_json::Value, input: Vec<I>) -> Vec<O> {
+    /// Runs on a tiny plain buffer (short slices at the wrap point) and on a
+    /// double-mapped one; both must agree.
+    fn run<I: Sample, O: Sample + PartialEq + std::fmt::Debug>(
+        kind: &str,
+        params: serde_json::Value,
+        input: Vec<I>,
+    ) -> Vec<O> {
+        let plain: Vec<O> = run_with(BufferKind::Plain, kind, params.clone(), input.clone());
+        let auto = run_with(BufferKind::Auto, kind, params, input);
+        assert_eq!(plain, auto);
+        auto
+    }
+
+    fn run_with<I: Sample, O: Sample>(
+        buffers: BufferKind,
+        kind: &str,
+        params: serde_json::Value,
+        input: Vec<I>,
+    ) -> Vec<O> {
         let reg = crate::registry();
-        let mut fg = Flowgraph::new().with_buffer_capacity(5);
+        let mut fg = Flowgraph::new()
+            .with_buffer_capacity(5)
+            .with_buffer_kind(buffers);
         let src = fg.add("src", VectorSource::instance(input));
         let conv = fg.add(
             "conv",

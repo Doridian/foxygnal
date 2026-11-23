@@ -1,22 +1,24 @@
 //! Builds a runnable flowgraph and executes it.
 //!
-//! M0 scheduler: one OS thread per block. Blocks park when they cannot make
-//! progress and are unparked by their neighbours when data or space appears.
-//! See docs/ARCHITECTURE.md for the planned pooled scheduler.
+//! Blocks run as tasks on a pool of worker threads ([`crate::sched`]); the
+//! ring buffers wake a block's task when data or space appears. Blocks that
+//! ask for it ([`crate::Block::dedicated_thread`]) get a thread of their own,
+//! which parks until woken. See docs/ARCHITECTURE.md.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, mpsc};
+use std::task::Waker;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::block::{InputPort, OutputPort, WorkIo, WorkStatus};
-use crate::buffer::{self, Reader, Tap};
+use crate::buffer::{self, BufferKind, Reader, Tap};
 use crate::graph::GraphSpec;
 use crate::meta::{Configure, StreamMeta};
 use crate::registry::{Instance, Registry};
 use crate::resolve::{GraphLoader, NoLoader, resolve};
+use crate::sched::{Job, Next, Pool, thread_waker};
 use crate::tag::TagPropagation;
 use crate::{Error, StreamType};
 
@@ -43,6 +45,10 @@ pub struct Flowgraph {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     buffer_capacity: Option<usize>,
+    buffer_kind: BufferKind,
+    /// Pool size; `None`: one per core.
+    workers: Option<usize>,
+    thread_per_block: bool,
     /// Output metadata per node and port, once configured.
     meta: Option<Vec<Vec<StreamMeta>>>,
 }
@@ -63,9 +69,31 @@ impl Flowgraph {
         Self::default()
     }
 
-    /// Override the per-connection buffer capacity (items).
+    /// Override the per-connection buffer capacity (items). Double-mapped
+    /// buffers round it up to whole memory pages.
     pub fn with_buffer_capacity(mut self, items: usize) -> Self {
         self.buffer_capacity = Some(items);
+        self
+    }
+
+    /// Size of the worker pool (default: one worker per core, never more
+    /// than there are pooled blocks).
+    pub fn with_workers(mut self, workers: usize) -> Self {
+        self.workers = Some(workers.max(1));
+        self
+    }
+
+    /// Give every block a thread of its own instead of using the worker
+    /// pool (the scheduler before M5; for comparison and as a fallback).
+    pub fn with_thread_per_block(mut self) -> Self {
+        self.thread_per_block = true;
+        self
+    }
+
+    /// Choose the buffer layout ([`BufferKind::Plain`] forces the fallback
+    /// with short slices at the wrap point, e.g. to test blocks with it).
+    pub fn with_buffer_kind(mut self, kind: BufferKind) -> Self {
+        self.buffer_kind = kind;
         self
     }
 
@@ -268,7 +296,8 @@ impl Flowgraph {
         Ok(order)
     }
 
-    /// Allocate buffers and spawn one thread per block.
+    /// Allocate buffers and start running: pooled blocks on the worker pool,
+    /// the others on threads of their own.
     pub fn start(mut self) -> Result<Running, Error> {
         let cap = self.buffer_capacity.unwrap_or(buffer::DEFAULT_CAPACITY);
 
@@ -297,7 +326,8 @@ impl Flowgraph {
             let mut ports = Vec::new();
             for (pi, (pname, ty)) in n.inst.outputs.iter().enumerate() {
                 let dests: Vec<_> = self.edges.iter().filter(|e| e.from == (ni, pi)).collect();
-                let (writer, readers) = buffer::channel(ty.item_size(), cap, dests.len());
+                let (writer, readers) =
+                    buffer::channel_with(ty.item_size(), cap, dests.len(), self.buffer_kind);
                 let tap = writer.tap();
                 for (reader, (e, r)) in dests.into_iter().zip(readers).enumerate() {
                     inputs[e.to.0][e.to.1] = Some(r);
@@ -321,44 +351,94 @@ impl Flowgraph {
             outputs.push(ports);
         }
 
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut handles = Vec::new();
+        let ctl = Arc::new(Control {
+            stop: AtomicBool::new(false),
+            go: AtomicBool::new(false),
+            wakers: OnceLock::new(),
+            done: Mutex::new(Done {
+                results: (0..self.nodes.len()).map(|_| None).collect(),
+                remaining: self.nodes.len(),
+            }),
+            all_done: Condvar::new(),
+        });
+        let dedicated: Vec<bool> = self
+            .nodes
+            .iter()
+            .map(|n| self.thread_per_block || n.inst.block.dedicated_thread())
+            .collect();
+        let pooled = dedicated.iter().filter(|d| !**d).count();
+        let mut pool = (pooled > 0).then(|| {
+            let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+            Pool::new(self.workers.unwrap_or(cores).min(pooled))
+        });
+
         let mut names = Vec::new();
         let mut param_txs = Vec::new();
         let mut busy = Vec::new();
-        for ((node, ins), outs) in self.nodes.into_iter().zip(inputs).zip(outputs) {
-            let ins: Vec<InputPort> = node
+        let mut wakers = Vec::new();
+        let mut threads = Vec::new();
+        for (index, (((node, ins), outs), dedicated)) in self
+            .nodes
+            .into_iter()
+            .zip(inputs)
+            .zip(outputs)
+            .zip(dedicated)
+            .enumerate()
+        {
+            let inputs: Vec<InputPort> = node
                 .inst
                 .inputs
                 .iter()
                 .zip(ins)
                 .map(|((_, ty), reader)| InputPort::new(*ty, reader))
                 .collect();
-            let stop = stop.clone();
-            let name = node.name.clone();
             let (ptx, prx) = mpsc::channel::<ParamMsg>();
             let busy_ns = Arc::new(AtomicU64::new(0));
-            names.push(name.clone());
+            names.push(node.name.clone());
             param_txs.push(ptx);
             busy.push(busy_ns.clone());
-            let h = std::thread::Builder::new()
-                .name(format!("fox:{name}"))
-                .spawn(move || {
-                    // A panicking block must stop the rest of the graph too.
-                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_block(node.inst, ins, outs, &prx, &stop, &busy_ns)
-                    }))
-                    .unwrap_or(Err(Error::Panic));
-                    if r.is_err() {
-                        stop.store(true, Ordering::Relaxed);
+            let run = BlockRun {
+                index,
+                name: node.name,
+                inst: node.inst,
+                inputs,
+                outputs: outs,
+                params: prx,
+                busy_ns,
+                started: false,
+                ctl: ctl.clone(),
+            };
+            if let (false, Some(pool)) = (dedicated, pool.as_mut()) {
+                let task = pool.task();
+                let waker = task.waker();
+                run.register_waker(&waker);
+                task.set_job(Box::new(PoolJob(Some(run))));
+                wakers.push(waker);
+            } else {
+                let spawned = std::thread::Builder::new()
+                    .name(format!("fox:{}", run.name))
+                    .spawn(move || run_dedicated(run));
+                match spawned {
+                    Ok(h) => {
+                        wakers.push(thread_waker(h.thread().clone()));
+                        threads.push(h);
                     }
-                    r.map_err(|e| Error::Block {
-                        block: name,
-                        source: Box::new(e),
-                    })
-                })
-                .map_err(Error::Io)?;
-            handles.push(h);
+                    Err(e) => {
+                        let _ = ctl.wakers.set(wakers);
+                        ctl.release(&threads);
+                        ctl.stop_all();
+                        return Err(Error::Io(e));
+                    }
+                }
+            }
+        }
+        let _ = ctl.wakers.set(wakers.clone());
+        ctl.release(&threads);
+        if let Some(pool) = pool.as_mut()
+            && let Err(e) = pool.start()
+        {
+            ctl.stop_all();
+            return Err(Error::Io(e));
         }
         let monitor = Monitor {
             inner: Arc::new(MonitorInner {
@@ -368,11 +448,13 @@ impl Flowgraph {
             }),
         };
         Ok(Running {
-            handles,
             names,
             param_txs,
-            stop,
+            wakers,
+            ctl,
             monitor,
+            pool,
+            threads,
         })
     }
 }
@@ -390,8 +472,6 @@ fn resolve_port(
         .filter(|i| *i < ports.len())
         .ok_or_else(|| format!("block `{block}` has no port `{port}`"))
 }
-
-const IDLE_PARK: Duration = Duration::from_millis(50);
 
 /// Ports per block whose tags the runtime passes on automatically.
 const MAX_TAG_PORTS: usize = 16;
@@ -425,99 +505,277 @@ fn propagate_tags(
     }
 }
 
-fn run_block(
-    mut inst: Instance,
-    mut inputs: Vec<InputPort>,
-    mut outputs: Vec<OutputPort>,
-    params: &mpsc::Receiver<ParamMsg>,
-    stop: &AtomicBool,
-    busy_ns: &AtomicU64,
-) -> Result<(), Error> {
-    for i in &inputs {
-        if let Some(r) = &i.reader {
-            r.register_thread();
+/// Most `work` calls in one turn of a pooled block before it goes to the back
+/// of the queue, so one busy block can't starve the others on its worker.
+const QUANTUM_STEPS: usize = 32;
+/// Same, as time.
+const QUANTUM: Duration = Duration::from_millis(2);
+
+/// Shared by every block of a running graph.
+struct Control {
+    stop: AtomicBool,
+    /// Set once every block's waker is known; dedicated threads wait for it
+    /// before calling their block, so a stop can always reach everybody.
+    go: AtomicBool,
+    /// One per block, to wake them all on stop.
+    wakers: OnceLock<Vec<Waker>>,
+    done: Mutex<Done>,
+    all_done: Condvar,
+}
+
+struct Done {
+    /// Per block, once it has finished.
+    results: Vec<Option<Result<(), Error>>>,
+    remaining: usize,
+}
+
+impl Control {
+    /// Let the dedicated threads start calling their blocks.
+    fn release(&self, threads: &[JoinHandle<()>]) {
+        self.go.store(true, Ordering::Release);
+        for t in threads {
+            t.thread().unpark();
         }
     }
-    for o in &outputs {
-        o.writer.register_thread();
-    }
-    inst.block.start()?;
-    let result = loop {
-        if stop.load(Ordering::Relaxed) {
-            break Ok(());
+
+    /// Ask every block to stop, and wake them so they notice.
+    fn stop_all(&self) {
+        self.stop.store(true, Ordering::Release);
+        for w in self.wakers.get().into_iter().flatten() {
+            w.wake_by_ref();
         }
-        // Live parameter changes. `try_recv` never blocks or locks.
-        let mut failed = None;
-        while let Ok((name, value)) = params.try_recv() {
-            if let Err(e) = inst.block.set_param(&name, &value) {
-                failed = Some(e);
-                break;
+    }
+
+    fn finished(&self, index: usize, result: Result<(), Error>) {
+        if result.is_err() {
+            // One failing block stops the rest of the graph.
+            self.stop_all();
+        }
+        let mut done = self.done.lock().unwrap_or_else(PoisonError::into_inner);
+        done.results[index] = Some(result);
+        done.remaining -= 1;
+        if done.remaining == 0 {
+            self.all_done.notify_all();
+        }
+    }
+}
+
+/// What one `work` call asks of the scheduler.
+enum Step {
+    Again,
+    Idle,
+    Wait(Duration),
+    Finished,
+}
+
+/// A block with its ports: everything needed to call it, on whatever thread.
+struct BlockRun {
+    index: usize,
+    name: String,
+    inst: Instance,
+    inputs: Vec<InputPort>,
+    outputs: Vec<OutputPort>,
+    params: mpsc::Receiver<ParamMsg>,
+    busy_ns: Arc<AtomicU64>,
+    /// `Block::start` succeeded, so `Block::stop` is due at the end.
+    started: bool,
+    ctl: Arc<Control>,
+}
+
+impl BlockRun {
+    /// Wake `waker` when an input gets data or an output gets space.
+    fn register_waker(&self, waker: &Waker) {
+        for i in &self.inputs {
+            if let Some(r) = &i.reader {
+                r.register_waker(waker.clone());
             }
         }
-        if let Some(e) = failed {
-            break Err(e);
+        for o in &self.outputs {
+            o.writer.register_waker(waker.clone());
         }
-        for i in &mut inputs {
+    }
+
+    /// One `work` call (after `start`, the first time), with everything
+    /// around it: live parameters, the tag snapshot, tag propagation and
+    /// publishing what was produced.
+    fn step(&mut self) -> Result<Step, Error> {
+        if !self.started {
+            self.inst.block.start()?;
+            self.started = true;
+        }
+        if self.ctl.stop.load(Ordering::Acquire) {
+            return Ok(Step::Finished);
+        }
+        // Live parameter changes. `try_recv` never blocks or locks.
+        while let Ok((name, value)) = self.params.try_recv() {
+            self.inst.block.set_param(&name, &value)?;
+        }
+        for i in &mut self.inputs {
             i.sync();
         }
         // Positions before `work`, for passing tags on (fixed-size: no allocation).
         let mut in_before = [0u64; MAX_TAG_PORTS];
         let mut out_before = [0u64; MAX_TAG_PORTS];
-        for (b, i) in in_before.iter_mut().zip(&inputs) {
+        for (b, i) in in_before.iter_mut().zip(&self.inputs) {
             *b = i.position();
         }
-        for (b, o) in out_before.iter_mut().zip(&outputs) {
+        for (b, o) in out_before.iter_mut().zip(&self.outputs) {
             *b = o.position();
         }
         let mut io = WorkIo {
-            inputs: &mut inputs,
-            outputs: &mut outputs,
+            inputs: &mut self.inputs,
+            outputs: &mut self.outputs,
         };
         let t0 = Instant::now();
-        let status = inst.block.work(&mut io);
-        busy_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        if inst.block.tag_propagation() == TagPropagation::AllToAll {
-            propagate_tags(&inputs, &mut outputs, &in_before, &out_before);
+        let status = self.inst.block.work(&mut io);
+        self.busy_ns
+            .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if self.inst.block.tag_propagation() == TagPropagation::AllToAll {
+            propagate_tags(&self.inputs, &mut self.outputs, &in_before, &out_before);
         }
-        for i in &mut inputs {
+        for i in &mut self.inputs {
             i.prune_tags();
         }
         // Publish after tags, so readers see an item's tags with the item.
-        for o in &mut outputs {
+        for o in &mut self.outputs {
             o.flush();
         }
-        match status {
-            Err(e) => break Err(e),
-            Ok(WorkStatus::Ok) => {}
-            Ok(WorkStatus::Done) => break Ok(()),
-            Ok(WorkStatus::Wait(d)) => std::thread::park_timeout(d.min(IDLE_PARK)),
-            Ok(WorkStatus::Blocked) => {
+        Ok(match status? {
+            WorkStatus::Ok => Step::Again,
+            WorkStatus::Done => Step::Finished,
+            WorkStatus::Wait(d) => Step::Wait(d),
+            WorkStatus::Blocked => {
                 // Upstream ended and we can't make progress: we're done too.
-                if inputs.iter().any(InputPort::exhausted) {
-                    break Ok(());
-                }
+                let ended = self.inputs.iter().any(InputPort::exhausted);
                 // Every consumer is gone: nobody wants our output.
-                if !outputs.is_empty() && outputs.iter().all(|o| o.writer.abandoned()) {
-                    break Ok(());
+                let abandoned =
+                    !self.outputs.is_empty() && self.outputs.iter().all(|o| o.writer.abandoned());
+                if ended || abandoned {
+                    Step::Finished
+                } else {
+                    Step::Idle
                 }
-                std::thread::park_timeout(IDLE_PARK);
             }
+        })
+    }
+
+    /// [`Self::step`], turning a panic into an error.
+    fn step_caught(&mut self) -> Result<Step, Finish> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.step())) {
+            Ok(Ok(step)) => Ok(step),
+            Ok(Err(e)) => Err(Finish::Error(e)),
+            Err(_) => Err(Finish::Panic),
+        }
+    }
+
+    /// The block is done: call `stop`, drop the ports (end of stream
+    /// downstream, departure upstream) and report.
+    fn finish(self, how: Finish) {
+        let BlockRun {
+            index,
+            name,
+            mut inst,
+            inputs,
+            outputs,
+            started,
+            ctl,
+            ..
+        } = self;
+        let result = match how {
+            // A block that panicked may be in any state: don't call it again.
+            Finish::Panic => Err(Error::Panic),
+            how => {
+                let stopped = if started {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inst.block.stop()))
+                        .unwrap_or(Err(Error::Panic))
+                } else {
+                    Ok(())
+                };
+                match how {
+                    Finish::Error(e) => Err(e),
+                    _ => stopped,
+                }
+            }
+        };
+        drop(inputs);
+        drop(outputs);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(inst)));
+        ctl.finished(
+            index,
+            result.map_err(|e| Error::Block {
+                block: name,
+                source: Box::new(e),
+            }),
+        );
+    }
+}
+
+/// How a block ended.
+enum Finish {
+    Ok,
+    Error(Error),
+    Panic,
+}
+
+/// A block on the worker pool.
+struct PoolJob(Option<BlockRun>);
+
+impl Job for PoolJob {
+    fn run(&mut self) -> Next {
+        let Some(run) = self.0.as_mut() else {
+            return Next::Done;
+        };
+        let t0 = Instant::now();
+        let mut steps = 0;
+        let how = loop {
+            match run.step_caught() {
+                Ok(Step::Again) => {
+                    steps += 1;
+                    if steps >= QUANTUM_STEPS || t0.elapsed() >= QUANTUM {
+                        return Next::Again;
+                    }
+                }
+                Ok(Step::Idle) => return Next::Idle,
+                Ok(Step::Wait(d)) => return Next::Until(Instant::now() + d),
+                Ok(Step::Finished) => break Finish::Ok,
+                Err(how) => break how,
+            }
+        };
+        self.0.take().expect("checked above").finish(how);
+        Next::Done
+    }
+}
+
+/// A block on a thread of its own: `start`, `work`, `set_param` and `stop`
+/// all run here.
+fn run_dedicated(mut run: BlockRun) {
+    run.register_waker(&thread_waker(std::thread::current()));
+    while !run.ctl.go.load(Ordering::Acquire) {
+        std::thread::park();
+    }
+    let how = loop {
+        match run.step_caught() {
+            Ok(Step::Again) => {}
+            // Neighbours (or a driver thread) unpark us; no polling.
+            Ok(Step::Idle) => std::thread::park(),
+            Ok(Step::Wait(d)) => std::thread::park_timeout(d),
+            Ok(Step::Finished) => break Finish::Ok,
+            Err(how) => break how,
         }
     };
-    let stopped = inst.block.stop();
-    // Dropping ports signals end-of-stream downstream and departure upstream.
-    drop(inputs);
-    drop(outputs);
-    result.and(stopped)
+    run.finish(how);
 }
 
 /// A started flowgraph.
 pub struct Running {
-    handles: Vec<JoinHandle<Result<(), Error>>>,
     names: Vec<String>,
     param_txs: Vec<mpsc::Sender<ParamMsg>>,
-    stop: Arc<AtomicBool>,
+    /// One per block.
+    wakers: Vec<Waker>,
+    ctl: Arc<Control>,
     monitor: Monitor,
+    pool: Option<Pool>,
+    threads: Vec<JoinHandle<()>>,
 }
 
 struct OutputTap {
@@ -621,7 +879,7 @@ impl Monitor {
 /// Cloneable handle that delivers live parameter changes to running blocks.
 #[derive(Clone)]
 pub struct ParamSender {
-    blocks: Arc<HashMap<String, (mpsc::Sender<ParamMsg>, std::thread::Thread)>>,
+    blocks: Arc<HashMap<String, (mpsc::Sender<ParamMsg>, Waker)>>,
 }
 
 impl ParamSender {
@@ -629,7 +887,7 @@ impl ParamSender {
     /// next `work` call. Validate the value against the descriptor first:
     /// a value the block rejects stops the graph with an error.
     pub fn send(&self, block: &str, name: &str, value: serde_json::Value) -> Result<(), Error> {
-        let (tx, thread) = self
+        let (tx, waker) = self
             .blocks
             .get(block)
             .ok_or_else(|| Error::Graph(format!("unknown block `{block}`")))?;
@@ -638,7 +896,7 @@ impl ParamSender {
                 block: block.to_owned(),
                 source: Box::new(Error::Other("block has finished".into())),
             })?;
-        thread.unpark();
+        waker.wake_by_ref();
         Ok(())
     }
 }
@@ -646,25 +904,20 @@ impl ParamSender {
 /// Cloneable handle that can stop a [`Running`] graph from anywhere.
 #[derive(Clone)]
 pub struct StopHandle {
-    stop: Arc<AtomicBool>,
-    threads: Vec<std::thread::Thread>,
+    ctl: Arc<Control>,
 }
 
 impl StopHandle {
     /// Ask every block to stop at its next opportunity.
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-        for t in &self.threads {
-            t.unpark();
-        }
+        self.ctl.stop_all();
     }
 }
 
 impl Running {
     pub fn stop_handle(&self) -> StopHandle {
         StopHandle {
-            stop: self.stop.clone(),
-            threads: self.handles.iter().map(|h| h.thread().clone()).collect(),
+            ctl: self.ctl.clone(),
         }
     }
 
@@ -678,8 +931,8 @@ impl Running {
             .names
             .iter()
             .zip(&self.param_txs)
-            .zip(&self.handles)
-            .map(|((n, tx), h)| (n.clone(), (tx.clone(), h.thread().clone())))
+            .zip(&self.wakers)
+            .map(|((n, tx), w)| (n.clone(), (tx.clone(), w.clone())))
             .collect();
         ParamSender {
             blocks: Arc::new(blocks),
@@ -688,27 +941,47 @@ impl Running {
 
     /// Ask every block to stop at its next opportunity.
     pub fn stop(&self) {
-        self.stop_handle().stop();
+        self.ctl.stop_all();
     }
 
+    /// Every block has finished.
     pub fn is_finished(&self) -> bool {
-        self.handles.iter().all(JoinHandle::is_finished)
+        let done = self.ctl.done.lock().unwrap_or_else(PoisonError::into_inner);
+        done.remaining == 0
     }
 
-    /// Wait for all blocks to finish; returns the first error, if any.
+    /// Wait for all blocks to finish; returns the first error (in block
+    /// order), if any.
     pub fn wait(self) -> Result<(), Error> {
-        let mut first = Ok(());
-        for (h, name) in self.handles.into_iter().zip(self.names) {
-            let r = h.join().unwrap_or_else(|_| {
-                Err(Error::Block {
-                    block: name,
-                    source: Box::new(Error::Panic),
-                })
-            });
-            if first.is_ok() {
-                first = r;
+        let results = {
+            let mut done = self.ctl.done.lock().unwrap_or_else(PoisonError::into_inner);
+            while done.remaining > 0 {
+                done = self
+                    .ctl
+                    .all_done
+                    .wait(done)
+                    .unwrap_or_else(PoisonError::into_inner);
             }
+            std::mem::take(&mut done.results)
+        };
+        if let Some(pool) = self.pool {
+            pool.join();
         }
-        first
+        for t in self.threads {
+            let _ = t.join();
+        }
+        results
+            .into_iter()
+            .zip(self.names)
+            .map(|(r, block)| {
+                r.unwrap_or_else(|| {
+                    Err(Error::Block {
+                        block,
+                        source: Box::new(Error::Panic),
+                    })
+                })
+            })
+            .find(Result::is_err)
+            .unwrap_or(Ok(()))
     }
 }

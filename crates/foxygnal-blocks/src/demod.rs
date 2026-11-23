@@ -7,7 +7,7 @@ use foxygnal_core::{
     Block, BlockDescriptor, Complex32, Configure, Error, FrequencyResponse, Instance, ParamReader,
     PortSpec, Registry, StreamType, WorkIo, WorkStatus,
 };
-use foxygnal_dsp::{Band, DesignWindow, FirSpec, OnePole, Resampler, Rotator};
+use foxygnal_dsp::{Band, DesignWindow, FirSpec, Kernels, OnePole, Resampler, Rotator, kernels};
 
 use crate::design::{self, fmt_hz, fmt_rate};
 use crate::filters::not_configured;
@@ -153,6 +153,7 @@ pub struct FmDemod {
     gain: f32,
     prev: Complex32,
     deemph: Option<OnePole>,
+    k: &'static Kernels,
 }
 
 impl Block for FmDemod {
@@ -179,12 +180,8 @@ impl Block for FmDemod {
         if n == 0 {
             return Ok(WorkStatus::Blocked);
         }
-        let mut prev = self.prev;
-        for (o, &x) in out[..n].iter_mut().zip(&inp[..n]) {
-            *o = (x * prev.conj()).arg() * self.gain;
-            prev = x;
-        }
-        self.prev = prev;
+        // arg(x[n]·conj(x[n−1])) with a vectorized atan2 (error ~1e-7 rad).
+        self.prev = (self.k.fm_discriminate)(self.prev, &inp[..n], self.gain, &mut out[..n]);
         if let Some(d) = &mut self.deemph {
             for o in &mut out[..n] {
                 *o = d.next(*o);
@@ -208,6 +205,7 @@ fn build_fm(p: &ParamReader<'_>) -> Result<Instance, Error> {
         gain: 1.0,
         prev: Complex32::new(0.0, 0.0),
         deemph: None,
+        k: kernels(),
     })))
 }
 
@@ -217,6 +215,7 @@ pub struct AmDemod {
     dc_time: f64,
     dc: Option<OnePole>,
     started: bool,
+    k: &'static Kernels,
 }
 
 impl Block for AmDemod {
@@ -235,23 +234,17 @@ impl Block for AmDemod {
         if n == 0 {
             return Ok(WorkStatus::Blocked);
         }
-        match &mut self.dc {
-            Some(dc) => {
-                if !self.started {
-                    // Start the DC estimate at the first carrier level so
-                    // the output doesn't begin with a long thump.
-                    dc.y = inp[0].norm();
-                    self.started = true;
-                }
-                for (o, &x) in out[..n].iter_mut().zip(&inp[..n]) {
-                    let m = x.norm();
-                    *o = m - dc.next(m);
-                }
+        let out = &mut out[..n];
+        (self.k.magnitude)(&inp[..n], out);
+        if let Some(dc) = &mut self.dc {
+            if !self.started {
+                // Start the DC estimate at the first carrier level so the
+                // output doesn't begin with a long thump.
+                dc.y = out[0];
+                self.started = true;
             }
-            None => {
-                for (o, &x) in out[..n].iter_mut().zip(&inp[..n]) {
-                    *o = x.norm();
-                }
+            for o in out.iter_mut() {
+                *o -= dc.next(*o);
             }
         }
         io.consume(0, n);
@@ -265,6 +258,7 @@ fn build_am(p: &ParamReader<'_>) -> Result<Instance, Error> {
         dc_time: p.f64("dc_time")?,
         dc: None,
         started: false,
+        k: kernels(),
     })))
 }
 

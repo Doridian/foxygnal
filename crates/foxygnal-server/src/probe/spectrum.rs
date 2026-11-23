@@ -1,6 +1,7 @@
 //! Spectrum (and waterfall: the UI draws each frame as one row).
 
 use foxygnal_core::Complex32;
+use foxygnal_dsp::spectrum::power_to_db;
 use foxygnal_dsp::{PowerSpectrum, Window};
 use serde::Deserialize;
 
@@ -49,6 +50,9 @@ pub struct Spectrum {
     power: Vec<f32>,
     avg: Option<Vec<f32>>,
     peak: Option<Vec<f32>>,
+    /// Reduced bins, linear then dB.
+    reduced: Vec<f32>,
+    db: Vec<f32>,
 }
 
 impl Spectrum {
@@ -64,25 +68,37 @@ impl Spectrum {
             power: vec![0.0; n],
             avg: None,
             peak: o.peak_hold.then(|| vec![0.0; n]),
+            reduced: Vec::new(),
+            db: Vec::new(),
         }
     }
 
     /// Write `p` in display order and in dB, reduced to `bins`: −fs/2…+fs/2
     /// for complex input, 0…fs/2 for real input (one-sided, so a real tone
     /// reads its amplitude).
-    fn write_db(&self, p: &[f32], f: &mut Frame<'_>, bins: usize, count: usize) {
+    fn write_db(
+        complex: bool,
+        p: &[f32],
+        f: &mut Frame<'_>,
+        bins: usize,
+        count: usize,
+        (reduced, db): (&mut Vec<f32>, &mut Vec<f32>),
+    ) {
         let n = p.len();
-        let (first, gain) = if self.complex { (n / 2, 1.0) } else { (0, 4.0) };
+        let (first, gain) = if complex { (n / 2, 1.0) } else { (0, 4.0) };
         let at = |i: usize| {
             let k = (first + i) % n;
             if k == 0 { p[k] } else { p[k] * gain }
         };
-        for b in 0..bins {
+        reduced.clear();
+        reduced.extend((0..bins).map(|b| {
             let lo = b * count / bins;
             let hi = ((b + 1) * count / bins).max(lo + 1);
-            let m = (lo..hi).map(at).fold(0.0f32, f32::max);
-            f.f32(10.0 * m.max(1e-20).log10());
-        }
+            (lo..hi).map(at).fold(0.0f32, f32::max)
+        }));
+        db.resize(bins, 0.0);
+        power_to_db(reduced, db);
+        f.f32s(db.iter().copied());
     }
 }
 
@@ -142,9 +158,11 @@ impl Instrument for Spectrum {
             0,
             0,
         ]);
-        self.write_db(avg, &mut f, bins, count);
+        let scratch = (&mut self.reduced, &mut self.db);
+        Self::write_db(self.complex, avg, &mut f, bins, count, scratch);
         if let Some(peak) = &self.peak {
-            self.write_db(peak, &mut f, bins, count);
+            let scratch = (&mut self.reduced, &mut self.db);
+            Self::write_db(self.complex, peak, &mut f, bins, count, scratch);
         }
         true
     }

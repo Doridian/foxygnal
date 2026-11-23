@@ -18,9 +18,6 @@ pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// A streaming server that sends nothing for this long is considered gone.
 pub(crate) const STALL_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Samples buffered between the I/O thread and the block (≈0.4 s at 2.4 MS/s).
-pub(crate) const RING_SAMPLES: usize = 1 << 20;
-
 /// `host:port`, with brackets around IPv6 literals.
 pub(crate) fn host_port(host: &str, port: u16) -> String {
     if host.contains(':') {
@@ -118,7 +115,8 @@ pub(crate) struct NetRx {
 impl NetRx {
     /// Spawn `io` on its own thread with the read side of `sock`. When `io`
     /// returns an error the stream ends with it (unless we are stopping).
-    pub(crate) fn spawn<F>(name: &str, sock: TcpStream, io: F) -> Result<Self>
+    /// `rate` (samples/s) sizes the ring between the thread and the block.
+    pub(crate) fn spawn<F>(name: &str, sock: TcpStream, rate: f64, io: F) -> Result<Self>
     where
         F: FnOnce(TcpStream, &mut Producer<Complex32>) -> std::result::Result<(), String>
             + Send
@@ -126,7 +124,7 @@ impl NetRx {
     {
         let writer = sock.try_clone()?;
         sock.set_read_timeout(Some(STALL_TIMEOUT))?;
-        let (mut producer, consumer) = ring::ring(RING_SAMPLES);
+        let (mut producer, consumer) = ring::ring(ring::rx_capacity(rate));
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
             error: Mutex::new(None),

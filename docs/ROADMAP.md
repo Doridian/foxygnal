@@ -66,13 +66,15 @@ Goal: a live FM receiver from an RTL-SDR with three clicks.
 
 Goal: credible numbers on a Raspberry Pi.
 
-- [ ] Benchmarks (`criterion`) per block plus whole-graph throughput, tracked in CI
-- [ ] Double-mapped ring buffers (contiguous slices)
-- [ ] Pooled scheduler; dedicated threads only where needed
-- [ ] SIMD kernels for FIR, FFT glue, complex multiply, and type conversion
-- [ ] Idle-CPU budget: a paused or throttled graph should use ≈0% CPU
+- [x] Benchmarks (`criterion`) per block plus whole-graph throughput, tracked in CI
+- [x] Double-mapped ring buffers (contiguous slices)
+- [x] Pooled scheduler; dedicated threads only where needed
+- [x] SIMD kernels for FIR, FFT glue, complex multiply, and type conversion
+- [x] Idle-CPU budget: a paused or throttled graph should use ≈0% CPU
 - [ ] Targets (to validate): 2.4 MS/s FM receiver under 25% of one Pi 4 core; engine RSS
       under 50 MB
+      — harness ready, to validate on a Pi: `foxygnal bench bench/fm-receiver-sim.fox.toml`,
+      aarch64 CI build ([PERFORMANCE.md](PERFORMANCE.md))
 
 ## M6: Ecosystem
 

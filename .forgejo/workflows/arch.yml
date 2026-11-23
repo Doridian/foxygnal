@@ -1,0 +1,76 @@
+name: aarch64 check
+
+# The Raspberry Pi target (docs/PERFORMANCE.md): make sure the workspace
+# compiles for 64-bit ARM Linux, and, when the runner has a cross linker,
+# build a release binary (UI embedded) to copy onto a Pi.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  check-aarch64:
+    runs-on: ${{ vars.MANAGED_RUNNER_TAG || 'ubuntu-26.04' }}
+    env:
+      CARGO_BUILD_WARNINGS: deny
+      TARGET: aarch64-unknown-linux-gnu
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7
+      - name: Set up Rust toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy
+          rustup target add "$TARGET"
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: aarch64
+      # `check` and `clippy` need the target's std but no linker or C libraries
+      # (the SDR drivers load their libraries at run time).
+      - name: Check (aarch64)
+        run: cargo check --workspace --all-targets --target "$TARGET"
+      - name: Clippy (aarch64)
+        run: cargo clippy --workspace --all-targets --target "$TARGET" -- -D warnings
+
+      # Everything below is best effort: a runner without apt or network
+      # access for the cross toolchain skips the binary, not the check.
+      - name: Install cross linker
+        id: cross
+        continue-on-error: true
+        run: |
+          if ! command -v aarch64-linux-gnu-gcc >/dev/null; then
+            SUDO=$(command -v sudo || true)
+            $SUDO apt-get update
+            $SUDO apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          fi
+          aarch64-linux-gnu-gcc --version
+      - name: Build UI
+        id: ui
+        if: steps.cross.outcome == 'success'
+        continue-on-error: true
+        working-directory: ui
+        run: npm ci && npm run build
+      - name: Build release binary (aarch64)
+        id: build
+        if: steps.cross.outcome == 'success'
+        continue-on-error: true
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          features=""
+          if [ "${{ steps.ui.outcome }}" = "success" ]; then features="--features embed-ui"; fi
+          cargo build --release --target "$TARGET" -p foxygnal $features
+          mkdir -p dist
+          cp "target/$TARGET/release/foxygnal" dist/foxygnal-aarch64-linux
+          cp -r bench dist/
+          file dist/foxygnal-aarch64-linux || true
+      - name: Upload binary
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: foxygnal-aarch64-linux
+          path: dist/
+          retention-days: 14

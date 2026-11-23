@@ -201,8 +201,9 @@ impl Device for SimDevice {
             version: AtomicU64::new(0),
             stop: AtomicBool::new(false),
         });
-        // Half a second of slack before samples are dropped.
-        let (producer, consumer) = ring::ring((cfg.sample_rate * 0.5) as usize);
+        // Sized like a hardware driver's ring (it used to hold 0.5 s, which
+        // rounds up to 16 MiB at 2.4 MS/s).
+        let (producer, consumer) = ring::ring(ring::rx_capacity(cfg.sample_rate));
         let mut gen_ = Generator::new(cfg.sample_rate, &self.stations, self.noise);
         let thread_ctl = ctl.clone();
         let thread = std::thread::Builder::new()

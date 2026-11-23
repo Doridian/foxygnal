@@ -432,7 +432,87 @@ fn xlating_fir_picks_a_channel_and_moves_the_centre() {
     assert!(err.contains("Nyquist") && err.contains("30 kHz"), "{err}");
 }
 
+/// Run `input` through one block with a given buffer capacity.
+fn run_with_capacity<I: Sample, O: Sample>(
+    kind: &str,
+    p: serde_json::Value,
+    input: Vec<I>,
+    m: StreamMeta,
+    capacity: usize,
+) -> Vec<O> {
+    let reg = foxygnal_blocks::registry();
+    let mut fg = Flowgraph::new().with_buffer_capacity(capacity);
+    let src = fg.add("src", VectorSource::instance_with_meta(input, m));
+    let blk = fg.add("blk", reg.build(kind, &params(p)).unwrap());
+    let (sink, out) = VectorSink::<O>::instance();
+    let sink = fg.add("sink", sink);
+    fg.connect(src, 0, blk, 0).unwrap();
+    fg.connect(blk, 0, sink, 0).unwrap();
+    fg.start().unwrap().wait().unwrap();
+    out.lock().unwrap().clone()
+}
+
+#[test]
+fn xlating_fir_output_does_not_depend_on_buffer_sizes() {
+    // The mixer runs in blocks ahead of the filter; whatever the buffer
+    // sizes, it must stay in step with the samples the filter takes.
+    let rate = 240_000.0;
+    let input = complex_tones(rate, 30_000, &[(51_000.0, 1.0), (47_500.0, 0.5)]);
+    let p = json!({"offset": 50000.0, "cutoff": 10000.0, "transition": 5000.0, "decimation": 4});
+    let want: Vec<Complex32> = run_with_capacity(
+        "freq_xlating_fir",
+        p.clone(),
+        input.clone(),
+        meta(rate),
+        1 << 16,
+    );
+    assert_eq!(want.len(), 7_500);
+    for cap in [5, 37, 1000, 4099] {
+        let got: Vec<Complex32> = run_with_capacity(
+            "freq_xlating_fir",
+            p.clone(),
+            input.clone(),
+            meta(rate),
+            cap,
+        );
+        assert_eq!(got.len(), want.len(), "capacity {cap}");
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).norm() < 1e-4,
+                "capacity {cap}, item {i}: {g} vs {w}"
+            );
+        }
+    }
+}
+
 // ---- Demodulators ----------------------------------------------------------------
+
+#[test]
+fn fm_demod_matches_an_exact_discriminator() {
+    // The demodulator uses a fast atan2; compare with f64 atan2 on the same
+    // samples. Output scale: ±deviation → ±1.
+    let rate = 240_000.0;
+    let input = fm_signal(rate, 20_000, 75_000.0, 3_000.0, 0.9);
+    let out: Vec<f32> = run_with_capacity(
+        "fm_demod",
+        json!({"deviation": 75000.0, "deemphasis": "off"}),
+        input.clone(),
+        meta(rate),
+        777,
+    );
+    let gain = rate / (TAU * 75_000.0);
+    let mut prev = Complex32::new(0.0, 0.0);
+    let mut worst = 0.0f64;
+    for (o, &x) in out.iter().zip(&input) {
+        let z = x * prev.conj();
+        let want = (z.im as f64).atan2(z.re as f64) * gain;
+        worst = worst.max((*o as f64 - want).abs());
+        prev = x;
+    }
+    // ~1e-7 rad of atan2 error × gain 0.51, plus f32 rounding: about
+    // −130 dB below full deviation.
+    assert!(worst < 1e-6, "worst error {worst}");
+}
 
 /// FM: phase = 2π·dev/rate·Σ m.
 fn fm_signal(rate: f64, n: usize, dev: f64, tone: f64, amp: f64) -> Vec<Complex32> {

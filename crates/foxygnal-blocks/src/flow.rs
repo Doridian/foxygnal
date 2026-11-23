@@ -95,6 +95,9 @@ fn pass_through(io: &mut WorkIo<'_>, max: usize) -> usize {
     n
 }
 
+/// How much stream time the throttle passes at once.
+const THROTTLE_BATCH: Duration = Duration::from_millis(2);
+
 pub struct Throttle {
     rate: f64,
     start: Option<Instant>,
@@ -116,14 +119,19 @@ impl Block for Throttle {
 
     fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
         let start = *self.start.get_or_insert_with(Instant::now);
-        let due = (start.elapsed().as_secs_f64() * self.rate) as u64;
+        let elapsed = start.elapsed().as_secs_f64();
+        let due = (elapsed * self.rate) as u64;
         let allowed = due.saturating_sub(self.passed) as usize;
-        if allowed == 0 {
-            // Park until an item is due: at least 1 ms, so slow rates pass
-            // items in small batches instead of waking per item, and at most
-            // 10 ms to stay responsive.
+        // Pass items in batches of THROTTLE_BATCH worth of time (at least one
+        // item). Neighbours wake the throttle whenever they produce or
+        // consume; passing every item as soon as it is due would make it
+        // ping-pong with them at full speed instead of idling.
+        let batch = ((self.rate * THROTTLE_BATCH.as_secs_f64()) as usize).max(1);
+        if allowed < batch {
+            // Sleep until the batch is due (the scheduler's timer wakes us).
+            let at = (self.passed + batch as u64) as f64 / self.rate;
             return Ok(WorkStatus::Wait(Duration::from_secs_f64(
-                (1.0 / self.rate).clamp(0.001, 0.01),
+                (at - elapsed).max(0.000_1),
             )));
         }
         let n = pass_through(io, allowed);

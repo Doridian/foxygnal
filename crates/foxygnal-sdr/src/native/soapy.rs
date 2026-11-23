@@ -273,6 +273,7 @@ fn enumerate_bounded(
         .name("soapy-scan".into())
         .spawn(move || {
             let r = (|| {
+                let _usb = super::usb_lock(super::USB_LOCK_WAIT)?;
                 let all = enumerate_now(api, &[])?;
                 let per_hint = hints
                     .iter()
@@ -370,8 +371,10 @@ impl Driver for SoapyDriver {
     fn open(&self, args: &DeviceArgs) -> Result<Box<dyn Device>> {
         let api = self.api()?;
         let kw = OwnedKwargs::new(api, args.pairs())?;
+        let usb = super::usb_lock(super::USB_LOCK_WAIT)?;
         // SAFETY: valid kwargs; may block while the device connects.
         let dev = unsafe { (api.SoapySDRDevice_make)(&kw.kw) };
+        drop(usb);
         if dev.is_null() {
             return Err(SdrError::Device(format!(
                 "SoapySDR could not open `{args}`: {}",
@@ -721,6 +724,8 @@ impl Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
+        // Close regardless if the lock can't be had: leaking is worse.
+        let _usb = super::usb_lock(super::USB_LOCK_WAIT).ok();
         // SAFETY: every stream owns an Arc, so all are closed.
         unsafe { (self.api.SoapySDRDevice_unmake)(self.dev.0) };
     }
@@ -814,7 +819,7 @@ impl Device for SoapyDevice {
         h.set_gain(SOAPY_SDR_TX, ch, Gain::Db(cfg.gain))?;
         let (stream, mtu) = h.open_stream(SOAPY_SDR_TX, ch)?;
 
-        let (producer, consumer) = ring::ring(super::rx_ring_capacity(cfg.sample_rate));
+        let (producer, consumer) = ring::ring(crate::ring::rx_capacity(cfg.sample_rate));
         let stop = Arc::new(AtomicBool::new(false));
         let underflows = Arc::new(AtomicU64::new(0));
         let io = TxIo {

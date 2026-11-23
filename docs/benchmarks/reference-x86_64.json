@@ -1,0 +1,274 @@
+{
+ "block/agc_c32": {
+  "elements": 524288,
+  "ns": 4906124.020292208
+ },
+ "block/agc_f32": {
+  "elements": 524288,
+  "ns": 6396164.56463955
+ },
+ "block/am_demod": {
+  "elements": 524288,
+  "ns": 4105833.2016170644
+ },
+ "block/c32_to_f32_magnitude": {
+  "elements": 524288,
+  "ns": 1438507.157309524
+ },
+ "block/c32_to_f32_phase": {
+  "elements": 524288,
+  "ns": 1784661.6857129172
+ },
+ "block/ci16_to_c32": {
+  "elements": 1048576,
+  "ns": 1488123.5119761906
+ },
+ "block/cu8_to_c32": {
+  "elements": 1048576,
+  "ns": 1357333.3779657478
+ },
+ "block/decimator_c32_10": {
+  "elements": 524288,
+  "ns": 4758936.022595899
+ },
+ "block/fir_filter_c32_127": {
+  "elements": 524288,
+  "ns": 13223055.49129365
+ },
+ "block/fir_filter_f32_127": {
+  "elements": 524288,
+  "ns": 10527540.680238094
+ },
+ "block/fm_demod": {
+  "elements": 524288,
+  "ns": 3592016.139626517
+ },
+ "block/freq_xlating_fir_198_dec10": {
+  "elements": 524288,
+  "ns": 4014027.909755799
+ },
+ "block/gain_c32": {
+  "elements": 524288,
+  "ns": 1522435.6657539683
+ },
+ "block/gain_f32": {
+  "elements": 524288,
+  "ns": 1160716.64603636
+ },
+ "block/passthrough_c32": {
+  "elements": 524288,
+  "ns": 1083664.1052669552
+ },
+ "block/rational_resampler_f32_240k_48k": {
+  "elements": 524288,
+  "ns": 4115030.070093537
+ },
+ "block/signal_source_c32": {
+  "elements": 524288,
+  "ns": 13906990.608025795
+ },
+ "block/signal_source_f32": {
+  "elements": 524288,
+  "ns": 12385804.413476193
+ },
+ "dot/avx2+fma/c32/128": {
+  "elements": 128,
+  "ns": 12.20616960034033
+ },
+ "dot/avx2+fma/c32/32": {
+  "elements": 32,
+  "ns": 4.9400919021985406
+ },
+ "dot/avx2+fma/c32/512": {
+  "elements": 512,
+  "ns": 40.30773418523797
+ },
+ "dot/avx2+fma/f32/128": {
+  "elements": 128,
+  "ns": 7.065327293562001
+ },
+ "dot/avx2+fma/f32/32": {
+  "elements": 32,
+  "ns": 3.952879416562628
+ },
+ "dot/avx2+fma/f32/512": {
+  "elements": 512,
+  "ns": 22.038709186932046
+ },
+ "dot/sse2/c32/128": {
+  "elements": 128,
+  "ns": 42.938480761141975
+ },
+ "dot/sse2/c32/32": {
+  "elements": 32,
+  "ns": 12.939482280499178
+ },
+ "dot/sse2/c32/512": {
+  "elements": 512,
+  "ns": 160.76050246373788
+ },
+ "dot/sse2/f32/128": {
+  "elements": 128,
+  "ns": 23.256586462903513
+ },
+ "dot/sse2/f32/32": {
+  "elements": 32,
+  "ns": 8.248303748180376
+ },
+ "dot/sse2/f32/512": {
+  "elements": 512,
+  "ns": 82.51626947907748
+ },
+ "fir/c32/127": {
+  "elements": 16384,
+  "ns": 260034.1738778136
+ },
+ "fir/c32/31": {
+  "elements": 16384,
+  "ns": 158500.82012910943
+ },
+ "fir/c32/511": {
+  "elements": 16384,
+  "ns": 755044.0425996162
+ },
+ "fir/f32/127": {
+  "elements": 16384,
+  "ns": 211706.35268443625
+ },
+ "fir/f32/31": {
+  "elements": 16384,
+  "ns": 161191.17605483992
+ },
+ "fir/f32/511": {
+  "elements": 16384,
+  "ns": 414198.8368573367
+ },
+ "graph/fm_receiver_2m4": {
+  "elements": 2097152,
+  "ns": 15586582.59875
+ },
+ "kernel/avx2+fma/fm_discriminate": {
+  "elements": 16384,
+  "ns": 11711.481595813504
+ },
+ "kernel/avx2+fma/i16_to_f32": {
+  "elements": 16384,
+  "ns": 573.2036801746603
+ },
+ "kernel/avx2+fma/magnitude": {
+  "elements": 16384,
+  "ns": 2131.4363253387673
+ },
+ "kernel/avx2+fma/mul_c32": {
+  "elements": 16384,
+  "ns": 3510.8471804267956
+ },
+ "kernel/avx2+fma/phase": {
+  "elements": 16384,
+  "ns": 8344.36603222386
+ },
+ "kernel/avx2+fma/power": {
+  "elements": 16384,
+  "ns": 1318.6284939523
+ },
+ "kernel/avx2+fma/power_to_db": {
+  "elements": 16384,
+  "ns": 4347.032807741391
+ },
+ "kernel/avx2+fma/rotate": {
+  "elements": 16384,
+  "ns": 6896.028407552821
+ },
+ "kernel/avx2+fma/u8_to_f32": {
+  "elements": 16384,
+  "ns": 576.5207861864701
+ },
+ "kernel/avx2+fma/window_c32": {
+  "elements": 16384,
+  "ns": 2284.8081770647955
+ },
+ "kernel/scalar/fm_discriminate_libm": {
+  "elements": 16384,
+  "ns": 140713.35084311734
+ },
+ "kernel/scalar/magnitude_hypot": {
+  "elements": 16384,
+  "ns": 43229.67317821788
+ },
+ "kernel/scalar/phase_libm": {
+  "elements": 16384,
+  "ns": 113836.12472688992
+ },
+ "kernel/sse2/fm_discriminate": {
+  "elements": 16384,
+  "ns": 33177.4698436717
+ },
+ "kernel/sse2/i16_to_f32": {
+  "elements": 16384,
+  "ns": 1732.6318723188278
+ },
+ "kernel/sse2/magnitude": {
+  "elements": 16384,
+  "ns": 4304.628452821984
+ },
+ "kernel/sse2/mul_c32": {
+  "elements": 16384,
+  "ns": 5700.433369197841
+ },
+ "kernel/sse2/phase": {
+  "elements": 16384,
+  "ns": 27020.958146629844
+ },
+ "kernel/sse2/power": {
+  "elements": 16384,
+  "ns": 2896.1996700743834
+ },
+ "kernel/sse2/power_to_db": {
+  "elements": 16384,
+  "ns": 11932.32030231371
+ },
+ "kernel/sse2/rotate": {
+  "elements": 16384,
+  "ns": 21360.4648136767
+ },
+ "kernel/sse2/u8_to_f32": {
+  "elements": 16384,
+  "ns": 1900.6534138013792
+ },
+ "kernel/sse2/window_c32": {
+  "elements": 16384,
+  "ns": 5027.616820786357
+ },
+ "resampler/240k_48k_f32_183taps": {
+  "elements": 16384,
+  "ns": 62404.78256681948
+ },
+ "resampler/48k_44k1_f32_5801taps": {
+  "elements": 16384,
+  "ns": 163857.7705979752
+ },
+ "resampler/decim10_c32_365taps": {
+  "elements": 16384,
+  "ns": 77429.37587289067
+ },
+ "resampler/xlate_dec10_c32_199taps": {
+  "elements": 16384,
+  "ns": 60020.71058395459
+ },
+ "rotator/block": {
+  "elements": 16384,
+  "ns": 6590.337376625954
+ },
+ "rotator/next": {
+  "elements": 16384,
+  "ns": 77322.9674062293
+ },
+ "spectrum/power/1024": {
+  "elements": 1024,
+  "ns": 1024.2356299244489
+ },
+ "spectrum/power/8192": {
+  "elements": 8192,
+  "ns": 10247.555919740425
+ }
+}

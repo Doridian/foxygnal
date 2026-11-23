@@ -8,9 +8,17 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-num-complex = "0.4.6"
+bytemuck = "1.25.2"
+num-complex = { version = "0.4.6", features = ["bytemuck"] }
 rustfft = "6.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
 
+[[bench]]
+name = "kernels"
+harness = false
+
 [lints]
 workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.7.0", default-features = false, features = ["cargo_bench_support"] }

@@ -159,18 +159,10 @@ impl HackrfDriver {
         }
     }
 
-    /// Loads libhackrf and calls `hackrf_init` once per load (the library
-    /// itself makes repeated init a no-op). We never call `hackrf_exit`: it
-    /// fails while any device is open, and the process exit cleans up.
+    /// Loads libhackrf. Initialization happens in [`usb`] before each use.
     fn api(&self) -> Result<&'static Api> {
         let load = |names: &[String]| {
-            let api = open_library(names, MISSING).and_then(|l| Api::resolve(l, "libhackrf"))?;
-            // SAFETY: no arguments; safe to call more than once.
-            let r = unsafe { (api.hackrf_init)() };
-            if r != 0 {
-                return Err(format!("hackrf_init failed: {}", err_name(api, r)));
-            }
-            Ok(api)
+            open_library(names, MISSING).and_then(|l| Api::resolve(l, "libhackrf"))
         };
         match &self.sonames {
             None => cached(&DEFAULT_API, || {
@@ -192,7 +184,26 @@ struct Listed {
     board: String,
 }
 
-/// Calls `f` with the device list, freeing it afterwards.
+/// Takes the shared USB lock and (re)initializes libhackrf under it.
+/// `hackrf_init` is a no-op while its libusb context exists; it recreates the
+/// context after SoapyHackRF's `hackrf_exit` freed it. We never call
+/// `hackrf_exit` ourselves: the process exit cleans up.
+fn usb(api: &Api) -> Result<std::sync::MutexGuard<'static, ()>> {
+    let g = super::usb_lock(super::USB_LOCK_WAIT)?;
+    // SAFETY: no arguments; the USB lock serializes it with init/exit calls
+    // from other users of the library.
+    let r = unsafe { (api.hackrf_init)() };
+    if r != 0 {
+        return Err(SdrError::Device(format!(
+            "hackrf_init failed: {}",
+            err_name(api, r)
+        )));
+    }
+    Ok(g)
+}
+
+/// Calls `f` with the device list, freeing it afterwards. The caller holds
+/// [`usb`].
 fn with_list<T>(api: &Api, f: impl FnOnce(*mut DeviceList, Vec<Listed>) -> T) -> Result<T> {
     // SAFETY: the list is valid until freed below; arrays have `devicecount`
     // entries.
@@ -257,6 +268,7 @@ impl Driver for HackrfDriver {
 
     fn discover(&self) -> Result<Vec<DeviceInfo>> {
         let api = self.api()?;
+        let _usb = usb(api)?;
         with_list(api, |_, listed| listed.iter().map(info_for).collect())
     }
 
@@ -265,6 +277,7 @@ impl Driver for HackrfDriver {
         let amp = flag(args, "amp")?;
         let bias = flag(args, "bias_tee")?;
         let mut dev: *mut Dev = std::ptr::null_mut();
+        let usb = usb(api)?;
         let (r, info) = if let Some(i) = args.get_parsed::<c_int>("index")? {
             with_list(api, |list, listed| {
                 let Some(l) = listed.iter().find(|l| l.index == i) else {
@@ -300,6 +313,7 @@ impl Driver for HackrfDriver {
             };
             (r, info)
         };
+        drop(usb);
         if r != 0 || dev.is_null() {
             return Err(SdrError::Device(format!(
                 "could not open the HackRF: {} (in use, or check USB permissions)",
@@ -453,6 +467,8 @@ impl Drop for StreamClaim<'_> {
 
 impl Drop for Handle {
     fn drop(&mut self) {
+        // Close regardless if the lock can't be had: leaking is worse.
+        let _usb = super::usb_lock(super::USB_LOCK_WAIT).ok();
         // SAFETY: every stream owns an Arc, so none is running.
         unsafe { (self.api.hackrf_close)(self.dev.0) };
     }
@@ -531,7 +547,7 @@ impl Device for HackrfDevice {
         h.setup(cfg.sample_rate, cfg.bandwidth, cfg.frequency)?;
         h.set_tx_gain(cfg.gain)?;
 
-        let (producer, consumer) = ring::ring(super::rx_ring_capacity(cfg.sample_rate));
+        let (producer, consumer) = ring::ring(crate::ring::rx_capacity(cfg.sample_rate));
         let underflows = Arc::new(AtomicU64::new(0));
         let ctx = Box::into_raw(Box::new(TxPump::new(consumer, underflows.clone())));
         // SAFETY: `ctx` lives until stop_tx returned (see HackrfTx::drop).

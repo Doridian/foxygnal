@@ -3,11 +3,13 @@
 
 pub mod filter;
 pub mod fir;
+pub mod kernels;
 pub mod spectrum;
 pub mod window;
 
 pub use filter::{FilterSample, OnePole, Resampler, Rotator};
 pub use fir::{Band, DesignError, DesignWindow, FirSpec};
+pub use kernels::{Kernels, kernels};
 pub use num_complex::Complex32;
 pub use spectrum::PowerSpectrum;
 pub use window::Window;

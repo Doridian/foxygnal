@@ -34,6 +34,16 @@ struct Shared<T> {
 unsafe impl<T: Send> Sync for Shared<T> {}
 unsafe impl<T: Send> Send for Shared<T> {}
 
+/// Ring size for a receive stream at `rate` samples/s: about 1/8 s of
+/// samples (at least 64 Ki, at most 4 Mi; [`ring`] rounds up to a power of
+/// two, so 2.4 MS/s gets 512 Ki = 0.22 s, 4 MiB of `Complex32`). The ring
+/// only has to cover the time the block's thread may lag behind the driver;
+/// the graph's own buffers come after it. Every slot is written when the
+/// ring is made, so its whole size counts towards the process's RSS.
+pub(crate) fn rx_capacity(rate: f64) -> usize {
+    ((rate / 8.0) as usize).clamp(1 << 16, 1 << 22)
+}
+
 /// A ring holding at least `min_capacity` items (rounded up to a power of two).
 pub fn ring<T: Copy + Default + Send>(min_capacity: usize) -> (Producer<T>, Consumer<T>) {
     let cap = min_capacity.max(2).next_power_of_two();

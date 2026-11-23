@@ -7,6 +7,9 @@ use foxygnal_core::{
 };
 use foxygnal_dsp::{Band, DesignWindow, FilterSample, FirSpec, Resampler, Rotator};
 
+/// Input samples the frequency-translating FIR mixes per pass.
+const XLATE_CHUNK: usize = 4096;
+
 use crate::design::{self, fmt_hz, fmt_rate};
 use crate::params;
 
@@ -393,6 +396,8 @@ pub struct XlatingFir {
     taps: Vec<f32>,
     rot: Rotator,
     filter: Option<Resampler<Complex32>>,
+    /// Mixed input, [`XLATE_CHUNK`] samples.
+    mixed: Vec<Complex32>,
 }
 
 impl Block for XlatingFir {
@@ -404,6 +409,7 @@ impl Block for XlatingFir {
             .design()
             .map_err(|e| design::design_error(e, self.rate))?;
         self.filter = Some(Resampler::new(1, self.cfg.decimation, &self.taps));
+        self.mixed = vec![Complex32::default(); XLATE_CHUNK];
         self.rot.set_freq(-self.cfg.offset / self.rate);
         let out_rate = self.rate / self.cfg.decimation as f64;
         for o in cx.outputs.iter_mut() {
@@ -415,9 +421,24 @@ impl Block for XlatingFir {
 
     fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
         let filter = self.filter.as_mut().ok_or_else(not_configured)?;
-        let rot = &mut self.rot;
         let (inp, out) = io.in_out::<Complex32, Complex32>(0, 0);
-        let (used, made) = filter.process_with(inp, out, |x| rot.next(x));
+        let (mut used, mut made) = (0, 0);
+        // Mix a chunk (SIMD rotator), then filter it. Taking exactly what
+        // the filter will consume keeps the mixer's phase in step.
+        loop {
+            let n = (inp.len() - used)
+                .min(filter.inputs_for(out.len() - made))
+                .min(XLATE_CHUNK);
+            if n == 0 {
+                break;
+            }
+            let mixed = &mut self.mixed[..n];
+            self.rot.rotate(&inp[used..used + n], mixed);
+            let (u, m) = filter.process(mixed, &mut out[made..]);
+            debug_assert_eq!(u, n, "the filter took a different amount than inputs_for");
+            used += u;
+            made += m;
+        }
         if used == 0 && made == 0 {
             return Ok(WorkStatus::Blocked);
         }
@@ -459,6 +480,7 @@ fn build_xlating(p: &ParamReader<'_>) -> Result<Instance, Error> {
             taps: Vec::new(),
             rot: Rotator::new(0.0),
             filter: None,
+            mixed: Vec::new(),
         }),
         inputs: vec![("in".into(), StreamType::C32)],
         outputs: vec![("out".into(), StreamType::C32)],

@@ -6,6 +6,7 @@ use num_complex::Complex32;
 use rustfft::{Fft, FftPlanner};
 
 use crate::Window;
+use crate::kernels::{Kernels, kernels};
 
 /// Computes windowed power spectra of a fixed size.
 ///
@@ -19,6 +20,7 @@ pub struct PowerSpectrum {
     norm: f32,
     buf: Vec<Complex32>,
     scratch: Vec<Complex32>,
+    k: &'static Kernels,
 }
 
 impl PowerSpectrum {
@@ -33,6 +35,7 @@ impl PowerSpectrum {
             window,
             norm: 1.0 / (gain * gain),
             buf: vec![Complex32::default(); size],
+            k: kernels(),
         }
     }
 
@@ -45,15 +48,16 @@ impl PowerSpectrum {
     pub fn compute(&mut self, input: &[Complex32], out: &mut [f32]) {
         assert_eq!(input.len(), self.size());
         assert_eq!(out.len(), self.size());
-        for ((b, x), w) in self.buf.iter_mut().zip(input).zip(&self.window) {
-            *b = x * w;
-        }
+        (self.k.mul_c32_f32)(input, &self.window, &mut self.buf);
         self.fft
             .process_with_scratch(&mut self.buf, &mut self.scratch);
-        for (o, b) in out.iter_mut().zip(&self.buf) {
-            *o = b.norm_sqr() * self.norm;
-        }
+        (self.k.power)(&self.buf, self.norm, out);
     }
+}
+
+/// `10·log10(p)` of each power value (floored at −200 dB), vectorized.
+pub fn power_to_db(p: &[f32], db: &mut [f32]) {
+    (kernels().power_to_db)(p, db)
 }
 
 #[cfg(test)]

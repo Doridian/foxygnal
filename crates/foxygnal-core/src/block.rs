@@ -17,8 +17,8 @@ pub enum WorkStatus {
     /// sleeps until a neighbour signals, and handles end-of-stream.
     Blocked,
     /// Nothing to do until roughly this much time has passed (a throttle
-    /// waiting for its next item). The scheduler parks for at most this long;
-    /// a neighbour may wake the block earlier. Never sleep inside `work`.
+    /// waiting for its next item). The scheduler runs the block again after
+    /// this long; a neighbour may wake it earlier. Never sleep inside `work`.
     Wait(Duration),
     /// The block is finished (e.g. a file source hit EOF).
     Done,
@@ -50,8 +50,24 @@ pub trait Block: Send + 'static {
         TagPropagation::AllToAll
     }
 
-    /// Called once before the first `work`, on the block's own thread. Open
-    /// files and devices here, not in the factory.
+    /// Run this block on a thread of its own instead of the shared worker
+    /// pool. Then `start`, every `work` and `set_param`, and `stop` all run
+    /// on that one thread, which parks while the block is idle, so
+    /// `std::thread::current()` is a valid handle to wake the block with
+    /// (hardware blocks hand it to their driver threads). Ask for this if
+    /// the block registers its thread with something else, uses
+    /// thread-affine APIs (audio streams), or may block for long in `work`.
+    ///
+    /// Pooled blocks (the default) are called by whichever worker runs them,
+    /// one call at a time: never concurrently, but not always on the same
+    /// thread.
+    fn dedicated_thread(&self) -> bool {
+        false
+    }
+
+    /// Called once before the first `work`, on the thread that runs the
+    /// block's first `work` (see [`Self::dedicated_thread`]). Open files and
+    /// devices here, not in the factory.
     fn start(&mut self) -> Result<(), Error> {
         Ok(())
     }
@@ -62,7 +78,7 @@ pub trait Block: Send + 'static {
     }
 
     /// Apply a parameter flagged `live` in the descriptor while running.
-    /// Called on the block's own thread between `work` calls. The value has
+    /// Called between `work` calls, never during one. The value has
     /// already been checked against the parameter's spec.
     fn set_param(&mut self, name: &str, _value: &serde_json::Value) -> Result<(), Error> {
         Err(Error::Other(format!(

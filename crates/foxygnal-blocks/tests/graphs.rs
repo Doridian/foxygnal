@@ -1,5 +1,5 @@
 use foxygnal_blocks::testing::{Collected, VectorSink, VectorSource};
-use foxygnal_core::{Flowgraph, GraphSpec, Params};
+use foxygnal_core::{BufferKind, Flowgraph, GraphSpec, Params};
 use serde_json::json;
 
 fn params(v: serde_json::Value) -> Params {
@@ -8,10 +8,17 @@ fn params(v: serde_json::Value) -> Params {
 
 #[test]
 fn add_two_vectors_through_small_buffers() {
+    // Tiny buffers force many wrap-arounds and back-pressure cycles. Double-
+    // mapped buffers are at least a page (1024 f32), so give them more data.
+    add_two_vectors(BufferKind::Plain, 10_000);
+    add_two_vectors(BufferKind::Auto, 100_000);
+}
+
+fn add_two_vectors(kind: BufferKind, n: usize) {
     let reg = foxygnal_blocks::registry();
-    // Tiny buffers force many wrap-arounds and back-pressure cycles.
-    let mut fg = Flowgraph::new().with_buffer_capacity(7);
-    let n = 10_000;
+    let mut fg = Flowgraph::new()
+        .with_buffer_capacity(7)
+        .with_buffer_kind(kind);
     let a = fg.add(
         "a",
         VectorSource::instance((0..n).map(|i| i as f32).collect()),
@@ -394,11 +401,22 @@ impl foxygnal_core::Block for KeepOneIn {
 
 #[test]
 fn tags_flow_through_blocks_and_scale_with_the_rate() {
+    // Small buffers: tags must stay with their items across wrap-arounds.
+    // Double-mapped buffers hand the decimator every available item, so any
+    // capacity works (it is rounded up to a page, 1024 f32: tag 1501 sits
+    // past the wrap point).
+    tags_through_blocks(BufferKind::Auto, 13);
+    // The plain fallback stops slices at the wrap point: the capacity must be
+    // even, or the decimator would wait forever for a pair at the wrap.
+    tags_through_blocks(BufferKind::Plain, 14);
+}
+
+fn tags_through_blocks(kind: BufferKind, capacity: usize) {
     use foxygnal_core::{Instance, StreamType, Tag, TagValue};
     let reg = foxygnal_blocks::registry();
-    // Small buffers: tags must stay with their items across wrap-arounds.
-    // Even, so the decimator never sees a 1-item slice at the wrap point.
-    let mut fg = Flowgraph::new().with_buffer_capacity(14);
+    let mut fg = Flowgraph::new()
+        .with_buffer_capacity(capacity)
+        .with_buffer_kind(kind);
     let n = 2_000;
     let tags = vec![
         Tag::new(0, "start", true),
@@ -457,4 +475,33 @@ fn tags_flow_through_blocks_and_scale_with_the_rate() {
         [(0, "start"), (5, "freq"), (5, "burst"), (750, "label")].map(|(o, k)| (o, k.to_string()))
     );
     assert_eq!(half_data.lock().unwrap()[750], 1500.0);
+}
+
+/// A block that needs 3 items at a time on a 1024-item ring: with slices
+/// that stopped at the wrap point it would wait forever at item 1023.
+#[test]
+fn decimate_by_three_never_stalls_at_the_wrap() {
+    use foxygnal_core::{Instance, StreamType};
+    let n = 30_000;
+    let mut fg = Flowgraph::new().with_buffer_capacity(1024);
+    let src = fg.add(
+        "src",
+        VectorSource::instance((0..n).map(|i| i as f32).collect()),
+    );
+    let dec = fg.add(
+        "dec",
+        Instance {
+            block: Box::new(KeepOneIn(3)),
+            inputs: vec![("in".into(), StreamType::F32)],
+            outputs: vec![("out".into(), StreamType::F32)],
+        },
+    );
+    let (sink, out) = VectorSink::<f32>::instance();
+    let sink = fg.add("sink", sink);
+    fg.connect(src, 0, dec, 0).unwrap();
+    fg.connect(dec, 0, sink, 0).unwrap();
+    fg.start().unwrap().wait().unwrap();
+    let out = out.lock().unwrap();
+    assert_eq!(out.len(), n / 3);
+    assert!(out.iter().enumerate().all(|(i, &v)| v == (3 * i) as f32));
 }

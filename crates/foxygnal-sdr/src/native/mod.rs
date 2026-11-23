@@ -118,12 +118,51 @@ pub(crate) fn open_library<S: AsRef<str>>(
     }
 }
 
+/// Serializes calls into libraries that share process-wide USB state.
+///
+/// SoapySDR loads its own modules, which link the same `libhackrf.so` we
+/// dlopen; SoapyHackRF calls `hackrf_init`/`hackrf_exit` around every scan,
+/// and `hackrf_exit` frees the libusb context libhackrf keeps in a global.
+/// So every libhackrf list/open/close and every SoapySDR enumerate/make/unmake
+/// holds this lock, and libhackrf users re-run `hackrf_init` under it.
+static USB_LIBS: Mutex<()> = Mutex::new(());
+
+/// How long [`usb_lock`] waits before giving up (a SoapySDR module may be
+/// stuck scanning the network while holding it).
+pub(crate) const USB_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Takes [`USB_LIBS`], waiting at most `wait`.
+pub(crate) fn usb_lock(wait: std::time::Duration) -> Result<std::sync::MutexGuard<'static, ()>> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match USB_LIBS.try_lock() {
+            Ok(g) => return Ok(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Ok(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(SdrError::Device(
+                "another driver is busy with USB (a SoapySDR scan may be stuck); try again".into(),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// Returns the cached symbol table, loading it on first use. Failures aren't
 /// cached, so installing the library later works without a restart.
 pub(crate) fn cached<A: Sync + 'static>(
     cell: &OnceLock<&'static A>,
     load: impl FnOnce() -> std::result::Result<&'static A, String>,
 ) -> Result<&'static A> {
+    if let Some(a) = cell.get() {
+        return Ok(a);
+    }
+    // One load at a time, process-wide: library init functions (hackrf_init's
+    // libusb_init into a global context, for one) are not thread-safe, and
+    // discovery from the UI can race a block opening its device.
+    static LOADING: Mutex<()> = Mutex::new(());
+    let _guard = LOADING.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(a) = cell.get() {
         return Ok(a);
     }
@@ -163,11 +202,6 @@ impl<T> Copy for RawPtr<T> {}
 // SAFETY: see above; each driver documents how it uses its handle.
 unsafe impl<T> Send for RawPtr<T> {}
 unsafe impl<T> Sync for RawPtr<T> {}
-
-/// Ring size for a receive stream: about 1/8 s of samples, at least 64 Ki.
-pub(crate) fn rx_ring_capacity(rate: f64) -> usize {
-    ((rate / 8.0) as usize).clamp(1 << 16, 1 << 22)
-}
 
 /// Unsigned 8-bit IQ (RTL-SDR) to complex float: `(x − 127.5) / 127.5`.
 /// Converts `min(src.len() / 2, dst.len())` samples and returns that count.
@@ -246,7 +280,7 @@ pub(crate) struct RxRing {
 
 impl RxRing {
     pub(crate) fn new(rate: f64) -> (Producer<Complex32>, Self, Arc<Mutex<Option<String>>>) {
-        let (p, c) = ring::ring(rx_ring_capacity(rate));
+        let (p, c) = ring::ring(ring::rx_capacity(rate));
         let error = Arc::new(Mutex::new(None));
         (
             p,

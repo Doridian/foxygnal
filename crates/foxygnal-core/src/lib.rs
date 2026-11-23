@@ -10,10 +10,12 @@ pub mod registry;
 pub mod resolve;
 pub mod runtime;
 pub mod sample;
+mod sched;
 pub mod tag;
+mod vmem;
 
 pub use block::{Block, InputPort, OutputPort, WorkIo, WorkStatus};
-pub use buffer::{Tap, TapRead};
+pub use buffer::{BufferKind, Tap, TapRead};
 pub use graph::GraphSpec;
 pub use meta::{Configure, StreamMeta};
 pub use registry::{

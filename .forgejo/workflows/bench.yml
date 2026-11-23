@@ -1,0 +1,77 @@
+name: Benchmarks
+
+# Criterion benchmarks of the DSP kernels, the blocks and the FM receiver
+# graph (docs/BENCHMARKS.md), in a quick mode. Shared runners are noisy, so
+# this reports and never fails on a slowdown: read the table in the log or
+# download the `criterion-*` artifact.
+#
+# On a pull request the base branch is benchmarked first, on the same runner,
+# and the table compares the two. On main the results are uploaded.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ${{ vars.MANAGED_RUNNER_TAG || 'ubuntu-26.04' }}
+    env:
+      # Short warm-up and measurement: minutes, not tens of minutes.
+      BENCH: cargo bench -p foxygnal-dsp -p foxygnal-blocks --bench kernels --bench blocks --
+      BENCH_ARGS: --warm-up-time 0.5 --measurement-time 1 --noplot
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set up Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - name: Runner
+        run: |
+          grep -m1 'model name' /proc/cpuinfo || uname -m
+          echo "cores: $(nproc)"
+
+      - name: Benchmark the base branch
+        id: base
+        if: github.event_name == 'pull_request'
+        # The base may predate the benchmarks; then there is nothing to compare.
+        continue-on-error: true
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" "origin/$BASE_REF"
+          cd "$RUNNER_TEMP/base"
+          $BENCH $BENCH_ARGS --save-baseline base
+
+      - name: Benchmark this commit
+        run: $BENCH $BENCH_ARGS --save-baseline head
+
+      - name: Report
+        run: |
+          mkdir -p bench-report
+          if [ "${{ steps.base.outcome }}" = "success" ]; then
+            python3 scripts/bench-report.py table --baseline base | tee bench-report/summary.md
+          else
+            python3 scripts/bench-report.py table | tee bench-report/summary.md
+          fi
+          python3 scripts/bench-report.py export bench-report/results.json
+          echo
+          echo "Against the committed reference numbers (a different machine: only big moves mean anything):"
+          python3 scripts/bench-report.py diff docs/benchmarks/reference-x86_64.json || true
+
+      - name: Upload results
+        if: always()
+        continue-on-error: true
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: criterion-${{ github.event_name }}-${{ github.sha }}
+          path: |
+            bench-report/
+            target/criterion/
+          retention-days: 30

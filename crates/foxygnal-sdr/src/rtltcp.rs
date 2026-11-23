@@ -330,7 +330,9 @@ impl Device for RtlTcpDevice {
             .write_all(&bytes)
             .map_err(|e| SdrError::Device(format!("rtl_tcp at {hp}: sending settings: {e}")))?;
         let io_hp = hp.clone();
-        let rx = NetRx::spawn("rtltcp-rx", sock, move |s, p| io_loop(s, p, &io_hp))?;
+        let rx = NetRx::spawn("rtltcp-rx", sock, cfg.sample_rate, move |s, p| {
+            io_loop(s, p, &io_hp)
+        })?;
         Ok(Box::new(RtlTcpRx {
             rx,
             hp,

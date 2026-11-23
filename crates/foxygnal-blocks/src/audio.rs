@@ -408,6 +408,12 @@ mod device {
     }
 
     impl Block for AudioSink {
+        // The device callback unparks the thread that ran `start`, and cpal
+        // streams are best created and dropped on one thread.
+        fn dedicated_thread(&self) -> bool {
+            true
+        }
+
         fn configure(&mut self, cx: &mut Configure<'_>) -> Result<(), Error> {
             let rate = cx.inputs[0].sample_rate.ok_or_else(|| {
                 Error::Other(
@@ -522,6 +528,12 @@ mod device {
     }
 
     impl Block for AudioSource {
+        // The device callback unparks the thread that ran `start`, and cpal
+        // streams are best created and dropped on one thread.
+        fn dedicated_thread(&self) -> bool {
+            true
+        }
+
         fn configure(&mut self, cx: &mut Configure<'_>) -> Result<(), Error> {
             whole_hz(self.rate).map_err(Error::Other)?;
             cx.set_rate(self.rate);

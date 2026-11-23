@@ -327,6 +327,11 @@ impl SdrSource {
 }
 
 impl Block for SdrSource {
+    // The driver thread wakes the block by unparking the thread that ran `start`.
+    fn dedicated_thread(&self) -> bool {
+        true
+    }
+
     fn configure(&mut self, cx: &mut Configure<'_>) -> Result<(), Error> {
         for o in cx.outputs.iter_mut() {
             o.sample_rate = Some(self.sample_rate);
@@ -500,6 +505,11 @@ pub const NOT_ARMED: &str = "transmitting is not armed. Only the engine arms TX,
                              \"Arm TX and run\", or pass `--arm-tx` to `foxygnal run`";
 
 impl Block for SdrSink {
+    // The driver thread wakes the block by unparking the thread that ran `start`.
+    fn dedicated_thread(&self) -> bool {
+        true
+    }
+
     fn configure(&mut self, cx: &mut Configure<'_>) -> Result<(), Error> {
         if self.device.trim().is_empty() {
             return Err(Error::Other(
