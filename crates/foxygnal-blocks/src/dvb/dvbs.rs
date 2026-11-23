@@ -201,7 +201,7 @@ pub struct DvbsModulator {
 
 /// QPSK point for bits (I, Q): 0 → +, 1 → − on each axis.
 #[inline]
-fn qpsk(i: u8, q: u8) -> Complex32 {
+pub(super) fn qpsk(i: u8, q: u8) -> Complex32 {
     let a = |b: u8| {
         if b == 0 {
             FRAC_1_SQRT_2

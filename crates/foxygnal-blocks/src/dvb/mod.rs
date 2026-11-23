@@ -26,6 +26,9 @@ pub mod rs;
 pub mod scramble;
 pub mod viterbi;
 
+#[cfg(test)]
+mod grdtv_vectors;
+
 use foxygnal_core::Registry;
 
 pub use dvbs::{DvbsDemodulator, DvbsModulator};

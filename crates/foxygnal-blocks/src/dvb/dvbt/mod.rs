@@ -40,7 +40,7 @@
 //!    re-encoded BER) → Viterbi → packet sync → outer deinterleaver → RS →
 //!    energy dispersal removal.
 
-mod frame;
+pub(super) mod frame;
 mod resample;
 mod rx;
 
