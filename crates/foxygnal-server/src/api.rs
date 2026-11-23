@@ -239,8 +239,14 @@ pub(crate) const EXAMPLES: &[Example] = &[
     Example {
         name: "adsb",
         title: "ADS-B aircraft decoder",
-        description: "An SDR at 1090 MHz, 2 MS/s → ADS-B decoder. Needs a real receiver. Click the wire into the log and choose Messages to read call signs, altitudes and positions.",
+        description: "An SDR at 1090 MHz, 2.4 MS/s → Mode S / ADS-B decoder (extended squitters, altitude and identity replies, Comm-B). Needs a real receiver. Click the wire into the log and choose Messages to read call signs, altitudes and positions.",
         toml: include_str!("../../../examples/adsb.fox.toml"),
+    },
+    Example {
+        name: "uat",
+        title: "UAT aircraft and weather decoder",
+        description: "An SDR at 978 MHz, 2.083 MS/s → FM demod → UAT decoder: ADS-B from US general aviation and FIS-B weather text (METAR, TAF, NOTAM) from ground stations. Needs a real receiver in the US.",
+        toml: include_str!("../../../examples/uat.fox.toml"),
     },
     Example {
         name: "pocsag",

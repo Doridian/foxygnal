@@ -26,12 +26,14 @@ mod packet;
 pub mod pocsag;
 mod sync;
 mod text;
+mod uat;
 
 use std::time::Duration;
 
 use foxygnal_core::{Complex32, Configure, Registry, Sample, WorkIo, WorkStatus};
 
 pub use adsb::{AdsbDecoder, Cpr, ModeS, cpr_global};
+pub use uat::UatDecoder;
 
 pub fn register(r: &mut Registry) {
     sync::register(r);
@@ -40,6 +42,7 @@ pub fn register(r: &mut Registry) {
     adsb::register(r);
     acars::register(r);
     ais::register(r);
+    uat::register(r);
     pocsag::register(r);
     flex::register(r);
     afsk::register(r);

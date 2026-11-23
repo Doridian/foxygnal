@@ -401,8 +401,8 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
 
 ## Decoded messages (M6)
 
-Decoders (`adsb_decoder`, `rds_decoder`, `pocsag_decoder`, `flex_decoder`, `ais_decoder`,
-`acars_decoder`, `hdlc_deframer`,
+Decoders (`adsb_decoder`, `uat_decoder`, `rds_decoder`, `pocsag_decoder`, `flex_decoder`,
+`ais_decoder`, `acars_decoder`, `hdlc_deframer`,
 `packet_decoder` in hex mode, …) need a way to show a
 person what they found, without per-block UI code. The convention: **a decoded message is one line of
 UTF-8 text, `\n`-terminated, on a `u8` output.** Lines are `key=value` fields where that
@@ -435,6 +435,44 @@ once it has gone out, so a stalled consumer back-pressures the decoder and forma
 not allocate on the hot path. If the input ends while a message waits for room downstream,
 the decoder waits (`WorkStatus::Wait`) instead of finishing, unless every reader has left
 (`OutputPort::abandoned`).
+
+### Mode S and UAT (M11)
+
+`adsb_decoder` (`blocks/src/digital/adsb/`) reads every Mode S downlink format a passive
+receiver can use, and `uat_decoder` (`blocks/src/digital/uat/`) the 978 MHz UAT link. Both
+keep the line convention above; Mode S lines still start `t=… icao=… df=…` (DF17/18 then
+`tc=…`), so existing filters keep working.
+
+- **Pulses at any phase and rate.** The magnitude is treated as a step function and
+  integrated over the exact interval of each pulse (a running sum makes each integral two
+  lookups). The preamble's start is searched to 1/8 sample, then each bit compares its two
+  halves with decision feedback for the energy a sample shared across a half-bit boundary
+  leaks from the previous pulse (threshold `λ·A·(prev − ½)`, `λ = f(1 − f)/h`). This works
+  from 2 MS/s up; at exactly 2 MS/s a reply half a sample off keeps only a quarter of its
+  eye, so 2.4 MS/s or more is the template default. Mode A/C uses the same integrals.
+- **What is believed.** DF11/17/18 have a plain CRC: 1-bit repair from a syndrome table, and
+  optionally 2-bit (DF17/18, sorted table of all 5671 pairs, unique for the Mode S code) for
+  addresses already known. DF0/4/5/16/20/21 have address/parity, so any noise "decodes" to
+  some address: those are kept only if that address sent an intact DF11 or DF17 in the last
+  60 s. Aircraft live in a fixed 1024-slot open-addressing table (16 probes, the stalest slot
+  replaced), which also holds CPR frames, the last position, altitude and ADS-B velocity.
+- **Comm-B** registers are inferred: 2,0, 3,0 and 1,0 carry their number; 1,7 has a fixed
+  shape; 4,0/5,0/6,0 are tested for reserved bits, status/value consistency and range (and
+  6,0's Mach against its IAS at the reported altitude in the ISA atmosphere). If 5,0 and 6,0
+  both fit, the aircraft's ADS-B ground speed and track break the tie, else `bds=ambiguous`.
+- **CPR**: a global pair (10 s airborne, 25 s surface; surface needs a reference to pick the
+  quadrant), else local decoding from the aircraft's position of the last minute, else from
+  the `receiver` position (within 180 NM airborne, 45 NM surface); positions beyond 300 NM of
+  the receiver are dropped.
+- **UAT**: the FM discriminator is sliced at zero at every sample and 36 bits a bit period
+  apart compared with the ADS-B sync word (≤ 4 wrong bits; the uplink word is its
+  complement, so one count serves both). A match is refined to a quarter sample by soft
+  correlation, the threshold is the midpoint of the sync's mean 1 and 0 (which cancels a
+  frequency offset), and bits are read by linear interpolation, so any rate from 2.083 MS/s
+  works. Reed-Solomon is a small errors-only decoder over GF(2⁸)/`0x187` with first root
+  α¹²⁰ (`uat/rs.rs`), separate from DVB's (`0x11D`, α⁰). Uplink lines are followed by one line
+  per FIS-B text record (product 413 METAR/TAF/…; text records of the NOTAM/AIRMET/SIGMET
+  products); graphical products are counted.
 
 ## Positions on a map
 

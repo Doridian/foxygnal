@@ -455,7 +455,17 @@ fn the_adsb_example_builds_and_configures() {
     let mut fg = Flowgraph::from_spec(&spec, &foxygnal_blocks::registry()).unwrap();
     let edges = fg.configure().unwrap();
     let into = edges.iter().find(|e| e.to == "adsb.in").unwrap();
-    assert_eq!(into.meta.sample_rate, Some(2e6));
+    assert_eq!(into.meta.sample_rate, Some(2.4e6));
+}
+
+#[test]
+fn the_uat_example_builds_and_configures() {
+    let spec = foxygnal_core::GraphSpec::from_toml(include_str!("../../../examples/uat.fox.toml"))
+        .unwrap();
+    let mut fg = Flowgraph::from_spec(&spec, &foxygnal_blocks::registry()).unwrap();
+    let edges = fg.configure().unwrap();
+    let into = edges.iter().find(|e| e.to == "uat.in").unwrap();
+    assert!((into.meta.sample_rate.unwrap() - 2_083_333.333).abs() < 1.0);
 }
 
 #[test]

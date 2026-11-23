@@ -84,7 +84,7 @@ Goal: credible numbers on a Raspberry Pi.
       without a restart, an on-disk compile cache
 - [x] Digital modes: FSK/PSK modems, clock recovery, packet framing, a few decoders (ADS-B, POCSAG, …)
       — clock recovery (Gardner / M&M), Costas loop, slicer, PSK demapper, 2-FSK, access
-      code + packet decoder, ADS-B (DF17/18 only, no Mode S phase correction or local CPR);
+      code + packet decoder, ADS-B (DF17/18 only at first; all of Mode S and UAT in M11);
       decoded messages are text lines shown by the generic Messages instrument. Not yet:
       POCSAG, AX.25/HDLC, FEC, GFSK/GMSK, multi-level FSK
 - [x] Recording and playback workflow (SigMF-annotated captures)
@@ -188,8 +188,15 @@ template.
   - [x] ACARS (AM, 2400 bit/s MSK): coherent MSK, parity and CRC with two-bit repair; "ACARS"
         template
   - [ ] VDL Mode 2 (D8PSK, 31.5 kBd, AVLC)
-  - [ ] Mode S beyond DF17: Mode A/C, DF4/5/20/21 with Comm-B (BDS 4,0 / 5,0 / 6,0), local
-        CPR, error correction; and UAT on 978 MHz (US)
+  - [x] Mode S beyond DF17: Mode A/C, DF4/5/20/21 with Comm-B (BDS 4,0 / 5,0 / 6,0), local
+        CPR, error correction; and UAT on 978 MHz (US) — DF0/4/5/11/16/17/18/20/21 with an
+        ICAO filter for address/parity, Gillham and Q-bit altitudes, squawks, BDS 1,0 1,7 2,0
+        3,0 4,0 5,0 6,0, surface positions, TIS-B/ADS-R, target state and operational status,
+        1- and 2-bit repair, local and global CPR, Mode A/C; any rate from 2 MS/s with
+        fractional-phase pulse integration (on par with readsb on a real 2.4 MS/s recording);
+        `uat_decoder` with RS(30,18)/(48,34)/(92,72), ADS-B payloads and FIS-B text products.
+        Not yet: UAT target state element, FIS-B graphics (NEXRAD is counted), segmented APDUs,
+        Mode S multilateration timestamps
   - [ ] NAVTEX (518 / 490 kHz, SITOR-B 100 Bd FSK) and DSC
 - **Ham radio**
   - [ ] CW (Morse) decoder with automatic speed tracking

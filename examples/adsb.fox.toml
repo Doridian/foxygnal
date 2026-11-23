@@ -1,18 +1,27 @@
-# ADS-B: aircraft positions, call signs and speeds from 1090 MHz.
+# ADS-B and Mode S: aircraft positions, call signs, speeds and altitudes
+# from 1090 MHz.
 #
-# Needs a receiver that can tune 1090 MHz at 2 MS/s (an RTL-SDR with a
-# small antenna works; the simulated receiver has no aircraft). Press Run,
-# click the wire into `log` and choose Messages to read the decoded
-# messages, one per line:
+# Needs a receiver that can tune 1090 MHz at 2 MS/s or more (an RTL-SDR with
+# a small antenna works; the simulated receiver has no aircraft). 2.4 MS/s is
+# the default: at exactly 2 MS/s a reply that lands half a sample off is
+# much harder to read. Press Run, click the wire into `log` and choose
+# Messages to read the decoded messages, one per line:
 #
-#   t=12.345678 icao=4840D6 df=17 tc=4 type=ident callsign=KLM1023 raw=8D48…
+#   t=12.345678 icao=4840D6 df=17 tc=4 type=ident callsign=KLM1023 category=A3 raw=8D48…
+#   t=12.401234 icao=4840D6 df=20 type=commb alt_ft=38000 bds=6,0 heading_deg=42.7 … raw=A000…
 #
-#   SDR 1090 MHz, 2 MS/s ──|x|──▶ ADS-B decoder ──text──▶ message log
+# Besides ADS-B (DF17/18) the decoder reads all-call, altitude, identity and
+# Comm-B replies to radar interrogations (DF0/4/5/11/16/20/21). Set
+# `receiver` to your position ("lat, lon") to place aircraft from a single
+# position message and to place aircraft on the ground; turn on `mode_ac`
+# for the old Mode A/C replies (squawk or altitude, no address).
+#
+#   SDR 1090 MHz, 2.4 MS/s ──|x|──▶ Mode S decoder ──text──▶ message log
 #
 #   foxygnal run examples/adsb.fox.toml   (prints the messages: stdout = true)
 
 [vars]
-samp_rate = "2M"
+samp_rate = "2.4M"
 
 [[block]]
 id = "sdr"
@@ -29,7 +38,7 @@ ui = { x = 380, y = 120 }
 [[block]]
 id = "adsb"
 kind = "adsb_decoder"
-params = { fix_errors = true }
+params = { fix_errors = true, fix_two_bits = false, formats = "all", mode_ac = false, receiver = "" }
 ui = { x = 700, y = 120 }
 
 [[block]]

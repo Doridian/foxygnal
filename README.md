@@ -40,7 +40,9 @@ pressed Run (try the "Live FM radio" template). Build with `--release` for real-
 debug builds are too slow for a 2.4 MS/s receiver. The "FM stereo + RDS" template
 (`examples/fm-stereo-rds.fox.toml`) plays a station in stereo and decodes its RDS: station
 name, RadioText, programme type and clock time, shown in the Messages instrument.
-Decoder templates: "ADS-B aircraft decoder" (`examples/adsb.fox.toml`), "POCSAG pager
+Decoder templates: "ADS-B aircraft decoder" (`examples/adsb.fox.toml`: ADS-B and the other
+Mode S replies, Comm-B, Mode A/C on request), "UAT aircraft and weather decoder"
+(`examples/uat.fox.toml`: 978 MHz ADS-B and FIS-B text weather, US), "POCSAG pager
 decoder" (`examples/pocsag.fox.toml`), "FLEX pager decoder" (`examples/flex.fox.toml`, the
 1600/3200/6400 bps paging used across North America), "APRS packet decoder"
 (`examples/aprs.fox.toml`), "AIS ship decoder" (`examples/ais.fox.toml`, both AIS channels

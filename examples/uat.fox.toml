@@ -1,0 +1,55 @@
+# UAT (978 MHz, US only): ADS-B from general aviation, and FIS-B weather
+# and notices from ground stations.
+#
+# Needs a receiver that can tune 978 MHz at 2.083333 MS/s or more (two
+# samples per UAT bit; an RTL-SDR or a PlutoSDR works). UAT is continuous
+# phase FSK at 1.04 Mbit/s with ±312.5 kHz deviation, so the FM demodulator
+# runs flat (no de-emphasis) over the whole band the SDR delivers. Press
+# Run, click the wire into `log` and choose Messages:
+#
+#   t=3.456789 type=adsb mdb=1 addr=A1B2C3 aq=0 lat=47.45021 lon=-122.30880 … alt_ft=4500 … callsign=N123AB …
+#   t=4.000123 type=uplink lat=47.44999 lon=-122.31000 slot=7 tisb_site=3 utc=1 apdus=5 text=2 nexrad=3 …
+#   t=4.000123 type=fisb product=413 time=19:53 text="METAR KSEA 231953Z 18012KT 10SM …"
+#
+#   SDR 978 MHz, 2.083 MS/s ──FM demod (flat)──▶ UAT decoder ──text──▶ message log
+#
+#   foxygnal run examples/uat.fox.toml   (prints the messages: stdout = true)
+
+[vars]
+samp_rate = 2083333.3333333333
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "978M", sample_rate = "$samp_rate", gain = 45.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "fm_demod"
+params = { deviation = 312500.0, deemphasis = "off" }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "uat"
+kind = "uat_decoder"
+params = {}
+ui = { x = 700, y = 120 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 1030, y = 120 }
+
+[[connect]]
+from = "sdr.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.out"
+to = "uat.in"
+
+[[connect]]
+from = "uat.out"
+to = "log.in"
