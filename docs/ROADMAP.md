@@ -131,8 +131,7 @@ Goal: watch an SSTV picture being drawn in the browser, from the ISS or a record
       phasing; the stations on 3–17 MHz send charts around the clock
 - [ ] NOAA APT: sync A/B, telemetry wedges, both channels, false colour. The NOAA POES
       satellites were switched off in 2025, so this is for archived recordings
-- [ ] Meteor-M LRPT (Meteor-M N2-3 / N2-4, 137 MHz): QPSK / OQPSK 72 kBd, Viterbi r=1/2,
-      CCSDS frames, Reed-Solomon, the JPEG-like image codec; three channels in colour
+- [ ] Meteor-M LRPT: moved to M15, where it shares the CCSDS layer with the L-band satellites
 - [ ] Hellschreiber (Feld-Hell): text as pictures
 - [ ] An SSTV *encoder* (PNG in, audio out), for TX and for tests that don't need a radio
 
@@ -302,6 +301,54 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
       receiver" templates
 - [ ] ATSC PSIP (virtual channel names)
 - [ ] Later: DVB-T2
+
+## M15: Weather satellites in L-band
+
+Goal: point a small dish (a Discovery Dish with the L-band weather feed, 1675–1710 MHz, or
+any 60–100 cm dish with an LNA) at GOES and watch the full-disk pictures and NWS bulletins
+arrive; with a rotator or a steady hand, the polar orbiters too.
+
+- [ ] A shared CCSDS layer (`blocks/src/ccsds/`): attached sync marker search with BPSK/QPSK
+      phase-ambiguity resolution, the CCSDS randomizer, Viterbi r=1/2 K=7 (the DVB decoder
+      with the second output inverted), RS(255,223) with the dual basis and interleaving
+      depth 1–5, VCDU / M_PDU / CCSDS packet reassembly, and frame statistics (lock, RS
+      corrections, Viterbi BER) for the UI
+- [ ] GOES-R HRIT / LRIT (GOES-18/19, 1694.1 MHz, BPSK 927 kSym/s): HRIT file layer, Rice
+      (CCSDS 121) decompression, full disk, CONUS, mesoscale and the false-colour products
+      as pictures; EMWIN (NWS text, warnings, charts) as messages and files. "GOES HRIT"
+      template. GK-2A (1692.14 MHz) and Elektro-L LRIT/HRIT where the format allows
+- [ ] Meteor-M LRPT (Meteor-M N2-3 / N2-4, 137 MHz): QPSK / OQPSK 72 kBd, Viterbi r=1/2,
+      CCSDS frames, Reed-Solomon, the JPEG-like MSU-MR codec; three channels in colour
+- [ ] Meteor-M HRPT (1700 MHz, BPSK, Manchester 665.4 kbit/s): MSU-MR, all six channels
+- [ ] Metop AHRPT (Metop-B/C, 1701.3 MHz, QPSK 2.33 MSym/s, CCSDS): AVHRR/3 in false
+      colour, plus the instrument packets that come for free (MHS, AMSU, IASI counts)
+- [ ] GOES DCS (DCPR relay, 1679.7–1680.7 MHz): 300 bit/s BPSK and 1200 bit/s 8PSK
+      platforms, a channelizer over the whole band, platform address and message as messages
+- [ ] Pass prediction: SGP4 from TLEs (a file, or pasted in), pass times, elevation and
+      azimuth, and Doppler as a wired setting for `freq_xlating_fir`; an upcoming-passes view
+- [ ] Later: GOES GRB (DVB-S2, 1686.6 MHz, needs a bigger dish and M14's DVB-S2), FengYun-3
+      AHRPT
+
+## M16: Rotator control
+
+Goal: the dish follows a polar orbiter by itself. Design: [ROTATOR.md](ROTATOR.md). Pointing is
+part of receiving, so none of this goes through TX arming.
+
+- [ ] `foxygnal-rotator-proto`: Hamlib `rotctld` and EasyComm II parsing and formatting, and
+      the motion planner, shared by the engine and the firmware and tested on the host
+- [ ] `rotator` block (az/el wired from M15's pass prediction; `rotctld:`, `easycomm:` and
+      `sim:` targets; deadband, rate limit, park after LOS; I/O on its own thread), a stop
+      button, measured vs. planned pointing in the passes view. Drives every Hamlib rotator
+      through `rotctld` from day one
+- [ ] Pass planning: pre-positioning before AOS, cable-wrap path choice, keyhole and flip
+      handling for overhead passes
+- [ ] ESP32 firmware v1 (`firmware/rotator-esp32/`, Rust, `esp-hal` + `embassy`): TMC2209
+      steppers, endstop homing, `rotctld` over Wi-Fi, EasyComm over USB, watchdog, soft limits,
+      serial-console calibration, its own CI workflow
+- [ ] Firmware v2: AS5600 absolute encoders (closed loop), latched faults and `\get_status`,
+      setup page, OTA with rollback, mDNS discovery in the device panel
+- [ ] Hardware notes: wiring, bill of materials for a SatNOGS-style mount carrying the
+      Discovery Dish, calibration by pointing at the sun
 
 ## Open questions
 
