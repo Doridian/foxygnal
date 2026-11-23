@@ -12,13 +12,15 @@
 //! | speed     | symbols                        | phases     |
 //! |-----------|--------------------------------|------------|
 //! | 1600 bps  | 1600 Bd, 2 levels              | A          |
-//! | 3200 bps  | 1600 Bd, 4 levels              | A, B       |
+//! | 3200 bps  | 1600 Bd, 4 levels              | A, C       |
 //! | 3200 bps  | 3200 Bd, 2 levels              | A, C       |
 //! | 6400 bps  | 3200 Bd, 4 levels              | A, B, C, D |
 //!
 //! The 4 levels are ±4.8 and ±1.6 kHz: a symbol's sign is the bit of phase
 //! A (C) and "inner level" the bit of phase B (D); at 3200 Bd symbols
-//! alternate between A/B and C/D. Each phase is 88 words: a block information word (where the address
+//! alternate between A/B and C/D. At 3200 bps the phases are A and C
+//! whatever the modulation, so at 1600 Bd the inner-level bit is phase C's.
+//! Each phase is 88 words: a block information word (where the address
 //! and vector fields start), addresses (one word, or two for a long address),
 //! one vector word per address word (message type, start and length), then
 //! the messages. Words are BCH(31,21) plus even parity, sent least
@@ -280,7 +282,7 @@ impl FlexDecoder {
     fn has_phase(&self, p: usize) -> bool {
         match (self.baud(), self.levels()) {
             (1600, 2) => p == 0,
-            (1600, _) => p <= 1,
+            (1600, _) => p == 0 || p == 2,
             (_, 2) => p == 0 || p == 2,
             _ => true,
         }
@@ -422,14 +424,16 @@ impl FlexDecoder {
         }
     }
 
-    /// Bit `k` of the phase (or phases, with 4 levels) starting at `first`.
+    /// Bit `k` of phase `first` (A or C) and, with 4 levels, of the phase
+    /// that carries the inner-level bit: B or D at 3200 Bd, C at 1600 Bd.
     fn store(&mut self, k: u32, first: usize, (a, b): (bool, bool)) {
         let k = k as usize;
         let word = (k / 256) * 8 + k % 8;
         let bit = (k % 256) / 8;
         self.phases[first].raw[word] |= u32::from(a) << bit;
         if self.levels() == 4 {
-            self.phases[first + 1].raw[word] |= u32::from(b) << bit;
+            let second = if self.baud() == 1600 { 2 } else { first + 1 };
+            self.phases[second].raw[word] |= u32::from(b) << bit;
         }
     }
 
