@@ -31,6 +31,7 @@ frames of a few KB each.
 | `foxygnal-plugin-sdk` | guest side: write plugins in Rust (built for `wasm32-unknown-unknown`) | — |
 | `foxygnal-mpeg2` | MPEG-1/2 video decoder, built for `wasm32-unknown-unknown` for the browser's Video instrument (see "Digital video") | — |
 | `foxygnal-mp2` | MPEG audio Layer I/II (MP2) decoder, built for `wasm32-unknown-unknown` for the same instrument | — |
+| `foxygnal-ac3` | AC-3 (Dolby Digital) decoder with a stereo downmix, built for `wasm32-unknown-unknown` for the same instrument | — |
 | `foxygnal` | CLI | all (plugin: cargo feature `plugins`, default on) |
 
 `foxygnal-sdr` holds the device trait, discovery and the drivers. Drivers that need a C library
@@ -560,7 +561,7 @@ next to Messages and Image. Everything but drawing happens in a worker
 - `video/ts.ts` demuxes: PAT and PMT (with CRC check) for the programs and their streams,
   the SDT for service and provider names, PES reassembly with 33-bit PTS/DTS unwrapping, the
   PCR, and counters (TEI packets, continuity errors, packets per PID). A PES with a lost or
-  TEI packet is dropped whole. It and `video/nal.ts` (codec strings, key frames, ADTS) have no
+  TEI packet is dropped whole. It and `video/nal.ts` (codec strings, key frames, ADTS, LATM) have no
   imports, so `npm test` runs them under node (`ui/tests/video.test.ts`, with streams made by
   ffmpeg when it is installed).
 - The program is picked by the user, or the first with video. Its video goes to
@@ -568,11 +569,27 @@ next to Messages and Image. Everything but drawing happens in a worker
   or an I slice with SPS and PPS for streams that use recovery points) and HEVC (`hvc1.*`,
   where the browser supports it, checked with `isConfigSupported`); MPEG-1 and MPEG-2 video
   go to **foxygnal's own decoder compiled to WebAssembly** (below), whose I420 pictures become
-  `VideoFrame`s too. Sound plays when the user switches it on: AAC (ADTS) through a WebCodecs
-  `AudioDecoder`, MPEG audio Layer I and II (MP1/MP2, stream types 0x03 and 0x04) through
-  foxygnal's own decoder in WebAssembly (below), both to browser audio. The track is the
-  program's first one in PMT order that can be decoded (there is no track choice yet); the
-  overlay counts decoded sound frames and errors.
+  `VideoFrame`s too. Sound plays when the user switches it on: AAC through a WebCodecs
+  `AudioDecoder` (ADTS frames as they are; LATM, below), MPEG audio Layer I and II (MP1/MP2,
+  stream types 0x03 and 0x04) and AC-3 (stream type 0x81, or private data with DVB's AC-3
+  descriptor 0x6A or an `AC-3` registration descriptor) through foxygnal's own decoders in
+  WebAssembly (below), all to browser audio. The overlay counts decoded sound frames and
+  errors, and for AC-3 names what was sent ("5.1 as 2 ch").
+- **Sound tracks.** When a program has more than one, a second menu next to the program lists
+  them as "language · codec" (the ISO 639 code from the PMT, else the PID; codecs that can't
+  be played are marked). "Auto" takes the first one in PMT order that can be decoded; a choice
+  is remembered per instrument (`VideoSettings.track`, a PID, back to Auto when the program
+  doesn't have it). Changing tracks swaps only the sound: the worker closes the old decoder,
+  points the demuxer at the new PID and tells the page to stop the sound it has queued
+  (`browserAudio.stop`), while the pictures and the clock carry on.
+- **AAC in LATM** (stream type 0x11, DVB-T2 and some DVB-T services): `LatmReader` in
+  `video/nal.ts` finds LOAS frames (sync word 0x2B7, across PES packets), reads the
+  StreamMuxConfig for the AudioSpecificConfig (copied out bit for bit, as WebCodecs wants it
+  for `description`) and cuts the raw access units out of the payload, which is not byte
+  aligned. One program and one layer with frameLengthType 0, which is what broadcasters send;
+  others are skipped. A PES's PTS is given to its first access unit when no frame straddles
+  into it; the others follow at 1024 samples (2048 with SBR). Tested against ffmpeg: the
+  access units of a LATM stream match those of the same encoding in ADTS byte for byte.
 - Timing: the stream arrives in real time, so the program clock maps to arrival time. The
   worker keeps the lower envelope of (arrival − PCR), which network jitter can only raise, and a
   picture is due at its PTS on that clock plus a jitter buffer (300 ms, growing when pictures
@@ -631,18 +648,69 @@ most DVB services. `crates/foxygnal-mp2` is a small one, `no_std` and without de
   −54 dBFS are held to their absolute error instead). Small streams in
   `tests/data`, with ffmpeg's decoding beside them, keep the comparison going without ffmpeg.
 
-`scripts/build-mpeg2-wasm.sh` builds both crates for `wasm32-unknown-unknown` (paths
-remapped and symbols stripped, so the build is reproducible) and copies the modules to
-`ui/src/lib/video/mpeg2.wasm` (about 90 KB) and `ui/src/lib/video/mp2.wasm` (about 34 KB,
-15 KB compressed), which are committed like the plugin test fixtures: building the UI needs
-no Rust toolchain and the workspace build no wasm target. Run it again after changing a
-crate. The modules import nothing and export small C ABIs (`mp2v_*` and `mp2a_*`, see
-`ui/src/lib/video/mpeg2.ts` and `mp2.ts`). The worker loads the sound decoder only when sound
-is switched on for an MPEG audio stream. `npm test` runs `mp2.ts` with the committed module
-under node, on the crate's fixtures and on a TS with two MP2 tracks made by ffmpeg.
+**AC-3 in the browser.** AC-3 (Dolby Digital, ATSC A/52) is the sound of ATSC television and
+of many DVB services, often as a 5.1 track beside an MP2 one, and WebCodecs can't decode it.
+`crates/foxygnal-ac3` is `no_std` and without dependencies, in the same shape as the MP2
+crate:
 
-Not decoded in the browser: MPEG audio Layer III, AC-3 / E-AC-3, AAC in LATM (DVB-T2), and
-subtitles and teletext. The instrument shows these streams and says so.
+- Every AC-3 stream (bsid up to 8, and the half/quarter-rate bsid 9 and 10): 32, 44.1 and
+  48 kHz, every bit rate, every channel mode, the whole of the bit allocation (exponent
+  strategies, the parametric masking model with delta bit allocation, grouped mantissas,
+  dither), coupling with phase flags, rematrixing, dynamic range (applied, like ffmpeg's
+  default), and the 512-point and 256-point (block switching) IMDCTs with the KBD window,
+  done with a radix-2 FFT. Both CRCs are checked; a frame that fails one, or doesn't parse,
+  plays as silence and is counted, and the overlap is cleared.
+- The output is mono for a mono stream and stereo for everything else: the A/52 downmix with
+  the stream's centre and surround mix levels (Lt/Rt or Lo/Ro, from the extended BSI when
+  present), scaled so that it can't clip (each side divided by the sum of its coefficients,
+  as ffmpeg's decoder does). The LFE channel is left out. 1+1 (two mono programmes) plays as
+  left and right.
+- E-AC-3 (bsid 11–16, stream types 0x87 and DVB's descriptor 0x7A) is recognised and not
+  decoded: its frames are skipped, keeping time, and the instrument says "E-AC-3 isn't
+  decoded in the browser".
+- `Stream` finds the frame grid like the MP2 one (a frame counts once the next sync word
+  follows where its frame size says) and times frames the same way. Nothing is allocated per
+  frame. About 0.085 ms per 5.1 frame (32 ms of sound) natively.
+- Tests (`cargo test -p foxygnal-ac3`, `src/reference.rs`) compare with ffmpeg's float
+  decoder (`-downmix stereo`). ffmpeg's encoder sets every dither flag, and dither is random
+  noise in bins that got no bits, so the tests clear the flags (and rewrite both CRCs) before
+  comparing; with dither on, the difference is only that noise (17–68 dB SNR). With it off:
+  15 streams ffmpeg encodes (32, 44.1 and 48 kHz; mono, stereo, 2.1, 3.0, quad, 5.0 and 5.1;
+  32 to 640 kbit/s) at 105–120 dB SNR, the largest difference 0.4 of a 16-bit step; ffmpeg's
+  options for coupling, no rematrixing, Lo/Ro with the extended BSI, mix levels and dynamic
+  range at 103 dB or better; and streams the test rewrites to carry what ffmpeg's encoder
+  never writes (block switching, dynamic range words in every block, coupling phase flags,
+  delta bit allocation) at 106 dB or better. 900 damaged frames never panic, and E-AC-3 is
+  skipped. Small streams in `tests/data` with ffmpeg's decoding beside them keep the
+  comparison going without ffmpeg.
+- Against `ffmpeg -ac 2` (libswresample), a 5.1 downmix matches at 104–106 dB once the
+  levels are lined up: swresample with float output doesn't normalise (each side is
+  L + 0.707·C + 0.707·Ls), where ours, like ffmpeg's own AC-3 downmix, divides by the sum of
+  the coefficients, so ours is quieter by that sum (1 + 0.595 + 0.5 = 2.09 for a stream with
+  the default levels).
+
+`scripts/build-mpeg2-wasm.sh` builds the three crates for `wasm32-unknown-unknown` and
+copies the modules to `ui/src/lib/video/mpeg2.wasm` (about 90 KB), `mp2.wasm` (about 34 KB,
+15 KB compressed) and `ac3.wasm` (about 52 KB, 21 KB compressed), which are committed like the
+plugin test fixtures: building the UI needs no Rust toolchain and the workspace build no wasm
+target. Run it again after changing a crate. The modules import nothing and export small C
+ABIs (`mp2v_*`, `mp2a_*`, `ac3a_*`; see `ui/src/lib/video/mpeg2.ts`, and `wasmaudio.ts` for the
+two sound decoders' shared one). The worker loads a sound decoder only when sound is switched
+on for a stream that needs it. `npm test` runs `mp2.ts` and `ac3.ts` with the committed
+modules under node, on the crates' fixtures and on TSs made by ffmpeg (two MP2 tracks; an
+AC-3 5.1 and an MP2 track with languages, with both of ffmpeg's ways of marking AC-3; E-AC-3).
+
+The build is reproducible byte for byte: paths remapped, symbols stripped, fixed codegen
+flags, no flags from the environment, `--locked`, and the toolchain pinned in
+`rust-toolchain.toml`, which the script runs through rustup (installing it and the wasm
+target if needed). The official toolchain gives the same bytes in any directory and with any
+`CARGO_HOME`; a distro's `rustc` of the same version makes modules that work but differ in a
+few bytes, so the script warns when there's no rustup. CI (`managed-rust.yml`) runs
+`scripts/build-mpeg2-wasm.sh --check`, which builds into a temporary directory and fails if
+a committed module differs, so a crate can't change without its module.
+
+Not decoded in the browser: MPEG audio Layer III, E-AC-3, and subtitles and teletext. The
+instrument shows these streams and says so.
 
 ## DVB-S and the DVB FEC chain (M14)
 
@@ -1276,7 +1344,7 @@ Instruments are hand-written canvases, not a charting library: Canvas2D for trac
 spectrum, constellation) and the map, and WebGL2 for the waterfall, whose history lives in a float
 texture used as a ring. A new row is one small upload, and changing the dB range re-colours
 the whole history. Video is decoded in a worker (WebCodecs, or the MPEG-2
-decoder in WebAssembly) and drawn as `VideoFrame`s on a 2D canvas. Instruments live in a resizable dock under the canvas, are remembered per
+decoder in WebAssembly; sound likewise, with the MP2 and AC-3 decoders) and drawn as `VideoFrame`s on a 2D canvas. Instruments live in a resizable dock under the canvas, are remembered per
 graph file (browser storage), and can pop out into their own window (`?popout=<id>`), which
 opens its own engine connection and syncs settings back over a `BroadcastChannel`. In release builds the built UI is embedded in the binary with `rust-embed`
 (`cargo build --release --features embed-ui`), so you ship a single file. Without the feature

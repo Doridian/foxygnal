@@ -77,9 +77,10 @@ and "DVB-T receiver" (an SDR at 9.14 MS/s, e.g. a PlutoSDR or HackRF, to a TS ov
 
 **Watching digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
 demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
-you pick with its sound, and shows codecs, resolution, frame rate, bit rates and errors.
-H.264, HEVC and AAC are decoded by the browser (WebCodecs); MPEG-2 video and MP2 sound, which
-most DVB services still use, by foxygnal's own decoders compiled to WebAssembly. Template: "Video from a TS file"
+you pick with its sound (choosing between sound tracks by language), and shows codecs,
+resolution, frame rate, bit rates and errors. H.264, HEVC and AAC (ADTS or LATM) are decoded
+by the browser (WebCodecs); MPEG-2 video and MP2 and AC-3 sound (5.1 downmixed to stereo),
+which most DVB and ATSC services use, by foxygnal's own decoders compiled to WebAssembly. Template: "Video from a TS file"
 (`examples/ts-video.fox.toml`).
 
 **AI assistants (MCP).** foxygnal is also a [Model Context Protocol](https://modelcontextprotocol.io)

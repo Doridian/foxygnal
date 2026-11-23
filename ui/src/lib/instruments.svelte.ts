@@ -78,8 +78,10 @@ export interface ImageSettings {
 export interface VideoSettings {
   /** Program number to show; null = the first with video. */
   program: number | null;
-  /** Play the program's sound (AAC) through browser audio. */
+  /** Play the program's sound through browser audio. */
   audio: boolean;
+  /** Sound track (PID) to play; null (or absent, in older saves) = the first decodable one. */
+  track?: number | null;
   /** Show the stream details over the picture. */
   info: boolean;
 }
@@ -144,7 +146,7 @@ export const defaults = {
     rxLon: null,
   }),
   image: (): ImageSettings => ({ keep: 8, pixelated: false }),
-  video: (): VideoSettings => ({ program: null, audio: false, info: true }),
+  video: (): VideoSettings => ({ program: null, audio: false, track: null, info: true }),
 };
 
 export const KIND_LABELS: Record<InstrumentKind, string> = {

@@ -1,8 +1,9 @@
 // The Video instrument's worker: demuxes the transport stream, decodes the
 // chosen program's video (WebCodecs for H.264 / HEVC, our WebAssembly decoder
-// for MPEG-1/2) and sound (AAC with WebCodecs, MPEG audio Layer I/II with our
-// WebAssembly decoder), and works out when each frame is due. Frames go to
-// the page as transferable VideoFrames, sound as PCM.
+// for MPEG-1/2) and sound (AAC, in ADTS or LATM, with WebCodecs; MPEG audio
+// Layer I/II and AC-3 with our WebAssembly decoders), and works out when each
+// frame is due. Frames go to the page as transferable VideoFrames, sound as
+// PCM.
 //
 // Timing: the stream arrives in real time, so the program clock (PCR) maps
 // to arrival time. `offset` is the lower envelope of arrival − PCR (late data
@@ -11,14 +12,16 @@
 
 import wasmUrl from './mpeg2.wasm?url';
 import mp2Url from './mp2.wasm?url';
+import ac3Url from './ac3.wasm?url';
+import { Ac3Decoder } from './ac3';
 import { Mp2Decoder } from './mp2';
 import { Mpeg2Decoder } from './mpeg2';
-import { adtsFrames, avcAccessUnit, hevcAccessUnit, mpeg2HasSequenceHeader } from './nal';
+import { adtsFrames, avcAccessUnit, hevcAccessUnit, LatmReader, mpeg2HasSequenceHeader } from './nal';
 import type { AudioStats, FromWorker, Stats, ToWorker } from './protocol';
 import { Demuxer, defaultProgram, Unwrapper, type EsInfo, type Pes, type Program } from './ts';
 
 /** Audio codecs played (`EsInfo.codec`). */
-const DECODED_AUDIO = new Set(['aac', 'mp2']);
+const DECODED_AUDIO = new Set(['aac', 'aac-latm', 'mp2', 'ac3']);
 
 interface WorkerScope {
   postMessage(m: unknown, transfer: Transferable[]): void;
@@ -36,6 +39,7 @@ const MAX_DELAY = 3000;
 
 const demux = new Demuxer();
 let choice: number | null = null; // the program asked for; null = auto
+let trackChoice: number | null = null; // the sound track (PID) asked for; null = auto
 let program: Program | null = null;
 let videoEs: EsInfo | null = null;
 let audioEs: EsInfo | null = null;
@@ -331,62 +335,96 @@ let decodeSpent = 0;
 let video: VideoPath | null = null;
 
 // ---- Audio -------------------------------------------------------------------
+function audioPes(p: Pes) {
+  const a = stats.audio;
+  if (!a || !audioOn || !audioEs) return;
+  switch (audioEs.codec) {
+    case 'aac':
+      adtsPes(p, a);
+      break;
+    case 'aac-latm':
+      latmPes(p, a);
+      break;
+    case 'mp2':
+    case 'ac3':
+      wasmAudioPes(p, a);
+      break;
+  }
+}
 
+// AAC through WebCodecs: ADTS frames go in as they are, LATM's raw access
+// units with the AudioSpecificConfig as the description.
 let audioDecoder: AudioDecoder | null = null;
 let audioConfig = '';
 let audioPending = false;
 
-function audioPes(p: Pes) {
-  const a = stats.audio;
-  if (!a || !audioOn || !audioEs) return;
-  if (audioEs.codec === 'mp2') {
-    mp2Pes(p, a);
-    return;
+/** Configure the decoder for `key` if it isn't yet; true if it is ready for chunks. */
+function aacDecoder(a: AudioStats, key: string, config: AudioDecoderConfig): boolean {
+  if (key === audioConfig) return !!audioDecoder && audioDecoder.state === 'configured';
+  if (audioPending) return false;
+  if (typeof AudioDecoder === 'undefined') {
+    a.note = 'This browser has no WebCodecs audio decoder.';
+    return false;
   }
-  if (audioEs.codec !== 'aac') return;
+  audioPending = true;
+  const gen = audioGen;
+  const fail = () => {
+    if (gen !== audioGen) return;
+    audioPending = false;
+    audioConfig = key;
+    a.note = 'AAC isn’t supported by this browser’s WebCodecs.';
+  };
+  void AudioDecoder.isConfigSupported(config).then((r) => {
+    if (gen !== audioGen) return;
+    if (!r.supported) return fail();
+    audioPending = false;
+    audioConfig = key;
+    audioDecoder?.close();
+    audioDecoder = new AudioDecoder({ output: pcm, error: (e) => (a.note = `Audio decoder error: ${e.message}`) });
+    audioDecoder.configure(config);
+    a.decoder = config.codec;
+    a.note = null;
+  }, fail);
+  return false;
+}
+
+function adtsPes(p: Pes, a: AudioStats) {
   if (p.pts === null) return;
   const frames = adtsFrames(p.data);
   if (!frames.length) return;
   const f0 = frames[0];
   a.rate = f0.rate;
   a.channels = f0.channels;
-  const key = `${f0.object}/${f0.rate}/${f0.channels}`;
-  if (key !== audioConfig) {
-    if (audioPending) return;
-    if (typeof AudioDecoder === 'undefined') {
-      a.note = 'This browser has no WebCodecs audio decoder.';
-      return;
-    }
-    const config = { codec: `mp4a.40.${f0.object}`, sampleRate: f0.rate, numberOfChannels: f0.channels };
-    audioPending = true;
-    void AudioDecoder.isConfigSupported(config).then(
-      (r) => {
-        audioPending = false;
-        audioConfig = key;
-        if (!r.supported) {
-          a.note = 'AAC isn’t supported by this browser’s WebCodecs.';
-          return;
-        }
-        audioDecoder?.close();
-        audioDecoder = new AudioDecoder({ output: pcm, error: (e) => (a.note = `Audio decoder error: ${e.message}`) });
-        audioDecoder.configure(config);
-        a.decoder = config.codec;
-        a.note = null;
-      },
-      () => {
-        audioPending = false;
-        audioConfig = key;
-        a.note = 'AAC isn’t supported by this browser’s WebCodecs.';
-      },
-    );
-    return;
-  }
-  if (!audioDecoder || audioDecoder.state !== 'configured') return;
+  const config = { codec: `mp4a.40.${f0.object}`, sampleRate: f0.rate, numberOfChannels: f0.channels };
+  if (!aacDecoder(a, `adts/${f0.object}/${f0.rate}/${f0.channels}`, config)) return;
   let pts = p.pts;
   for (const f of frames) {
-    audioDecoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: Math.round((pts * 100) / 9), data: f.data }));
+    audioDecoder!.decode(new EncodedAudioChunk({ type: 'key', timestamp: Math.round((pts * 100) / 9), data: f.data }));
     pts += (1024 * 90000) / f.rate;
   }
+}
+
+const latm = new LatmReader();
+let latmNext: number | null = null; // 90 kHz: when the next access unit plays
+
+function latmPes(p: Pes, a: AudioStats) {
+  // A PES's PTS is its first frame's if no frame straddles into it.
+  if (p.pts !== null && (latm.buffered === 0 || latmNext === null || Math.abs(latmNext - p.pts) > 9000)) latmNext = p.pts;
+  for (const f of latm.push(p.data)) {
+    const c = f.config;
+    a.rate = c.rate;
+    a.channels = c.channels;
+    const hex = [...c.asc].map((v) => v.toString(16).padStart(2, '0')).join('');
+    const config = { codec: `mp4a.40.${c.object}`, sampleRate: c.rate, numberOfChannels: c.channels, description: c.asc };
+    // An access unit is 1024 samples at the core rate: 2048 at the output rate with SBR.
+    const samples = c.object === 5 || c.object === 29 ? 2048 : 1024;
+    const at = latmNext;
+    if (latmNext !== null) latmNext += (samples * 90000) / c.rate;
+    if (at === null || !aacDecoder(a, `latm/${hex}`, config)) continue;
+    audioDecoder!.decode(new EncodedAudioChunk({ type: 'key', timestamp: Math.round((at * 100) / 9), data: f.data }));
+  }
+  if (!latm.config && !a.note) a.note = 'Waiting for the LATM stream’s configuration…';
+  else if (latm.config && a.note?.startsWith('Waiting')) a.note = null;
 }
 
 function pcm(d: AudioData) {
@@ -405,84 +443,120 @@ function pcm(d: AudioData) {
   post({ type: 'pcm', samples: out, channels, rate, due: at }, [out.buffer]);
 }
 
-// MPEG audio Layer I/II through the WebAssembly decoder. It loads when sound
-// is first switched on for such a stream; PES packets wait meanwhile.
-let mp2: Mp2Decoder | null = null;
-let mp2Gen = 0; // bumped by closeAudio, so a load finishing late is dropped
-let mp2Loading: number | null = null; // the generation a load is in flight for
-let mp2Queue: Pes[] = [];
-const mp2Unwrap = new Unwrapper();
+// MPEG audio Layer I/II and AC-3 through our WebAssembly decoders. Each
+// loads when sound is first switched on for such a stream; PES packets wait
+// meanwhile.
+let wasmAudio: Mp2Decoder | Ac3Decoder | null = null;
+let audioGen = 0; // bumped by closeAudio, so a load finishing late is dropped
+let wasmLoading: number | null = null; // the generation a load is in flight for
+let wasmQueue: Pes[] = [];
+const wasmUnwrap = new Unwrapper();
 
-function mp2Pes(p: Pes, a: AudioStats) {
-  if (!mp2) {
-    if (mp2Queue.length < 50) mp2Queue.push(p);
-    if (mp2Loading === mp2Gen) return;
-    const gen = (mp2Loading = mp2Gen);
-    Mp2Decoder.create(mp2Url).then(
+function wasmAudioPes(p: Pes, a: AudioStats) {
+  const ac3 = audioEs?.codec === 'ac3';
+  if (!wasmAudio) {
+    if (wasmQueue.length < 50) wasmQueue.push(p);
+    if (wasmLoading === audioGen) return;
+    const gen = (wasmLoading = audioGen);
+    const load: Promise<Mp2Decoder | Ac3Decoder> = ac3 ? Ac3Decoder.create(ac3Url) : Mp2Decoder.create(mp2Url);
+    load.then(
       (d) => {
-        if (gen !== mp2Gen) {
+        if (gen !== audioGen) {
           d.free(); // closed meanwhile
           return;
         }
-        mp2 = d;
-        mp2Loading = null;
+        wasmAudio = d;
+        wasmLoading = null;
         a.decoder = 'wasm';
-        const q = mp2Queue;
-        mp2Queue = [];
-        for (const p of q) mp2Pes(p, a);
+        const q = wasmQueue;
+        wasmQueue = [];
+        for (const p of q) wasmAudioPes(p, a);
       },
       (e: Error) => {
-        if (gen === mp2Gen) a.note = `The MPEG audio decoder didn't load: ${e.message}`;
+        if (gen === audioGen) a.note = `The ${ac3 ? 'AC-3' : 'MPEG audio'} decoder didn't load: ${e.message}`;
       },
     );
     return;
   }
-  mp2.push(p.data, p.pts);
-  for (let f = mp2.next(); f; f = mp2.next()) {
+  const dec = wasmAudio;
+  dec.push(p.data, p.pts);
+  for (let f = dec.next(); f; f = dec.next()) {
     a.frames++;
     a.rate = f.rate;
     a.channels = f.channels;
     if (f.pts === null) continue;
-    post({ type: 'pcm', samples: f.samples, channels: f.channels, rate: f.rate, due: due(mp2Unwrap.unwrap(f.pts)) }, [f.samples.buffer]);
+    post({ type: 'pcm', samples: f.samples, channels: f.channels, rate: f.rate, due: due(wasmUnwrap.unwrap(f.pts)) }, [f.samples.buffer]);
   }
-  a.errors = mp2.errors;
-  if (mp2.layer === 3) a.note = 'MPEG audio Layer III (MP3) isn’t decoded in the browser.';
+  a.errors = dec.errors;
+  if (dec instanceof Ac3Decoder) {
+    const k = dec.kind;
+    a.layout = k?.layout ?? null;
+    a.note = k?.eac3 ? 'E-AC-3 isn’t decoded in the browser.' : null;
+  } else if (dec.layer === 3) {
+    a.note = 'MPEG audio Layer III (MP3) isn’t decoded in the browser.';
+  }
+}
+
+/** After lost packets: the sound decoders find their frames again. */
+function audioGap() {
+  wasmAudio?.reset();
+  latm.reset();
+  latmNext = null;
 }
 
 function closeAudio() {
   if (audioDecoder && audioDecoder.state !== 'closed') audioDecoder.close();
   audioDecoder = null;
   audioConfig = '';
-  mp2?.free();
-  mp2 = null;
-  mp2Gen++;
-  mp2Loading = null;
-  mp2Queue = [];
-  mp2Unwrap.reset();
+  audioPending = false;
+  latm.reset();
+  latm.config = null;
+  latmNext = null;
+  wasmAudio?.free();
+  wasmAudio = null;
+  audioGen++;
+  wasmLoading = null;
+  wasmQueue = [];
+  wasmUnwrap.reset();
 }
 
 // ---- Program choice ------------------------------------------------------------
+
+function setAudio(a: EsInfo | null) {
+  closeAudio();
+  audioEs = a;
+  demux.wanted = new Set([videoEs?.pid, a?.pid].filter((x): x is number => x !== undefined));
+  stats.audio = a
+    ? { pid: a.pid, codec: a.codec, lang: a.lang, layout: null, decoder: null, rate: 0, channels: 0, bitrate: 0, frames: 0, errors: 0, note: null }
+    : null;
+  if (stats.audio && a && !DECODED_AUDIO.has(a.codec)) stats.audio.note = `${a.codec === 'eac3' ? 'E-AC-3' : a.codec.toUpperCase()} audio isn’t decoded in the browser.`;
+}
 
 function choose() {
   const progs = [...demux.programs.values()];
   const next = choice === null ? defaultProgram(progs) : (demux.programs.get(choice) ?? null);
   const v = next?.streams.find((s) => s.kind === 'video') ?? null;
-  // The first sound this page can decode, in PMT order, else the first at all (to name it).
-  const a = next?.streams.find((s) => s.kind === 'audio' && DECODED_AUDIO.has(s.codec)) ?? next?.streams.find((s) => s.kind === 'audio') ?? null;
-  const same = next?.number === program?.number && v?.pid === videoEs?.pid && v?.type === videoEs?.type && a?.pid === audioEs?.pid;
+  const tracks = next?.streams.filter((s) => s.kind === 'audio') ?? [];
+  // The track asked for if this program has it, else the first this page
+  // can decode, in PMT order, else the first at all (to name it).
+  const a = tracks.find((s) => s.pid === trackChoice) ?? tracks.find((s) => DECODED_AUDIO.has(s.codec)) ?? tracks[0] ?? null;
+  const sameVideo = next?.number === program?.number && v?.pid === videoEs?.pid && v?.type === videoEs?.type;
+  const sameAudio = a?.pid === audioEs?.pid && a?.type === audioEs?.type;
   program = next;
   post({ type: 'programs', programs: progs, selected: program?.number ?? null });
-  if (same) return;
+  if (sameVideo && sameAudio) return;
+  if (sameVideo) {
+    // Another sound track: the pictures and the clock carry on.
+    setAudio(a);
+    post({ type: 'audio-flush' });
+    return;
+  }
   video?.close();
   video = null;
-  closeAudio();
   videoEs = v;
-  audioEs = a;
+  setAudio(a);
   offset = null;
-  demux.wanted = new Set([v?.pid, a?.pid].filter((x): x is number => x !== undefined));
   stats.video = videoStats();
-  stats.audio = a ? { pid: a.pid, codec: a.codec, lang: a.lang, decoder: null, rate: 0, channels: 0, bitrate: 0, frames: 0, errors: 0, note: null } : null;
-  if (stats.audio && a && !DECODED_AUDIO.has(a.codec)) stats.audio.note = `${a.codec.toUpperCase()} audio isn’t decoded in the browser.`;
   post({ type: 'flush' });
   if (!v) return;
   if (v.codec === 'h264' || v.codec === 'hevc') video = webCodecsPath(v.codec);
@@ -505,7 +579,7 @@ scope.onmessage = (e: MessageEvent<ToWorker>) => {
         stats.gaps++;
         demux.discontinuity();
         video?.gap();
-        mp2?.reset();
+        audioGap();
       }
       const data = new Uint8Array(m.data);
       bytes += data.length;
@@ -520,6 +594,10 @@ scope.onmessage = (e: MessageEvent<ToWorker>) => {
     }
     case 'program':
       choice = m.number;
+      choose();
+      break;
+    case 'track':
+      trackChoice = m.pid;
       choose();
       break;
     case 'audio':
