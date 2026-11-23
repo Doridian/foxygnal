@@ -14,8 +14,8 @@ Think GNU Radio Companion, but:
 - **See your signal anywhere.** Click any wire to attach an oscilloscope, spectrum, waterfall
   or constellation view while the graph runs, with no rewiring and no restart.
 
-> Status: **M0, early skeleton.** The runtime, ten basic blocks, headless `run` and a minimal
-> editor shell work. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> Status: **M1.** Build, run, edit live and save graphs from the browser. Ten basic blocks;
+> instruments (scope, spectrum) come next. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
 
@@ -28,7 +28,14 @@ cargo build --release
 # UI
 (cd ui && npm install && npm run build)
 ./target/release/foxygnal serve                             # http://127.0.0.1:7355
+
+# Single binary with the UI inside (build the UI first)
+cargo build --release --features embed-ui
 ```
+
+`serve` options: `--project-dir DIR` is where the browser opens and saves `.fox.toml` files
+(default: the current directory). `--allow-remote` permits a non-loopback `--bind` and
+prints a URL with a random access token; put a TLS reverse proxy in front.
 
 UI development with hot reload: run `foxygnal serve` in one terminal and `npm run dev` in
 `ui/` in another, then open the Vite URL (`http://127.0.0.1:5173`). It proxies `/api` to the engine.

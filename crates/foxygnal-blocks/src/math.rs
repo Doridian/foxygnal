@@ -64,7 +64,7 @@ pub fn register(r: &mut Registry) {
             }],
             params: vec![
                 params::float_type(),
-                params::float("gain", "Gain", 1.0, None, "Linear gain factor."),
+                params::float("gain", "Gain", 1.0, None, "Linear gain factor.").live(),
             ],
         },
         build_gain,
@@ -143,6 +143,14 @@ impl<T: Sample + Mul<f32, Output = T>> Block for Gain<T> {
         io.consume(0, n);
         io.produce(0, n);
         Ok(WorkStatus::Ok)
+    }
+
+    fn set_param(&mut self, name: &str, value: &serde_json::Value) -> Result<(), Error> {
+        match name {
+            "gain" => self.gain = value.as_f64().unwrap_or_default() as f32,
+            _ => return Err(Error::Other(format!("`{name}` is not a live parameter"))),
+        }
+        Ok(())
     }
 }
 

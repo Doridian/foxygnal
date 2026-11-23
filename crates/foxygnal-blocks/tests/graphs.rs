@@ -108,3 +108,140 @@ fn type_mismatch_is_a_friendly_error() {
         "{err}"
     );
 }
+
+#[test]
+fn errors_name_the_block_or_edge() {
+    let reg = foxygnal_blocks::registry();
+    let build = |toml: &str| {
+        Flowgraph::from_spec(&GraphSpec::from_toml(toml).unwrap(), &reg)
+            .and_then(Flowgraph::start)
+            .err()
+            .expect("should fail")
+    };
+
+    // Bad parameter: attributed to the block id, not its kind.
+    let err = build(
+        r#"
+        [[block]]
+        id = "tone"
+        kind = "signal_source"
+        params = { waveform = "wobble" }
+        "#,
+    );
+    assert_eq!(err.block(), Some("tone"), "{err}");
+
+    let err = build(
+        r#"
+        [[block]]
+        id = "tone"
+        kind = "signal_source"
+        params = { frequency = "loud" }
+        "#,
+    );
+    assert_eq!(err.block(), Some("tone"), "{err}");
+    assert_eq!(err.detail(), "parameter `frequency`: expected a number");
+
+    // Unconnected input: attributed to the block that owns it.
+    let err = build(
+        r#"
+        [[block]]
+        id = "sink"
+        kind = "null_sink"
+        "#,
+    );
+    assert_eq!(err.block(), Some("sink"));
+    assert_eq!(err.detail(), "input `in` is not connected");
+
+    // Bad connection: attributed to the edge as written in the spec.
+    let err = build(
+        r#"
+        [[block]]
+        id = "sink"
+        kind = "null_sink"
+        [[connect]]
+        from = "nowhere.out"
+        to = "sink.in"
+        "#,
+    );
+    match err {
+        foxygnal_core::Error::Edge { from, to, msg } => {
+            assert_eq!((from.as_str(), to.as_str()), ("nowhere.out", "sink.in"));
+            assert_eq!(msg, "unknown block `nowhere`");
+        }
+        e => panic!("expected an edge error, got {e}"),
+    }
+}
+
+/// Emits nothing until a `go` parameter arrives, then emits it once and ends.
+struct WaitForParam(Option<f32>);
+
+impl foxygnal_core::Block for WaitForParam {
+    fn work(
+        &mut self,
+        io: &mut foxygnal_core::WorkIo<'_>,
+    ) -> Result<foxygnal_core::WorkStatus, foxygnal_core::Error> {
+        let Some(v) = self.0.take() else {
+            return Ok(foxygnal_core::WorkStatus::Blocked);
+        };
+        io.outputs[0].slice_mut::<f32>()[0] = v;
+        io.produce(0, 1);
+        Ok(foxygnal_core::WorkStatus::Done)
+    }
+
+    fn set_param(
+        &mut self,
+        name: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), foxygnal_core::Error> {
+        assert_eq!(name, "go");
+        self.0 = value.as_f64().map(|v| v as f32);
+        Ok(())
+    }
+}
+
+#[test]
+fn live_params_reach_a_running_block() {
+    let mut fg = Flowgraph::new();
+    let src = fg.add(
+        "src",
+        foxygnal_core::Instance {
+            block: Box::new(WaitForParam(None)),
+            inputs: vec![],
+            outputs: vec![("out".into(), foxygnal_core::StreamType::F32)],
+        },
+    );
+    let (sink, out) = VectorSink::<f32>::instance();
+    let sink = fg.add("sink", sink);
+    fg.connect(src, 0, sink, 0).unwrap();
+    let running = fg.start().unwrap();
+    running
+        .param_sender()
+        .send("src", "go", json!(42.0))
+        .unwrap();
+    running.wait().unwrap();
+    assert_eq!(*out.lock().unwrap(), vec![42.0]);
+}
+
+#[test]
+fn a_rejected_live_param_stops_the_graph_with_an_error() {
+    let reg = foxygnal_blocks::registry();
+    let mut fg = Flowgraph::new();
+    let src = fg.add(
+        "tone",
+        reg.build("signal_source", &params(json!({"type": "f32"})))
+            .unwrap(),
+    );
+    let sink = fg.add(
+        "sink",
+        reg.build("null_sink", &params(json!({"type": "f32"})))
+            .unwrap(),
+    );
+    fg.connect(src, 0, sink, 0).unwrap();
+    let running = fg.start().unwrap();
+    running
+        .param_sender()
+        .send("tone", "waveform", json!("square"))
+        .unwrap();
+    let err = running.wait().expect_err("waveform is not live");
+    assert_eq!(err.block(), Some("tone"));
+}

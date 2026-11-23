@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use foxygnal_core::{Flowgraph, GraphSpec};
+use foxygnal_server::{Security, Ui};
 
 #[derive(Parser)]
 #[command(
@@ -22,12 +23,17 @@ enum Cmd {
     Serve {
         #[arg(long, default_value = "127.0.0.1:7355")]
         bind: SocketAddr,
-        /// Required to listen on a non-loopback address. There is no auth yet!
+        /// Allow a non-loopback address. Access then needs a random token,
+        /// printed at startup. Put a TLS reverse proxy in front.
         #[arg(long)]
         allow_remote: bool,
-        /// Directory with the built UI.
-        #[arg(long, default_value = "ui/dist")]
-        ui_dir: PathBuf,
+        /// Directory with the built UI. Defaults to the UI embedded in the
+        /// binary if there is one, else `ui/dist`.
+        #[arg(long)]
+        ui_dir: Option<PathBuf>,
+        /// Where the browser lists, opens and saves `.fox.toml` files.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
     },
     /// Run a flowgraph file headless until it finishes (or Ctrl-C).
     Run { graph: PathBuf },
@@ -51,15 +57,40 @@ async fn main() -> anyhow::Result<()> {
             bind,
             allow_remote,
             ui_dir,
+            project_dir,
         } => {
             if !bind.ip().is_loopback() && !allow_remote {
-                bail!("refusing to listen on {bind}: pass --allow-remote (no authentication yet)");
+                bail!("refusing to listen on {bind}: pass --allow-remote to allow it");
             }
-            let ui_dir = ui_dir.is_dir().then_some(ui_dir).or_else(|| {
-                tracing::warn!("UI not built (run `npm run build` in ui/); serving API only");
-                None
-            });
-            foxygnal_server::serve(foxygnal_server::Config { bind, ui_dir }, registry).await?;
+            if !project_dir.is_dir() {
+                bail!("project dir {} does not exist", project_dir.display());
+            }
+            let ui = match ui_dir {
+                Some(dir) if dir.is_dir() => Ui::Dir(dir),
+                Some(dir) => bail!("UI dir {} does not exist", dir.display()),
+                None => Ui::embedded().unwrap_or_else(|| {
+                    let dir = PathBuf::from("ui/dist");
+                    if dir.is_dir() {
+                        Ui::Dir(dir)
+                    } else {
+                        tracing::warn!(
+                            "UI not built (run `npm run build` in ui/); serving the API only"
+                        );
+                        Ui::None
+                    }
+                }),
+            };
+            let security = Security {
+                allow_remote,
+                token: allow_remote.then(Security::random_token),
+            };
+            let cfg = foxygnal_server::Config {
+                bind,
+                ui,
+                project_dir,
+                security,
+            };
+            foxygnal_server::serve(cfg, registry).await?;
         }
         Cmd::Run { graph } => {
             let text = std::fs::read_to_string(&graph)

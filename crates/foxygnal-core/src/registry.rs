@@ -49,6 +49,52 @@ pub struct ParamSpec {
     pub kind: ParamKind,
     pub default: Value,
     pub help: &'static str,
+    /// Can change while the graph runs (delivered via [`Block::set_param`]).
+    /// Other parameter changes need a restart.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub live: bool,
+}
+
+impl ParamSpec {
+    /// Mark this parameter as changeable while running.
+    pub fn live(mut self) -> Self {
+        self.live = true;
+        self
+    }
+
+    /// Check that `value` has the right JSON shape for this parameter.
+    pub fn check(&self, value: &Value) -> Result<(), String> {
+        let ok = match &self.kind {
+            ParamKind::Float { min, max, .. } => match value.as_f64() {
+                Some(v) if min.is_some_and(|m| v < m) => {
+                    return Err(format!("must be at least {}", min.unwrap_or_default()));
+                }
+                Some(v) if max.is_some_and(|m| v > m) => {
+                    return Err(format!("must be at most {}", max.unwrap_or_default()));
+                }
+                Some(v) => v.is_finite(),
+                None => false,
+            },
+            ParamKind::Int { min, max } => match value.as_i64() {
+                Some(v) if min.is_some_and(|m| v < m) => {
+                    return Err(format!("must be at least {}", min.unwrap_or_default()));
+                }
+                Some(v) if max.is_some_and(|m| v > m) => {
+                    return Err(format!("must be at most {}", max.unwrap_or_default()));
+                }
+                Some(_) => true,
+                None => false,
+            },
+            ParamKind::Bool => value.is_boolean(),
+            ParamKind::Enum { options } => value.as_str().is_some_and(|v| options.contains(&v)),
+            ParamKind::String | ParamKind::Path => value.is_string(),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(format!("invalid value {value}"))
+        }
+    }
 }
 
 /// Static description of a port for the palette. `None` = depends on params.

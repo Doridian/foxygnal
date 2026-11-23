@@ -32,6 +32,7 @@ pub fn register(r: &mut Registry) {
                     },
                     default: json!("sine"),
                     help: "Shape of the generated signal.",
+                    live: false,
                 },
                 params::float(
                     "frequency",
@@ -39,15 +40,17 @@ pub fn register(r: &mut Registry) {
                     1_000.0,
                     Some("Hz"),
                     "Signal frequency.",
-                ),
-                params::float("amplitude", "Amplitude", 1.0, None, "Peak amplitude."),
+                )
+                .live(),
+                params::float("amplitude", "Amplitude", 1.0, None, "Peak amplitude.").live(),
                 params::float(
                     "offset",
                     "Offset",
                     0.0,
                     None,
                     "DC offset added to the output.",
-                ),
+                )
+                .live(),
                 params::sample_rate(),
             ],
         },
@@ -72,7 +75,8 @@ pub fn register(r: &mut Registry) {
                     0.1,
                     None,
                     "Standard deviation.",
-                ),
+                )
+                .live(),
                 ParamSpec {
                     name: "seed",
                     label: "Seed",
@@ -82,6 +86,7 @@ pub fn register(r: &mut Registry) {
                     },
                     default: json!(0),
                     help: "0 = random seed each run.",
+                    live: false,
                 },
             ],
         },
@@ -104,6 +109,7 @@ pub struct SignalSource {
     /// Phase in cycles, [0, 1).
     phase: f64,
     step: f64,
+    sample_rate: f64,
     amplitude: f32,
     offset: f32,
 }
@@ -168,6 +174,17 @@ impl Block for SignalSource {
         io.produce(0, n);
         Ok(WorkStatus::Ok)
     }
+
+    fn set_param(&mut self, name: &str, value: &serde_json::Value) -> Result<(), Error> {
+        let v = value.as_f64().unwrap_or_default();
+        match name {
+            "frequency" => self.step = v / self.sample_rate,
+            "amplitude" => self.amplitude = v as f32,
+            "offset" => self.offset = v as f32,
+            _ => return Err(Error::Other(format!("`{name}` is not a live parameter"))),
+        }
+        Ok(())
+    }
 }
 
 fn build_signal(p: &ParamReader<'_>) -> Result<Instance, Error> {
@@ -187,6 +204,7 @@ fn build_signal(p: &ParamReader<'_>) -> Result<Instance, Error> {
             wave,
             phase: 0.0,
             step: p.f64("frequency")? / fs,
+            sample_rate: fs,
             amplitude: p.f64("amplitude")? as f32,
             offset: p.f64("offset")? as f32,
         }),
@@ -273,6 +291,14 @@ impl Block for NoiseSource {
         }
         io.produce(0, n);
         Ok(WorkStatus::Ok)
+    }
+
+    fn set_param(&mut self, name: &str, value: &serde_json::Value) -> Result<(), Error> {
+        match name {
+            "amplitude" => self.sigma = value.as_f64().unwrap_or_default() as f32,
+            _ => return Err(Error::Other(format!("`{name}` is not a live parameter"))),
+        }
+        Ok(())
     }
 }
 

@@ -1,4 +1,4 @@
-// Types mirror foxygnal-core's registry (serde output of BlockDescriptor).
+// Types mirror foxygnal-core / foxygnal-server (their serde output).
 
 export type StreamType = 'f32' | 'c32' | 'i16' | 'u8';
 
@@ -12,6 +12,8 @@ export type ParamSpec = {
   label: string;
   default: unknown;
   help: string;
+  /** Changes apply while running. */
+  live?: boolean;
 } & (
   | { kind: 'float'; min?: number; max?: number; unit?: string }
   | { kind: 'int'; min?: number; max?: number }
@@ -31,11 +33,78 @@ export interface BlockDescriptor {
   params: ParamSpec[];
 }
 
-export async function fetchBlocks(): Promise<BlockDescriptor[]> {
-  const r = await fetch('/api/blocks');
-  if (!r.ok) throw new Error(`GET /api/blocks: ${r.status}`);
-  return r.json();
+export interface BlockSpec {
+  id: string;
+  kind: string;
+  params: Record<string, unknown>;
+  ui?: Record<string, unknown>;
 }
+
+export interface ConnectionSpec {
+  from: string;
+  to: string;
+}
+
+/** A graph as stored in `.fox.toml` (`[[block]]`, `[[connect]]`). */
+export interface GraphSpec {
+  block: BlockSpec[];
+  connect: ConnectionSpec[];
+}
+
+export const emptyGraph = (): GraphSpec => ({ block: [], connect: [] });
+
+export type RunState = 'stopped' | 'running' | 'error';
+
+export interface ErrorInfo {
+  block?: string;
+  edge?: { from: string; to: string };
+  message: string;
+}
+
+export interface Status {
+  state: RunState;
+  started_at?: number;
+  stale: boolean;
+  errors: ErrorInfo[];
+}
+
+export type ServerEvent =
+  | { op: 'hello'; client: number; graph: GraphSpec; name: string | null; version: number; status: Status }
+  | { op: 'graph'; graph: GraphSpec; name: string | null; version: number; from: number }
+  | ({ op: 'status' } & Status);
+
+export type ClientCommand = { op: 'set_graph'; graph: GraphSpec; name?: string | null } | { op: 'run' } | { op: 'stop' };
+
+export interface ExampleInfo {
+  name: string;
+  title: string;
+  description: string;
+  blocks: number;
+}
+
+export interface FileInfo {
+  name: string;
+  modified: number;
+}
+
+async function call<T>(method: string, url: string, body?: BodyInit, type?: string): Promise<T> {
+  const r = await fetch(url, { method, body, headers: type ? { 'content-type': type } : undefined });
+  if (!r.ok) throw new Error((await r.text()) || `${method} ${url}: ${r.status}`);
+  const ct = r.headers.get('content-type') ?? '';
+  return (ct.includes('json') ? r.json() : r.text()) as Promise<T>;
+}
+
+const json = (v: unknown) => JSON.stringify(v);
+
+export const fetchBlocks = () => call<BlockDescriptor[]>('GET', '/api/blocks');
+export const fetchExamples = () => call<ExampleInfo[]>('GET', '/api/examples');
+export const fetchExample = (name: string) => call<GraphSpec>('GET', `/api/examples/${encodeURIComponent(name)}`);
+export const listFiles = () => call<FileInfo[]>('GET', '/api/files');
+export const openFile = (name: string) => call<GraphSpec>('GET', `/api/files/${encodeURIComponent(name)}`);
+export const saveFile = (name: string, g: GraphSpec) =>
+  call<string>('PUT', `/api/files/${encodeURIComponent(name)}`, json(g), 'application/json');
+export const parseToml = (text: string) => call<GraphSpec>('POST', '/api/toml/parse', text, 'text/plain');
+export const renderToml = (g: GraphSpec) => call<string>('POST', '/api/toml/render', json(g), 'application/json');
 
 /** A port's concrete type: fixed by the descriptor, else taken from the `type` param. */
 export function portType(p: PortSpec, params: Record<string, unknown>): StreamType {

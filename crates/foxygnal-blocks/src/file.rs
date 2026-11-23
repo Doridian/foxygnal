@@ -19,6 +19,7 @@ fn path_param() -> ParamSpec {
         kind: ParamKind::Path,
         default: json!(""),
         help: "Raw interleaved samples, little-endian (c32 = float I, float Q, …).",
+        live: false,
     }
 }
 
@@ -43,6 +44,7 @@ pub fn register(r: &mut Registry) {
                     kind: ParamKind::Bool,
                     default: json!(false),
                     help: "Start over at end of file instead of ending the stream.",
+                    live: false,
                 },
             ],
         },

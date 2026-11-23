@@ -63,9 +63,10 @@ code.
   (sample rate, centre frequency, …) and declares its output metadata. A decimate-by-4 block
   divides the rate by 4, and a throttle picks up the rate from upstream. Users stop typing the
   same sample rate everywhere, and the UI can label every wire with its rate.
-- **Live parameters (M1).** Parameters flagged `live` (frequency, gain, cutoff…) can change
-  while running. The runtime delivers them through a per-block command queue that is drained
-  before `work`. Other parameter changes rebuild the affected block.
+- **Live parameters (M1, done).** Parameters flagged `live` (frequency, gain, cutoff…) can
+  change while running. The runtime delivers them to `Block::set_param` through a per-block
+  queue drained before `work`. Any other change marks the run *stale*: it applies on the next
+  run. (Later: rebuild only the affected block.)
 - **Tags (M3).** Sample-indexed key/value annotations (`rx_time`, `freq` after a retune,
   `burst_start`), carried alongside the ring buffer.
 
@@ -116,14 +117,20 @@ REST:
 
 - `GET /api/health`: name and version
 - `GET /api/blocks`: block descriptors
-- (M1) `GET/PUT /api/graph`: current graph as `GraphSpec` JSON
-- (M1) `GET /api/examples`: bundled example graphs
+- `GET/PUT /api/graph`: current graph as `GraphSpec` JSON; `GET /api/graph.toml`
+- `POST /api/toml/parse`, `POST /api/toml/render`: convert for upload/download
+- `GET /api/examples`, `GET /api/examples/{name}`: bundled example graphs
+- `GET /api/files`, `GET/PUT /api/files/{name}`: `.fox.toml` files in `--project-dir`
+  (plain file names only). Relative `path` parameters also resolve against that directory.
 
-WebSocket `/api/ws` (M1+), one per browser tab:
+WebSocket `/api/ws`, one per browser tab:
 
-- **Text frames: JSON control messages** with `{"op": …}`, for example `run`, `stop`,
-  `set_param {block, name, value}`, `probe_add {edge, kind, options}` and `probe_remove`.
-  Server events: `state` (running/stopped/error), `block_error {block, message}`, `stats`.
+- **Text frames: JSON control messages** with `{"op": …}`. Client: `set_graph {graph, name}`
+  (the whole graph; the server diffs it, pushes changed live params and marks other changes
+  stale), `run`, `stop`; later `probe_add {edge, kind, options}` and `probe_remove`. Server:
+  `hello` (full snapshot on connect or after lag), `graph {graph, name, version, from}`
+  and `status {state, started_at, stale, errors[]}`, where each error names a `block`, an
+  `edge {from, to}`, or neither. Later: `stats`.
 - **Binary frames: instrument data.** Header: `u32 probe_id`, `u8 kind`, `u32 seq`, then
   kind-specific little-endian payload (usually `f32` arrays). No base64 and no JSON for bulk data.
 
@@ -143,10 +150,12 @@ variables (`$samp_rate`) referenced from params.
 A local server that can write files (file sink) and later transmit RF needs care:
 
 - It binds `127.0.0.1` by default. Non-loopback binds need `--allow-remote`.
-- (M1) **Host and Origin checks** on every request and WebSocket upgrade. These block DNS
+- **Host and Origin checks** on every request and WebSocket upgrade. These block DNS
   rebinding attacks and cross-site requests from pages open in the same browser. This matters
   even on localhost.
-- (M1) For `--allow-remote`: a random access token printed at startup, like Jupyter.
+- For `--allow-remote`: a random access token printed at startup, like Jupyter. Opening
+  `/?token=…` sets an `HttpOnly; SameSite=Strict` cookie; API clients can send
+  `Authorization: Bearer …`.
   Recommend a reverse proxy with TLS.
 - (M4) **Transmit is opt-in per session.** Any TX block requires an explicit "arm TX" action,
   and the UI shows a persistent red banner while armed. The user is responsible for staying
@@ -157,7 +166,8 @@ A local server that can write files (file sink) and later transmit RF needs care
 Svelte 5 + Vite + TypeScript, and **Svelte Flow** (`@xyflow/svelte`) for the node editor.
 Instruments are hand-written WebGL2 canvases, not a charting library, to keep 60 fps
 waterfalls cheap. In release builds the built UI is embedded in the binary with `rust-embed`
-(M1), so you ship a single file. Today it is served from `ui/dist`.
+(`cargo build --release --features embed-ui`), so you ship a single file. Without the feature
+it is served from `ui/dist` (or `--ui-dir`).
 
 ## Prior art and positioning
 

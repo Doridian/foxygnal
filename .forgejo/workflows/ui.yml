@@ -1,0 +1,25 @@
+name: UI check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  check-ui:
+    runs-on: ${{ vars.MANAGED_RUNNER_TAG || 'ubuntu-26.04' }}
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7
+      # Node comes with the runner image (JavaScript actions need it too).
+      - name: Node version
+        run: node --version && npm --version
+      - name: Install
+        run: npm ci
+      - name: Type-check
+        run: npm run check
+      - name: Build
+        run: npm run build

@@ -1,0 +1,95 @@
+// Conversion between the server's GraphSpec and Svelte Flow nodes/edges, and
+// connection rules with human-readable rejection reasons.
+
+import type { Connection, Edge, Node } from '@xyflow/svelte';
+import { portType, type BlockDescriptor, type GraphSpec, type StreamType } from './api';
+
+export type BlockData = { desc: BlockDescriptor; params: Record<string, unknown> };
+export type BlockNode = Node<BlockData, 'block'>;
+export type Wire = Edge<Record<string, unknown>, 'typed'>;
+
+/** Stand-in descriptor for a block kind this engine doesn't know. */
+function unknownDesc(kind: string): BlockDescriptor {
+  return { kind, label: kind, category: 'Unknown', help: `This engine has no block kind \`${kind}\`.`, inputs: [], outputs: [], params: [] };
+}
+
+export const edgeId = (from: string, to: string) => `${from}->${to}`;
+
+/** `block.port` where the port may be a name or an index. Returns the port name. */
+function resolvePort(endpoint: string, nodes: Map<string, BlockNode>, dir: 'inputs' | 'outputs') {
+  const dot = endpoint.lastIndexOf('.');
+  const block = endpoint.slice(0, dot);
+  const port = endpoint.slice(dot + 1);
+  const ports = nodes.get(block)?.data.desc[dir] ?? [];
+  const byIndex = /^\d+$/.test(port) ? ports[Number(port)] : undefined;
+  return { block, port: ports.some((p) => p.name === port) ? port : (byIndex?.name ?? port) };
+}
+
+export function fromSpec(g: GraphSpec, catalog: Map<string, BlockDescriptor>, selected = new Set<string>()) {
+  const nodes: BlockNode[] = g.block.map((b, i) => ({
+    id: b.id,
+    type: 'block',
+    position: {
+      x: typeof b.ui?.x === 'number' ? b.ui.x : (i % 4) * 240,
+      y: typeof b.ui?.y === 'number' ? b.ui.y : Math.floor(i / 4) * 170,
+    },
+    selected: selected.has(b.id),
+    data: { desc: catalog.get(b.kind) ?? unknownDesc(b.kind), params: { ...b.params } },
+  }));
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const edges: Wire[] = g.connect.map((c) => {
+    const f = resolvePort(c.from, byId, 'outputs');
+    const t = resolvePort(c.to, byId, 'inputs');
+    const id = edgeId(`${f.block}.${f.port}`, `${t.block}.${t.port}`);
+    return { id, type: 'typed', source: f.block, sourceHandle: f.port, target: t.block, targetHandle: t.port, selected: selected.has(id) };
+  });
+  return { nodes, edges };
+}
+
+export function toSpec(nodes: BlockNode[], edges: Wire[]): GraphSpec {
+  return {
+    block: nodes.map((n) => ({
+      id: n.id,
+      kind: n.data.desc.kind,
+      params: n.data.params,
+      ui: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
+    })),
+    connect: edges.map((e) => ({ from: `${e.source}.${e.sourceHandle}`, to: `${e.target}.${e.targetHandle}` })),
+  };
+}
+
+export function typeOf(node: BlockNode | undefined, handle: string | null | undefined, dir: 'inputs' | 'outputs'): StreamType | null {
+  const p = node?.data.desc[dir].find((p) => p.name === handle);
+  return p && node ? portType(p, node.data.params) : null;
+}
+
+/** Why a connection can't be made, or `null` if it can. */
+export function rejectReason(c: Connection, nodes: BlockNode[]): string | null {
+  if (c.source === c.target) return 'A block cannot feed itself.';
+  const src = nodes.find((n) => n.id === c.source);
+  const dst = nodes.find((n) => n.id === c.target);
+  const from = typeOf(src, c.sourceHandle, 'outputs');
+  const to = typeOf(dst, c.targetHandle, 'inputs');
+  if (!from || !to) return null;
+  if (from !== to) {
+    return `\`${c.source}.${c.sourceHandle}\` produces ${from}, but \`${c.target}.${c.targetHandle}\` expects ${to}. Set both blocks to the same type.`;
+  }
+  return null;
+}
+
+/** Id stem for a new block of `kind`: `signal_source` → `signal`. */
+export const baseForKind = (kind: string) => kind.replace(/_(source|sink)$/, '');
+
+/** Id stem for a copy of block `id`: `gain_3` → `gain`. */
+export const baseForCopy = (id: string) => id.replace(/_\d+$/, '');
+
+/** A fresh block id like `gain_2`, unique in `taken`. */
+export function freshId(base: string, taken: Set<string>): string {
+  base = base.replace(/[^A-Za-z0-9_-]/g, '_') || 'block';
+  for (let i = 1; ; i++) {
+    const id = `${base}_${i}`;
+    if (!taken.has(id)) return id;
+  }
+}
+
+export const ID_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;

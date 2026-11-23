@@ -5,16 +5,26 @@
   --line: #2a323d;
   --text: #e6edf3;
   --muted: #9aa7b4;
+  --faint: #8693a0;
   --accent: #f59e3b; /* fox orange */
   --ok: #3fb950;
-  /* Stream type colours, shared by ports, wires and scope traces */
+  --ok-bg: #12261a;
+  --ok-text: #56d364;
+  --warn: #e3b341;
+  --warn-bg: #2a2412;
+  --err: #ff7b72;
+  --err-bg: #2a1618;
+  --err-line: #a8433d;
+  /* Stream type colours, shared by ports, wires and scope traces.
+     They differ in lightness too, so they stay apart for colour-blind users. */
   --t-c32: #f59e3b;
   --t-f32: #4cc2ff;
   --t-i16: #c48cff;
   --t-u8: #8bd450;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   color-scheme: dark;
   font-family: Inter, system-ui, sans-serif;
-  font-size: 14px;
+  font-size: 13px;
 }
 html,
 body,
@@ -24,6 +34,78 @@ body,
   background: var(--bg);
   color: var(--text);
 }
+a {
+  color: var(--accent);
+}
+a:hover {
+  color: #ffc27a;
+}
 button {
   font: inherit;
+  cursor: pointer;
+}
+button:not([class]),
+button.primary,
+button.danger {
+  padding: 7px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+}
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a1206;
+  font-weight: 600;
+}
+button.danger {
+  color: var(--err);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+input,
+select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+kbd {
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: 11px var(--mono);
+  color: var(--muted);
+}
+code,
+.mono {
+  font-family: var(--mono);
+}
+.muted {
+  color: var(--muted);
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.svelte-flow {
+  --xy-background-color: var(--bg);
+  --xy-background-pattern-dots-color-default: #252c36;
 }

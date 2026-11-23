@@ -55,6 +55,7 @@ pub fn register(r: &mut Registry) {
                     },
                     default: json!(48_000),
                     help: "Number of items to pass.",
+                    live: false,
                 },
             ],
         },

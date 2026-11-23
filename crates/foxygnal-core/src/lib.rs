@@ -13,7 +13,7 @@ pub use graph::GraphSpec;
 pub use registry::{
     BlockDescriptor, Instance, ParamKind, ParamReader, ParamSpec, Params, PortSpec, Registry,
 };
-pub use runtime::{BlockId, Flowgraph, Running, StopHandle};
+pub use runtime::{BlockId, Flowgraph, ParamSender, Running, StopHandle};
 pub use sample::{Complex32, Sample, StreamType};
 
 #[derive(Debug, thiserror::Error)]
@@ -28,16 +28,42 @@ pub enum Error {
     },
     #[error("graph error: {0}")]
     Graph(String),
-    #[error("block `{block}` failed: {source}")]
+    /// A connection could not be made. `msg` names both endpoints.
+    #[error("{msg}")]
+    Edge {
+        from: String,
+        to: String,
+        msg: String,
+    },
+    #[error("block `{block}`: {source}")]
     Block {
         block: String,
         #[source]
         source: Box<Error>,
     },
-    #[error("a block thread panicked")]
+    #[error("the block thread panicked")]
     Panic,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Other(String),
+}
+
+impl Error {
+    /// The id of the block this error is about, if it is about one.
+    pub fn block(&self) -> Option<&str> {
+        match self {
+            Self::Param { block, .. } | Self::Block { block, .. } => Some(block),
+            _ => None,
+        }
+    }
+
+    /// The message without the block prefix, for display next to the block.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Block { source, .. } => source.detail(),
+            Self::Param { param, msg, .. } => format!("parameter `{param}`: {msg}"),
+            e => e.to_string(),
+        }
+    }
 }

@@ -30,6 +30,15 @@ pub trait Block: Send + 'static {
     fn stop(&mut self) -> Result<(), Error> {
         Ok(())
     }
+
+    /// Apply a parameter flagged `live` in the descriptor while running.
+    /// Called on the block's own thread between `work` calls. The value has
+    /// already been checked against the parameter's spec.
+    fn set_param(&mut self, name: &str, _value: &serde_json::Value) -> Result<(), Error> {
+        Err(Error::Other(format!(
+            "parameter `{name}` cannot change while running"
+        )))
+    }
 }
 
 /// An input port during `work`.

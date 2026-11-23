@@ -10,6 +10,7 @@ pub fn stream_type(default: &str, options: Vec<&'static str>) -> ParamSpec {
         kind: ParamKind::Enum { options },
         default: json!(default),
         help: "Item type: f32 = real, c32 = complex I/Q, i16 / u8 = integers.",
+        live: false,
     }
 }
 
@@ -32,6 +33,7 @@ pub fn sample_rate() -> ParamSpec {
         },
         default: json!(48_000.0),
         help: "Samples per second.",
+        live: false,
     }
 }
 
@@ -52,5 +54,6 @@ pub fn float(
         },
         default: json!(default),
         help,
+        live: false,
     }
 }

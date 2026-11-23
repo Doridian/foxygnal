@@ -13,19 +13,19 @@ Every milestone ends with something a user can actually do. Order matters more t
 - [x] `foxygnal run | serve | blocks`; localhost-only by default
 - [x] UI shell: palette from `/api/blocks`, node canvas, typed port colours, parameter inspector
 
-## M1: Edit and run from the browser
+## M1: Edit and run from the browser ✅ (2026-11-22)
 
 Goal: build the example graph by hand in the browser, press Run, see it work, save it.
 
-- [ ] WebSocket session: graph sync, run/stop, state and error events
-- [ ] Connect ports in the UI with type validation and readable rejection reasons
-- [ ] Save/load `.fox.toml` (download/upload and a server-side project dir); example gallery
-- [ ] Errors pinned to the offending block (build errors and runtime errors)
-- [ ] Live parameter updates for flagged params (frequency, amplitude, gain)
-- [ ] Undo/redo, copy/paste, delete, keyboard block search (`/`)
-- [ ] Host/Origin checks, access token for `--allow-remote`
-- [ ] Embed UI in the binary (`rust-embed`)
-- [ ] CI: fmt, clippy, tests, UI type-check and build
+- [x] WebSocket session: graph sync, run/stop, state and error events
+- [x] Connect ports in the UI with type validation and readable rejection reasons
+- [x] Save/load `.fox.toml` (download/upload and a server-side project dir); example gallery
+- [x] Errors pinned to the offending block (build errors and runtime errors)
+- [x] Live parameter updates for flagged params (frequency, amplitude, gain)
+- [x] Undo/redo, copy/paste, delete, keyboard block search (`/`)
+- [x] Host/Origin checks, access token for `--allow-remote`
+- [x] Embed UI in the binary (`rust-embed`, `--features embed-ui`)
+- [x] CI: fmt, clippy, tests, UI type-check and build
 
 ## M2: See the signal
 
