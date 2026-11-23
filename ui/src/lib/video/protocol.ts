@@ -36,9 +36,15 @@ export interface AudioStats {
   pid: number;
   codec: string;
   lang: string | null;
+  /** The WebCodecs codec string, or `wasm` for our MPEG audio decoder; null until sound is on. */
+  decoder: string | null;
   rate: number;
   channels: number;
   bitrate: number;
+  /** Frames decoded (since the stream was chosen). */
+  frames: number;
+  /** Frames that failed their CRC, and lost frame sync (MPEG audio). */
+  errors: number;
   note: string | null;
 }
 

@@ -1,7 +1,8 @@
 // The Video instrument's worker: demuxes the transport stream, decodes the
 // chosen program's video (WebCodecs for H.264 / HEVC, our WebAssembly decoder
-// for MPEG-1/2) and AAC audio (WebCodecs), and works out when each frame is
-// due. Frames go to the page as transferable VideoFrames.
+// for MPEG-1/2) and sound (AAC with WebCodecs, MPEG audio Layer I/II with our
+// WebAssembly decoder), and works out when each frame is due. Frames go to
+// the page as transferable VideoFrames, sound as PCM.
 //
 // Timing: the stream arrives in real time, so the program clock (PCR) maps
 // to arrival time. `offset` is the lower envelope of arrival − PCR (late data
@@ -9,10 +10,15 @@
 // the jitter buffer. Without a PCR, the first PTS is mapped to its arrival.
 
 import wasmUrl from './mpeg2.wasm?url';
+import mp2Url from './mp2.wasm?url';
+import { Mp2Decoder } from './mp2';
 import { Mpeg2Decoder } from './mpeg2';
 import { adtsFrames, avcAccessUnit, hevcAccessUnit, mpeg2HasSequenceHeader } from './nal';
-import type { FromWorker, Stats, ToWorker } from './protocol';
+import type { AudioStats, FromWorker, Stats, ToWorker } from './protocol';
 import { Demuxer, defaultProgram, Unwrapper, type EsInfo, type Pes, type Program } from './ts';
+
+/** Audio codecs played (`EsInfo.codec`). */
+const DECODED_AUDIO = new Set(['aac', 'mp2']);
 
 interface WorkerScope {
   postMessage(m: unknown, transfer: Transferable[]): void;
@@ -333,6 +339,10 @@ let audioPending = false;
 function audioPes(p: Pes) {
   const a = stats.audio;
   if (!a || !audioOn || !audioEs) return;
+  if (audioEs.codec === 'mp2') {
+    mp2Pes(p, a);
+    return;
+  }
   if (audioEs.codec !== 'aac') return;
   if (p.pts === null) return;
   const frames = adtsFrames(p.data);
@@ -360,6 +370,7 @@ function audioPes(p: Pes) {
         audioDecoder?.close();
         audioDecoder = new AudioDecoder({ output: pcm, error: (e) => (a.note = `Audio decoder error: ${e.message}`) });
         audioDecoder.configure(config);
+        a.decoder = config.codec;
         a.note = null;
       },
       () => {
@@ -390,13 +401,64 @@ function pcm(d: AudioData) {
   const at = due((d.timestamp * 9) / 100);
   const rate = d.sampleRate;
   d.close();
+  if (stats.audio) stats.audio.frames++;
   post({ type: 'pcm', samples: out, channels, rate, due: at }, [out.buffer]);
+}
+
+// MPEG audio Layer I/II through the WebAssembly decoder. It loads when sound
+// is first switched on for such a stream; PES packets wait meanwhile.
+let mp2: Mp2Decoder | null = null;
+let mp2Gen = 0; // bumped by closeAudio, so a load finishing late is dropped
+let mp2Loading: number | null = null; // the generation a load is in flight for
+let mp2Queue: Pes[] = [];
+const mp2Unwrap = new Unwrapper();
+
+function mp2Pes(p: Pes, a: AudioStats) {
+  if (!mp2) {
+    if (mp2Queue.length < 50) mp2Queue.push(p);
+    if (mp2Loading === mp2Gen) return;
+    const gen = (mp2Loading = mp2Gen);
+    Mp2Decoder.create(mp2Url).then(
+      (d) => {
+        if (gen !== mp2Gen) {
+          d.free(); // closed meanwhile
+          return;
+        }
+        mp2 = d;
+        mp2Loading = null;
+        a.decoder = 'wasm';
+        const q = mp2Queue;
+        mp2Queue = [];
+        for (const p of q) mp2Pes(p, a);
+      },
+      (e: Error) => {
+        if (gen === mp2Gen) a.note = `The MPEG audio decoder didn't load: ${e.message}`;
+      },
+    );
+    return;
+  }
+  mp2.push(p.data, p.pts);
+  for (let f = mp2.next(); f; f = mp2.next()) {
+    a.frames++;
+    a.rate = f.rate;
+    a.channels = f.channels;
+    if (f.pts === null) continue;
+    post({ type: 'pcm', samples: f.samples, channels: f.channels, rate: f.rate, due: due(mp2Unwrap.unwrap(f.pts)) }, [f.samples.buffer]);
+  }
+  a.errors = mp2.errors;
+  if (mp2.layer === 3) a.note = 'MPEG audio Layer III (MP3) isn’t decoded in the browser.';
 }
 
 function closeAudio() {
   if (audioDecoder && audioDecoder.state !== 'closed') audioDecoder.close();
   audioDecoder = null;
   audioConfig = '';
+  mp2?.free();
+  mp2 = null;
+  mp2Gen++;
+  mp2Loading = null;
+  mp2Queue = [];
+  mp2Unwrap.reset();
 }
 
 // ---- Program choice ------------------------------------------------------------
@@ -405,7 +467,8 @@ function choose() {
   const progs = [...demux.programs.values()];
   const next = choice === null ? defaultProgram(progs) : (demux.programs.get(choice) ?? null);
   const v = next?.streams.find((s) => s.kind === 'video') ?? null;
-  const a = next?.streams.find((s) => s.kind === 'audio' && s.codec === 'aac') ?? next?.streams.find((s) => s.kind === 'audio') ?? null;
+  // The first sound this page can decode, in PMT order, else the first at all (to name it).
+  const a = next?.streams.find((s) => s.kind === 'audio' && DECODED_AUDIO.has(s.codec)) ?? next?.streams.find((s) => s.kind === 'audio') ?? null;
   const same = next?.number === program?.number && v?.pid === videoEs?.pid && v?.type === videoEs?.type && a?.pid === audioEs?.pid;
   program = next;
   post({ type: 'programs', programs: progs, selected: program?.number ?? null });
@@ -418,9 +481,8 @@ function choose() {
   offset = null;
   demux.wanted = new Set([v?.pid, a?.pid].filter((x): x is number => x !== undefined));
   stats.video = videoStats();
-  stats.audio = a ? { pid: a.pid, codec: a.codec, lang: a.lang, rate: 0, channels: 0, bitrate: 0, note: null } : null;
-  if (stats.audio && a && a.codec !== 'aac')
-    stats.audio.note = a.codec === 'mp2' ? 'MPEG audio (MP2) isn’t decoded in the browser yet.' : `${a.codec.toUpperCase()} audio isn’t decoded in the browser.`;
+  stats.audio = a ? { pid: a.pid, codec: a.codec, lang: a.lang, decoder: null, rate: 0, channels: 0, bitrate: 0, frames: 0, errors: 0, note: null } : null;
+  if (stats.audio && a && !DECODED_AUDIO.has(a.codec)) stats.audio.note = `${a.codec.toUpperCase()} audio isn’t decoded in the browser.`;
   post({ type: 'flush' });
   if (!v) return;
   if (v.codec === 'h264' || v.codec === 'hevc') video = webCodecsPath(v.codec);
@@ -443,6 +505,7 @@ scope.onmessage = (e: MessageEvent<ToWorker>) => {
         stats.gaps++;
         demux.discontinuity();
         video?.gap();
+        mp2?.reset();
       }
       const data = new Uint8Array(m.data);
       bytes += data.length;

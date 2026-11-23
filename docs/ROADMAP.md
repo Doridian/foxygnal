@@ -237,8 +237,10 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
       browser demuxes and decodes it: H.264 and HEVC with WebCodecs, MPEG-1/2 with
       foxygnal's own decoder in WebAssembly (`foxygnal-mpeg2`), AAC sound. Template "Video
       from a TS file"
-- [ ] MP2 (MPEG-1 Layer II) sound in the browser, the sound of most DVB services: a small
-      decoder next to the MPEG-2 one. AC-3 / E-AC-3 and AAC-LATM after that
+- [x] MP2 (MPEG-1 Layer II) sound in the browser, the sound of most DVB services:
+      `foxygnal-mp2`, a small Layer I/II decoder in WebAssembly next to the MPEG-2 one
+      (every MPEG-1/2/2.5 rate and mode, CRC checked, compared with ffmpeg in its tests)
+- [ ] AC-3 / E-AC-3 and AAC-LATM sound; a choice of sound track when a program has several
 - [ ] Analog TV pictures: a frame-level probe that drops whole frames when behind (see open
       questions)
 - [ ] DVB-T: OFDM 2k/8k, channel estimation from pilots, QPSK/16/64-QAM, inner
@@ -276,7 +278,8 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
 - ~~**Video in the browser.**~~ Decided (M14): the engine forwards the transport stream and
   the browser decodes. WebCodecs decodes H.264 and HEVC; MPEG-2, which it can't, is decoded
   by `foxygnal-mpeg2`, a small decoder of our own compiled to WebAssembly (committed as a
-  prebuilt module, so the UI build needs no Rust). MP2 sound still needs the same treatment.
+  prebuilt module, so the UI build needs no Rust). MP2 sound got the same treatment
+  (`foxygnal-mp2`).
 - **Picture frames vs rows.** M9 sends pictures as row records on `u8` wires, which fits
   pictures that take seconds to minutes. Analog TV needs 25–30 frames a second of up to
   720×576: whether rows on `u8` still fit (about 10 MB/s at full PAL resolution), or video
