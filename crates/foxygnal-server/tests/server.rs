@@ -623,3 +623,54 @@ to = "null.in"
         assert_eq!(*l, cycle[(first + i) % 3], "line {i}");
     }
 }
+
+#[tokio::test]
+async fn passes_of_a_tracker_block() {
+    let cfg = config(None);
+    let s = session();
+    let mut g = graph(include_str!("../../../examples/sat-doppler.fox.toml"));
+    // Start the search at the elements' epoch so the result doesn't age.
+    let tr = g.blocks.iter_mut().find(|b| b.id == "tracker").unwrap();
+    tr.params
+        .insert("time".into(), serde_json::json!("2026-11-23T12:00:00Z"));
+    tr.params
+        .insert("min_elevation".into(), serde_json::json!(0.0));
+    s.set_graph(1, g, None);
+    let req = |uri: &str| get(uri, "127.0.0.1:7355").body(Body::empty()).unwrap();
+    let resp = router(&cfg, s.clone())
+        .oneshot(req("/api/passes?block=tracker&hours=24"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["live"], false);
+    assert_eq!(v["tracked"], 57166);
+    assert_eq!(v["satellites"].as_array().unwrap().len(), 2);
+    let passes = v["passes"].as_array().unwrap();
+    // Two sun-synchronous satellites at 52.5° N, horizon 0°: 7–11 passes each a day.
+    assert!((14..=22).contains(&passes.len()), "{v}");
+    let aos: Vec<f64> = passes.iter().map(|p| p["aos"].as_f64().unwrap()).collect();
+    assert!(aos.windows(2).all(|w| w[0] <= w[1]), "sorted by AOS");
+    for p in passes {
+        let (a, t, l) = (
+            p["aos"].as_f64().unwrap(),
+            p["tca"].as_f64().unwrap(),
+            p["los"].as_f64().unwrap(),
+        );
+        assert!(a < t && t < l && l - a < 20.0 * 60.0, "{p}");
+    }
+
+    let resp = router(&cfg, s.clone())
+        .oneshot(req("/api/passes?block=channel"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = router(&cfg, s)
+        .oneshot(req("/api/passes?block=nope"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

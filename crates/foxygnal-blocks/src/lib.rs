@@ -20,6 +20,7 @@ pub mod net;
 mod params;
 pub mod resample;
 pub mod ring;
+pub mod sat;
 pub mod sdr;
 pub mod sigmf;
 pub mod sources;
@@ -58,4 +59,5 @@ pub fn register_all(r: &mut Registry) {
     broadcast::register(r);
     image::register(r);
     dvb::register(r);
+    sat::register(r);
 }

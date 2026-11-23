@@ -324,8 +324,11 @@ arrive; with a rotator or a steady hand, the polar orbiters too.
       colour, plus the instrument packets that come for free (MHS, AMSU, IASI counts)
 - [ ] GOES DCS (DCPR relay, 1679.7–1680.7 MHz): 300 bit/s BPSK and 1200 bit/s 8PSK
       platforms, a channelizer over the whole band, platform address and message as messages
-- [ ] Pass prediction: SGP4 from TLEs (a file, or pasted in), pass times, elevation and
+- [x] Pass prediction: SGP4 from TLEs (a file, or pasted in), pass times, elevation and
       azimuth, and Doppler as a wired setting for `freq_xlating_fir`; an upcoming-passes view
+      (`sat_tracker`, the palette's Passes section, "Satellite Doppler tracking" template;
+      SGP4/SDP4 checked against Vallado's verification set, passes and look angles against
+      Skyfield)
 - [ ] Later: GOES GRB (DVB-S2, 1686.6 MHz, needs a bigger dish and M14's DVB-S2), FengYun-3
       AHRPT
 

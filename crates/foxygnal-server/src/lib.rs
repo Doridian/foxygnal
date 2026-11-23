@@ -4,6 +4,7 @@
 mod api;
 pub mod graphs;
 pub mod mcp;
+mod passes;
 pub mod probe;
 pub mod record;
 mod security;
@@ -82,6 +83,7 @@ pub fn router(cfg: &Config, session: Arc<Session>) -> Router {
         .route("/import", post(api::import_upload))
         .route("/import/{name}", get(api::import_file))
         .route("/export", post(api::export_grc))
+        .route("/passes", get(passes::passes))
         .route("/recordings", get(record::list))
         .route(
             "/recordings/{name}",

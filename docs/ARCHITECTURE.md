@@ -611,6 +611,67 @@ line buffer) are allocated once, so nothing allocates per sample or per packet. 
 frequency offset and ±10 % timing jitter at 250 kS/s and 1 MS/s (ERT at 1 and 2.4 MS/s);
 setting `ISM_DUMP=dir` writes their signals as `.cf32` files, which rtl_433 decodes too.
 
+## Satellites: SGP4, passes and Doppler (M15)
+
+`blocks/src/sat/` predicts where a satellite is and turns that into control streams, with no
+network access: element sets come from a file or pasted text.
+
+- **Element sets** (`sat::tle`). Two- and three-line sets, `#` comments and blank lines
+  skipped, both checksums checked, Alpha-5 catalog numbers. Text pasted into a one-line
+  field arrives with its line breaks turned into spaces (Firefox) or dropped (Chrome); such
+  text is searched for a 69-character `1 NNNNN` line with a good checksum followed by the
+  `2 NNNNN` line of the same satellite. Sets that don't parse are skipped and reported.
+- **SGP4/SDP4** (`sat::sgp4`). A port of Vallado's 2020 `sgp4unit.cpp` (AIAA 2006-6753):
+  WGS-72 constants, "improved" mode, deep-space lunar-solar terms and the 12 h / 24 h
+  resonance integrator, which restarts from epoch on every call so `propagate` takes `&self`
+  and doesn't depend on earlier calls. The epoch is computed as Vallado's `twoline2rv` does
+  it (via month, day, hour, minute, second), split into date and fraction to keep precision.
+  Checked against the whole verification set (`tests/sgp4_vallado.rs`, `SGP4-VER.TLE` and
+  `tcppver.out` vendored unmodified): 666 states of 32 element sets within 0.1 mm and
+  3 µm/s, except the two most eccentric orbits (e = 0.97 and 0.79 after 3.5 years), within
+  4 mm. One set (33334, mean motion 0.00001 rev/day) fails to initialise, as in the
+  reference, whose output for it is a stale line; the sets that decay or go hyperbolic
+  report an error where the reference output stops.
+- **Look angles** (`sat::observer`). TEME → Earth-fixed by the Greenwich mean sidereal time
+  (IAU 1982) alone, the velocity corrected for Earth's rotation; UTC stands in for UT1
+  (< 0.9 s) and polar motion is ignored. The observer is on the WGS-84 ellipsoid; azimuth
+  and elevation from the local east-north-up frame, range rate from the relative velocity,
+  Doppler = −f·ṙ/c. Against Skyfield (full IAU 2000 Earth orientation) for four polar
+  orbiters over a day, every 7 minutes: 0.001° in elevation and azimuth, 24 m in range,
+  0.08 m/s in range rate (0.5 Hz at 1.7 GHz) (`tests/sat_passes.rs`).
+- **Passes** (`sat::passes`). The elevation is sampled every 20 s; each crossing of the
+  minimum elevation is bisected to 0.1 s and the culmination found by golden-section search
+  around the highest sample. A pass in progress at the start is traced back up to an hour for
+  its real AOS (else marked clipped); one still going at the end is clipped there. Against
+  Skyfield's rise/set search: the same 37 passes in 24 h, AOS and LOS within 0.14 s,
+  culmination within 0.02°. A pass that peaks less than a 20 s step above the minimum
+  elevation can be missed (a pass 0.5° high is found).
+- **`sat_tracker`** is a source with three f32 outputs (`offset`, `az`, `el`) and a text
+  output (`track`). It keeps its own clock (`Instant` at `start`, mapped to the system time
+  or to the `time` setting) and writes value *n* for time *t₀ + n/rate*; `work` writes
+  every value that is due (up to the room on all three outputs, at most 1024), then returns
+  `Wait` until the next one, or `Blocked` when a consumer is full. After a stall of more
+  than 2 s it skips ahead instead of catching up. The f32 outputs' stream metadata says
+  `rate` (default 20/s, so the control edge into `freq_xlating_fir.@offset` shows `20 S/s`),
+  the text output has none. `offset` is the `offset` setting plus the Doppler shift:
+  `freq_xlating_fir` moves +offset to 0 Hz, and the carrier is received at its nominal
+  offset plus the Doppler, so the wire's value is exactly what the filter needs. A failed
+  propagation (a decayed orbit) writes NaN, which control inputs ignore (the last value
+  holds). One `track` line a second goes through a `MsgQueue`; if it can't go out by the next
+  second, that line is skipped rather than holding up the control values. Propagating and
+  formatting allocate nothing; the TLE file is read in `start`, pasted text parsed when the
+  block is built (so a bad satellite name is a build error the editor shows).
+- **Passes API.** `GET /api/passes?block=<id>&hours=24` resolves the current graph (variables,
+  relative paths), reads that `sat_tracker`'s element sets and position, and predicts every
+  satellite in them (at most 150) on a blocking thread: `{start, end, live, lat, lon, alt,
+  min_elevation, tracked, satellites [{name, norad, epoch, age_days, error?}], passes [{name,
+  norad, aos, tca, los, max_el, aos_az, tca_az, los_az, aos_clipped, los_clipped}],
+  errors}`, passes sorted by AOS, times in Unix seconds. The search starts now, or at the
+  tracker's `time`. The palette's *Passes* section (`ui/src/lib/PassesPanel.svelte`) appears
+  when the graph has a tracker, refreshes when its settings change and every ten minutes,
+  counts down to each pass, warns about element sets older than two weeks, and *Track* sets
+  the tracker's `satellite`.
+
 ## Digital video (M14)
 
 Digital TV (DVB-T, DVB-S, ISDB-T) delivers an **MPEG transport stream** (ISO/IEC 13818-1),
@@ -1278,6 +1339,8 @@ REST:
 - `GET/PUT /api/graph`: current graph as `GraphSpec` JSON; `GET /api/graph.toml`
 - `POST /api/toml/parse`, `POST /api/toml/render`: convert for upload/download
 - `GET /api/examples`, `GET /api/examples/{name}`: bundled example graphs
+- `GET /api/passes?block=<id>&hours=<h>`: upcoming passes for a `sat_tracker` block of the
+  current graph (see "Satellites")
 - `GET /api/recordings`: SigMF recordings in `recordings/` under `--project-dir`, newest first:
   `[{name, path, modified, datatype, sample_rate, frequency, samples, bytes, captures,
   annotations, datetime, hw, description, recording, error?}]`. `GET /api/recordings/{name}`

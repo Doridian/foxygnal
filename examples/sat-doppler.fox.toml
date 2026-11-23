@@ -1,0 +1,88 @@
+# Doppler tracking for a polar orbiter: Meteor-M N2-3 / N2-4 LRPT at 137.9 MHz.
+#
+# A satellite in low orbit comes towards you at up to 7 km/s and then goes
+# away again: its carrier arrives up to ±3.3 kHz off at 137.9 MHz (±40 kHz at
+# 1.7 GHz), sweeping through zero at the highest point of the pass. The
+# tracker works out where the satellite is from its two-line elements (SGP4),
+# as seen from your position, and outputs, 20 times a second, where its
+# carrier sits relative to the SDR's centre: the `offset` setting (here
+# 137.9 MHz − 137.65 MHz = 250 kHz) plus the Doppler shift. That is wired
+# into the channel filter's Offset setting (`channel.@offset`), so the
+# channel stays centred for the whole pass without retuning the SDR.
+#
+#   SDR 137.65 MHz, 1.024 MS/s ──▶ xlate ÷4 (offset ⇠ tracker) ──▶ out
+#   tracker ──offset──┘   ──track──▶ log  (Map instrument: ground track)
+#
+# Set `lat`, `lon` and `alt` to your position. The palette's Passes section
+# lists when the satellites in the tracker's elements come over next.
+#
+# Element sets age: after a few weeks the predicted times are off by minutes.
+# Paste fresh ones (CelesTrak's "Weather" group,
+# https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle) into
+# the tracker's TLE text, or save that file in the project folder and set
+# `tle_file`. Nothing is downloaded by foxygnal itself.
+#
+# The LRPT demodulator is still to come (M15); until then, watch the channel's
+# spectrum or constellation, or record it.
+
+[vars]
+lat = 52.52
+lon = 13.405
+alt = 34
+downlink = "137.9M"
+center = "137.65M"
+samp_rate = "1.024M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$center", sample_rate = "$samp_rate", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "tracker"
+kind = "sat_tracker"
+params = { satellite = "METEOR-M2 3", lat = "$lat", lon = "$lon", alt = "$alt", frequency = "$downlink", offset = "$downlink - $center", min_elevation = 10.0, rate = 20.0, tle_file = "", time = "", tle = """
+METEOR-M2 3
+1 57166U 23091A   26327.52301369 -.00000007  00000+0  15745-4 0  9992
+2 57166  98.5884  19.0681 0004988  73.2184 286.9542 14.24057105177198
+METEOR-M2 4
+1 59051U 24039A   26327.50722175 -.00000013  00000+0  13685-4 0  9998
+2 59051  98.7256 284.9730 0008115  71.3466 288.8592 14.22444296141910
+""" }
+ui = { x = 50, y = 320 }
+
+[[block]]
+id = "channel"
+kind = "freq_xlating_fir"
+# `offset` is only the starting value: the tracker's wire sets it.
+params = { offset = "$downlink - $center", cutoff = 70000.0, transition = 30000.0, decimation = 4, window = "hamming" }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "out"
+kind = "null_sink"
+params = { type = "c32" }
+ui = { x = 700, y = 120 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = false }
+ui = { x = 380, y = 400 }
+
+[[connect]]
+from = "sdr.out"
+to = "channel.in"
+
+[[connect]]
+from = "tracker.offset"
+to = "channel.@offset"
+
+[[connect]]
+from = "channel.out"
+to = "out.in"
+
+[[connect]]
+from = "tracker.track"
+to = "log.in"

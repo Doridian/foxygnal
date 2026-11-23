@@ -18,7 +18,7 @@ use crate::AppState;
 /// Client id used for edits that arrive over REST rather than a WebSocket.
 const REST_CLIENT: u64 = 0;
 
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -271,6 +271,12 @@ pub(crate) const EXAMPLES: &[Example] = &[
         title: "ERT meters and 915 MHz sensors",
         description: "An SDR at 912.6 MHz, 2.4 MS/s → ISM decoder: ERT utility meters (SCM, SCM+, IDM) and 915 MHz weather sensors. Needs a real receiver.",
         toml: include_str!("../../../examples/ism-915.fox.toml"),
+    },
+    Example {
+        name: "sat-doppler",
+        title: "Satellite Doppler tracking",
+        description: "An SDR at 137.65 MHz → a channel filter that follows Meteor-M N2-3's LRPT carrier through the Doppler shift of a pass, steered by a satellite tracker (SGP4 from pasted TLEs). The palette's Passes section shows when it comes over; the tracker's track wire draws the ground track on the Map. Set `lat`/`lon` to your position and paste fresh TLEs.",
+        toml: include_str!("../../../examples/sat-doppler.fox.toml"),
     },
     Example {
         name: "aprs",

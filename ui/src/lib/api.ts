@@ -320,6 +320,41 @@ export interface SigmfMeta {
 }
 export const getRecording = (name: string) => call<SigmfMeta>('GET', `/api/recordings/${encodeURIComponent(name)}`);
 export const deleteRecording = (name: string) => call<string>('DELETE', `/api/recordings/${encodeURIComponent(name)}`);
+
+/** One pass of a satellite over a `sat_tracker`'s position (Unix seconds, degrees). */
+export interface PassInfo {
+  name: string;
+  norad: number;
+  aos: number;
+  tca: number;
+  los: number;
+  max_el: number;
+  aos_az: number;
+  tca_az: number;
+  los_az: number;
+  /** Already up when the search started (and for an hour before). */
+  aos_clipped: boolean;
+  /** Still up when the search ended. */
+  los_clipped: boolean;
+}
+/** Upcoming passes for a `sat_tracker` block (`GET /api/passes`). */
+export interface Passes {
+  block: string;
+  start: number;
+  end: number;
+  /** `start` is the system clock (else the tracker's start time). */
+  live: boolean;
+  lat: number;
+  lon: number;
+  alt: number;
+  min_elevation: number;
+  tracked: number | null;
+  satellites: { name: string; norad: number; epoch: number; age_days: number; error?: string }[];
+  passes: PassInfo[];
+  errors: string[];
+}
+export const fetchPasses = (block: string, hours = 24) =>
+  call<Passes>('GET', `/api/passes?block=${encodeURIComponent(block)}&hours=${hours}`);
 /** The frequency response a block would have with `params` at input rate `sample_rate`. */
 export const fetchResponse = (kind: string, params: Record<string, unknown>, sample_rate: number) =>
   call<FrequencyResponse>('POST', `/api/blocks/${encodeURIComponent(kind)}/response`, json({ params, sample_rate }), 'application/json');

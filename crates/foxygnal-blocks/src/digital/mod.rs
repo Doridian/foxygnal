@@ -26,7 +26,7 @@ mod modem;
 mod packet;
 pub mod pocsag;
 mod sync;
-mod text;
+pub(crate) mod text;
 mod uat;
 
 use std::time::Duration;

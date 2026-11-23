@@ -534,6 +534,21 @@ impl Session {
         self.lock().graph.clone()
     }
 
+    /// The parameters of block `id` of the current graph as it would be
+    /// built: variables and expressions evaluated, relative paths made
+    /// absolute. Also its kind.
+    pub fn resolved_params(&self, id: &str) -> Result<(String, foxygnal_core::Params), String> {
+        let graph = self.graph();
+        let r = foxygnal_core::resolve(&graph, &self.registry, &self.graphs)
+            .map_err(|e| e.to_string())?;
+        let g = self.resolve_paths(&r.graph);
+        g.blocks
+            .into_iter()
+            .find(|b| b.id == id)
+            .map(|b| (b.kind, b.params))
+            .ok_or_else(|| format!("no block `{id}` in the graph"))
+    }
+
     /// The run status right now.
     pub fn status_now(&self) -> Status {
         Self::status(&self.lock())

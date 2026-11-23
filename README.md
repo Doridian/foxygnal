@@ -51,6 +51,12 @@ sensors at 433 MHz" (`examples/ism-433.fox.toml`: weather stations, thermometers
 pressure sensors, door sensors and doorbells) and "ERT meters and 915 MHz sensors"
 (`examples/ism-915.fox.toml`).
 
+**Satellites.** The Satellite Tracker follows a satellite from its two-line elements (SGP4,
+from a file or pasted in; nothing is downloaded) and steers a channel filter through the
+Doppler shift of a pass: "Satellite Doppler tracking" (`examples/sat-doppler.fox.toml`,
+Meteor-M at 137.9 MHz). The palette's Passes section lists when the satellites come over,
+and the tracker's ground track shows on the Map.
+
 **Maps.** The Map instrument plots the positions any decoder reports (`lat=… lon=…`):
 ADS-B aircraft, AIS ships, APRS stations and objects, each with a trail, a heading arrow and
 a label, merged with the identity and static data that come without a position (a flight

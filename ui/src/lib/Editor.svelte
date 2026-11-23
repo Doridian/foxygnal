@@ -685,7 +685,7 @@
   <div class="top">
     <TopBar {dirty} blocks={nodes.length} onrun={run} onstop={() => session.stop()} {actions} />
   </div>
-  <Palette catalog={descriptors} {loadError} onadd={(d) => addBlock(d)} ondevice={addDevice} onrecording={addRecording} bind:search bind:input={searchInput} />
+  <Palette catalog={descriptors} {loadError} onadd={(d) => addBlock(d)} ondevice={addDevice} onrecording={addRecording} ontrack={(id, sat) => setParam(id, 'satellite', sat)} bind:search bind:input={searchInput} />
   <main class="canvas" bind:this={canvas} {ondragover} {ondrop} {ondblclick}>
     <SvelteFlow
       bind:nodes

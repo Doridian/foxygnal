@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { BlockDescriptor, DeviceInfo, RecordingInfo } from './api';
   import { devices } from './devices.svelte';
+  import PassesPanel from './PassesPanel.svelte';
   import RecordingsPanel from './RecordingsPanel.svelte';
 
   let {
@@ -9,6 +10,7 @@
     onadd,
     ondevice,
     onrecording,
+    ontrack,
     search = $bindable(''),
     input = $bindable(),
   }: {
@@ -19,6 +21,8 @@
     ondevice: (d: DeviceInfo) => void;
     /** Add a SigMF Source playing a recording, from sample `start`. */
     onrecording: (r: RecordingInfo, start?: number) => void;
+    /** Point Satellite Tracker `block` at `satellite` (from the Passes list). */
+    ontrack: (block: string, satellite: string) => void;
     search?: string;
     input?: HTMLInputElement;
   } = $props();
@@ -107,6 +111,7 @@
     {/if}
   </section>
   <RecordingsPanel onadd={onrecording} />
+  <PassesPanel {ontrack} />
   {#each categories as [cat, items] (cat)}
     <h3>{cat}</h3>
     {#each items as d (d.kind)}
