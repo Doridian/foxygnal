@@ -60,6 +60,11 @@ impl BitClock {
         }
     }
 
+    /// Change the loop gain (e.g. faster while acquiring, slower once locked).
+    pub fn set_gain(&mut self, gain: f64) {
+        self.gain = gain;
+    }
+
     #[inline]
     pub fn sample(&mut self, x: f32) -> Option<f32> {
         let prev = self.prev;

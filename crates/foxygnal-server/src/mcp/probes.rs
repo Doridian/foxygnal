@@ -10,7 +10,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use foxygnal_core::Complex32;
 use foxygnal_core::raster::{self, Next};
+use foxygnal_dsp::{PowerSpectrum, Window};
 use tokio::sync::mpsc;
 
 use crate::probe::{CLIENT_QUEUE, Outgoing};
@@ -66,6 +68,55 @@ impl Picture {
     }
 }
 
+/// Points kept for a constellation summary.
+const MAX_POINTS: usize = 1 << 16;
+/// FFT size for the symbol-rate line in |x|².
+pub const CYCLO_FFT: usize = 1024;
+
+/// I/Q points, and the spectrum of |x|² (whose strongest line, for a
+/// linearly modulated signal with more than one sample per symbol, sits at
+/// the symbol rate).
+#[derive(Default)]
+pub struct Constellation {
+    pub points: VecDeque<Complex32>,
+    /// Summed power spectrum of |x|² − mean, in FFT order.
+    pub cyclo: Vec<f64>,
+    pub cyclo_frames: u32,
+    ps: Option<PowerSpectrum>,
+}
+
+impl Constellation {
+    fn take(&mut self, pts: &[Complex32]) {
+        // Every whole chunk of the frame (frames needn't follow on from
+        // each other, so chunks don't straddle them).
+        for seg in pts.as_chunks::<CYCLO_FFT>().0 {
+            let mean = seg.iter().map(|z| z.norm_sqr()).sum::<f32>() / CYCLO_FFT as f32;
+            let env: Vec<Complex32> = seg
+                .iter()
+                .map(|z| Complex32::new(z.norm_sqr() - mean, 0.0))
+                .collect();
+            let ps = self
+                .ps
+                .get_or_insert_with(|| PowerSpectrum::new(CYCLO_FFT, Window::BlackmanHarris));
+            let mut out = vec![0.0; CYCLO_FFT];
+            ps.compute(&env, &mut out);
+            if self.cyclo.len() != CYCLO_FFT {
+                self.cyclo = vec![0.0; CYCLO_FFT];
+            }
+            for (a, b) in self.cyclo.iter_mut().zip(&out) {
+                *a += f64::from(*b);
+            }
+            self.cyclo_frames += 1;
+        }
+        for &z in pts {
+            if self.points.len() == MAX_POINTS {
+                self.points.pop_front();
+            }
+            self.points.push_back(z);
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Collected {
     /// Why the probe can't run (not running, wrong wire type, …).
@@ -73,6 +124,7 @@ pub struct Collected {
     pub frames: u32,
     pub spectrum: Spectrum,
     pub level: Level,
+    pub constellation: Constellation,
     pub lines: VecDeque<String>,
     /// Lines (or rows) were lost somewhere along the way.
     pub gap: bool,
@@ -107,6 +159,14 @@ impl Collected {
                     s.max[i] = s.max[i].max(db);
                 }
                 s.frames += 1;
+            }
+            // Constellation: count, then I, Q pairs.
+            3 if b.len() >= 4 => {
+                let n = (u32_at(0) as usize).min((b.len() - 4) / 8);
+                let pts: Vec<Complex32> = (0..n)
+                    .map(|i| Complex32::new(f32_at(4 + 8 * i), f32_at(8 + 8 * i)))
+                    .collect();
+                self.constellation.take(&pts);
             }
             // Meter: count, flags, rms, peak, mean re, mean im.
             4 if b.len() >= 24 => {

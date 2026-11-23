@@ -17,6 +17,7 @@
 mod adsb;
 mod afsk;
 pub mod ax25;
+mod flex;
 pub mod hdlc;
 mod modem;
 mod packet;
@@ -36,6 +37,7 @@ pub fn register(r: &mut Registry) {
     packet::register(r);
     adsb::register(r);
     pocsag::register(r);
+    flex::register(r);
     afsk::register(r);
     hdlc::register(r);
 }

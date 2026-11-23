@@ -395,8 +395,8 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
 
 ## Decoded messages (M6)
 
-Decoders (`adsb_decoder`, `rds_decoder`, `pocsag_decoder`, `hdlc_deframer`, `packet_decoder`
-in hex mode, …) need a way to show a
+Decoders (`adsb_decoder`, `rds_decoder`, `pocsag_decoder`, `flex_decoder`, `hdlc_deframer`,
+`packet_decoder` in hex mode, …) need a way to show a
 person what they found, without per-block UI code. The convention: **a decoded message is one line of
 UTF-8 text, `\n`-terminated, on a `u8` output.** Lines are `key=value` fields where that
 makes sense (`t=1.234567 icao=4840D6 df=17 tc=4 type=ident callsign=KLM1023 raw=…`), so
@@ -894,7 +894,11 @@ ordinary edits that a person sees and can undo.
   - **Graphs:** `get_graph`, `set_graph`, `check_graph`, and `edit_graph`, which applies
     operations all or nothing: add or remove blocks, set settings (unknown names are refused,
     listing the real ones), connect and disconnect (a port may be left out if the block has
-    only one), constant inputs, variables. Every graph tool answers with a **check report**:
+    only one), constant inputs, variables.
+    - When a `connect` joins different stream types (worked out by resolving the graph and
+      building the two blocks), the converter block is inserted between them if exactly one
+      fits. The reply's `notes` name it and its settings (`c32_to_f32` has `part`), or list
+      the choices. `convert: false` leaves the mismatch for the report to name. Every graph tool answers with a **check report**:
     - whether the graph builds, or the first error, pinned like in the editor
     - the sample rate and centre frequency on every wire
     - unconnected inputs (they only fail at `run` otherwise)
@@ -925,6 +929,15 @@ ordinary edits that a person sees and can undo.
   - Each signal reports its strongest point (a parabola through three bins), its
     power-weighted centre, its bandwidth and its level.
   - A 48-slice outline gives the overall shape.
+  - **Constellation** (the `constellation` probe, 8192 points per frame, the last 64k kept):
+    - RMS, the envelope spread (σ/mean of |x|) and DC.
+    - The M-th power test |E[(x/|x|)^M]| for M = 2, 4, 8. With a nearly constant envelope
+      (spread < 0.25), the smallest M above 0.6 gives the PSK order. EVM and MER are then
+      measured against the ideal points at the derotation angle.
+    - The symbol rate is the strongest line in the averaged spectrum of |x|² − mean
+      (1024-point chunks, parabola-interpolated), if it stands 12 dB above the median.
+      That's present for pulse-shaped linear modulation sampled at more than one sample per
+      symbol, so it is measured *before* clock recovery and PSK order *after* it.
 - **The editor.** A graph changed over MCP is sent to tabs with `by: "assistant"`. The editor
   puts the previous graph on its undo stack and shows a toast with an Undo button, once per
   burst of edits.
