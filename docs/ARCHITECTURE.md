@@ -399,7 +399,8 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
 
 ## Decoded messages (M6)
 
-Decoders (`adsb_decoder`, `rds_decoder`, `pocsag_decoder`, `flex_decoder`, `hdlc_deframer`,
+Decoders (`adsb_decoder`, `rds_decoder`, `pocsag_decoder`, `flex_decoder`, `ais_decoder`,
+`acars_decoder`, `hdlc_deframer`,
 `packet_decoder` in hex mode, …) need a way to show a
 person what they found, without per-block UI code. The convention: **a decoded message is one line of
 UTF-8 text, `\n`-terminated, on a `u8` output.** Lines are `key=value` fields where that
@@ -415,7 +416,9 @@ generic:
   back-pressures the decoder), sends only whole lines, and starts with whatever history the
   ring still holds, so opening it late still shows recent messages.
 - `message_log` (Sinks) is the natural end of a decoder's output; with `stdout = true` it
-  prints whole lines on the engine's standard output, for `foxygnal run`.
+  prints whole lines on the engine's standard output, for `foxygnal run`. It takes up to four
+  inputs (`inputs = 2`: ports `in`, `in1`), so decoders of several channels (the two AIS
+  channels) share one log; lines from different inputs never mix.
 - `file_sink` on the same wire writes a log file.
 
 Why not tags or a new port kind: taps (and so probes) don't see tags, and the planned

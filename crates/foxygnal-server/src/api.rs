@@ -261,6 +261,18 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/aprs.fox.toml"),
     },
     Example {
+        name: "ais",
+        title: "AIS ship decoder",
+        description: "An SDR at 162.0 MHz → both AIS channels (161.975 and 162.025 MHz) at once: two channel filters → FM demod → AIS decoder → one log. Ship positions, names, destinations; NMEA output for chart plotters. Needs a real receiver.",
+        toml: include_str!("../../../examples/ais.fox.toml"),
+    },
+    Example {
+        name: "acars",
+        title: "ACARS aircraft datalink",
+        description: "An SDR on an ACARS channel (131.550 MHz; 129.125, 130.025, 130.450, 131.125 MHz in North America, 131.525/131.725 MHz in Europe) → AM demod → ACARS decoder: registrations, flight numbers, labels and message text. Needs a real receiver.",
+        toml: include_str!("../../../examples/acars.fox.toml"),
+    },
+    Example {
         name: "sstv",
         title: "SSTV pictures",
         description: "An SDR at 145.8 MHz (the ISS during ARISS events) → FM demod → SSTV decoder (Robot, Martin, Scottie, PD) → the Image instrument and PNG files. Needs a real receiver.",

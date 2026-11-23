@@ -14,8 +14,10 @@
 //! Formatting may allocate only when a message is actually decoded; the
 //! queue below is preallocated, so in practice it doesn't.
 
+pub mod acars;
 mod adsb;
 mod afsk;
+pub mod ais;
 pub mod ax25;
 mod flex;
 pub mod hdlc;
@@ -36,6 +38,8 @@ pub fn register(r: &mut Registry) {
     modem::register(r);
     packet::register(r);
     adsb::register(r);
+    acars::register(r);
+    ais::register(r);
     pocsag::register(r);
     flex::register(r);
     afsk::register(r);

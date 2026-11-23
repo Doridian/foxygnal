@@ -68,6 +68,15 @@ impl BitClock {
     #[inline]
     pub fn sample(&mut self, x: f32) -> Option<f32> {
         let prev = self.prev;
+        self.instant(x).map(|g| prev + g * (x - prev))
+    }
+
+    /// Like [`Self::sample`], but returns where the decision instant falls
+    /// between the previous sample (0) and this one (1), so that the caller
+    /// can interpolate other signals at the same instant.
+    #[inline]
+    pub fn instant(&mut self, x: f32) -> Option<f32> {
+        let prev = self.prev;
         self.prev = x;
         if (x >= 0.0) != (prev >= 0.0) {
             // Where between the two samples the signal crossed zero.
@@ -85,7 +94,7 @@ impl BitClock {
         if next >= 1.0 {
             let g = ((1.0 - self.phase) / self.step).clamp(0.0, 1.0) as f32;
             self.phase = next - 1.0;
-            Some(prev + g * (x - prev))
+            Some(g)
         } else {
             self.phase = next;
             None
