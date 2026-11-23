@@ -12,7 +12,7 @@ repository.workspace = true
 # unreachable there.
 
 [dependencies]
-wit-bindgen = { version = "0.61.1", default-features = false, features = ["macros", "realloc"] }
+wit-bindgen = { version = "0.63.0", default-features = false, features = ["macros", "realloc"] }
 
 [lints]
 workspace = true
