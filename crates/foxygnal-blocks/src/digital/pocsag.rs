@@ -111,7 +111,7 @@ pub fn syndrome(cw31: u32) -> u32 {
 
 /// Error patterns (bits 1–31 of a codeword) by syndrome, for one and two
 /// wrong bits; 0 where there is none.
-fn error_table() -> Box<[u32; 1024]> {
+pub(crate) fn error_table() -> Box<[u32; 1024]> {
     let mut t = Box::new([0u32; 1024]);
     for i in 0..31 {
         t[syndrome(1 << i) as usize] = 1 << (i + 1);
@@ -121,6 +121,31 @@ fn error_table() -> Box<[u32; 1024]> {
         }
     }
     t
+}
+
+/// Repair a codeword (BCH(31,21) in bits 31–1, most significant first, even
+/// parity in bit 0) if it has at most `fix` wrong bits, the parity bit
+/// included. Returns the codeword and how many bits were repaired.
+pub(crate) fn correct(table: &[u32; 1024], fix: u32, w: u32) -> Option<(u32, u32)> {
+    let mut w = w;
+    let mut fixed = 0;
+    let s = syndrome(w >> 1);
+    if s != 0 {
+        let e = table[s as usize];
+        if e == 0 || e.count_ones() > fix {
+            return None;
+        }
+        w ^= e;
+        fixed = e.count_ones();
+    }
+    if !w.count_ones().is_multiple_of(2) {
+        if fixed >= fix {
+            return None;
+        }
+        w ^= 1;
+        fixed += 1;
+    }
+    Some((w, fixed))
 }
 
 /// Hamming distance from `w` to the sync word.
@@ -151,25 +176,7 @@ impl Shared {
     /// Repair `w` if it has at most `fix` wrong bits. Returns the codeword
     /// and how many bits were repaired.
     fn correct(&self, w: u32) -> Option<(u32, u32)> {
-        let mut w = w;
-        let mut fixed = 0;
-        let s = syndrome(w >> 1);
-        if s != 0 {
-            let e = self.table[s as usize];
-            if e == 0 || e.count_ones() > self.fix {
-                return None;
-            }
-            w ^= e;
-            fixed = e.count_ones();
-        }
-        if !w.count_ones().is_multiple_of(2) {
-            if fixed >= self.fix {
-                return None;
-            }
-            w ^= 1;
-            fixed += 1;
-        }
-        Some((w, fixed))
+        correct(&self.table, self.fix, w)
     }
 
     fn emit(&mut self, baud: u32, m: &Message) {
