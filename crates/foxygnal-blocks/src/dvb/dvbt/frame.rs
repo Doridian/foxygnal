@@ -465,7 +465,10 @@ pub fn slice(c: Constellation, r: f32) -> f32 {
 pub const TPS_SYNC: u16 = 0b0011_0101_1110_1110;
 /// BCH(67,53) generator x¹⁴ + x⁹ + x⁸ + x⁶ + x⁵ + x⁴ + x² + x + 1.
 const BCH_POLY: u128 = 0x4377;
-const TPS_LEN_INDICATOR: u64 = 0b010111;
+/// The TPS length indicator s17 … s22 (EN 300 744 §4.6.2.3): 31 bits used,
+/// because the cell id (s40 … s47) is always sent. (010111, 23 bits, is for
+/// transmitters without cell identification.) The receiver ignores it.
+const TPS_LEN_INDICATOR: u64 = 0b011111;
 
 /// What the TPS of one frame says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

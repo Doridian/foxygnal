@@ -737,6 +737,15 @@ decodes about 110 Mbit/s on one core (AVX2), the whole demodulator about 21 MS/s
 input, i.e. 10 MBd at 2 samples per symbol and rate 3/4 (`cargo bench -p foxygnal-blocks
 --bench blocks -- dvbs`), acquisition included.
 
+**Interop.** Checked against GNU Radio 3.10.12's gr-dtv (whose DVB-S example reuses its
+DVB-T outer and inner coders): its transmitter into `dvbs_demodulator`, and `dvbs_modulator`
+into its Viterbi decoder, deinterleaver, RS decoder and descrambler, every code rate,
+byte-exact; nothing had to change. `scripts/dvb-interop.py` reruns this (with GNU Radio);
+`src/dvb/grdtv_vectors.rs` keeps gr-dtv's answers for the scrambler + RS, the interleaver,
+the punctured code at every rate and the QPSK map (`tests/fixtures/gr-dtv`, made by
+`scripts/gr-dtv-vectors.py`), so CI doesn't need it. Not cross-checked: leandvb or other
+DATV tools (not packaged for this machine).
+
 ## DVB-T (M14)
 
 `blocks/src/dvb/dvbt/` is the DVB-T modem (EN 300 744), non-hierarchical: 2k and 8k, QPSK,
@@ -750,7 +759,7 @@ of each of the 4 scattered-pilot phases (1512 / 6048 each), and the symbol inter
 The inner interleaver (bit demultiplexer, six 126-bit interleavers, symbol interleaver) is one
 gather table per constellation and symbol parity: coded bit i of a symbol is bit e of data
 carrier c. The transmitter scatters with it, the receiver gathers with it. The TPS is
-68 bits per frame; BCH(67,53) (x¹⁴ + x⁹ + x⁸ + x⁶ + x⁵ + x⁴ + x² + x + 1, t = 2) is decoded
+68 bits per frame (length indicator 011111: the cell id is always sent); BCH(67,53) (x¹⁴ + x⁹ + x⁸ + x⁶ + x⁵ + x⁴ + x² + x + 1, t = 2) is decoded
 by a syndrome table of all 2278 one- and two-error patterns.
 
 **Modulator** (`dvbt_modulator`): TS packets → outer encoder → convolutional encoder into a
@@ -830,6 +839,22 @@ The tests also run every one of the 120 combinations clean (ignored test `full_m
 offset of 3.4 carriers with the clock 50 ppm fast (8k 64-QAM), −7.6 carriers and −50 ppm
 (2k), an echo at −3 dB 0.3 guard intervals late, and a 7 MHz channel received at 10 MS/s,
 all bit-exact.
+
+**Interop** with GNU Radio 3.10.12's gr-dtv (`scripts/dvb-interop.py`): every constellation
+× code rate in 2k (guards cycling) and one 8k per constellation, cell id 0x1234. gr-dtv's
+transmitter into `dvbt_demodulator` and `dvbt_modulator` into gr-dtv's receiver are
+byte-exact, and the two modulators' spectra agree on every carrier of every symbol. The
+pilot PRBS, scattered pilot phase, TPS bit order and BCH, bit and symbol interleavers, Gray
+mapping and puncturing order all matched as written; the one difference was the TPS length
+indicator (s17–s22), which said 010111 (no cell id) while s40–s47 carry one: EN 300 744
+§4.6.2.3 wants 011111 then, as gr-dtv sends; fixed (the receiver ignores the field). For
+non-hierarchical modes the LP code rate bits are 000 (§4.6.2, code rates), as ours are;
+gr-dtv's examples set them to the HP rate. `src/dvb/grdtv_vectors.rs` and `tests/dvbt.rs`
+(`modulator_matches_gr_dtv`) check gr-dtv's answers without GNU Radio: the inner interleaver output (2k all constellations, 8k
+64-QAM, even and odd symbols), the maps, the pilot and TPS carriers of symbols 0–3 (2k and
+8k), the TPS bits of whole superframes, and the first two 2k symbols in the time domain.
+Not cross-checked: hierarchical modes (neither side decodes them), 5–7 MHz channels (only
+the sample rate differs), and gr-dtv's receiver with offsets or noise.
 
 **Speed** (`cargo bench -p foxygnal-blocks --bench blocks -- dvbt`, Ryzen 9 7940HS, one core):
 8k 64-QAM guard 1/32 at 9.14 MS/s, acquisition included: 15.9 MS/s at rate 2/3, 13.8 MS/s at

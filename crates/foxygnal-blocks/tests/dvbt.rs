@@ -284,6 +284,73 @@ fn noise(n: usize, sigma: f64, seed: u64) -> Vec<Complex32> {
         .collect()
 }
 
+/// The whole transmitter against gr-dtv's (`scripts/gr-dtv-vectors.py`,
+/// `ofdm-2k.bin`): its first two symbols, guard included, for the script's
+/// LCG transport stream, 2k 64-QAM 2/3 1/32, cell id 0x1234. Equal up to one
+/// complex scale (the levels differ).
+#[test]
+fn modulator_matches_gr_dtv() {
+    let path = format!(
+        "{}/tests/fixtures/gr-dtv/ofdm-2k.bin",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let raw = std::fs::read(&path).unwrap();
+    let want: Vec<Complex32> = raw
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| {
+            let re = i16::from_le_bytes([c[0], c[1]]);
+            let im = i16::from_le_bytes([c[2], c[3]]);
+            Complex32::new(f32::from(re), f32::from(im))
+        })
+        .collect();
+    assert_eq!(want.len(), 2 * (2048 + 64));
+
+    // The script's stream: 0x47, then 187 bytes of an LCG per packet.
+    let mut x: u32 = 1;
+    let bytes: Vec<u8> = (0..40 * TS)
+        .map(|i| {
+            if i % TS == 0 {
+                return 0x47;
+            }
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (x >> 16) as u8
+        })
+        .collect();
+    let mut fg = Flowgraph::new();
+    let src = fg.add("src", VectorSource::instance(bytes));
+    let m = fg.add(
+        "mod",
+        block(
+            "dvbt_modulator",
+            json!({ "mode": "2k", "constellation": "64qam", "rate": "2/3",
+                    "guard": "1/32", "bandwidth": "8", "cell_id": 0x1234, "gain": GAIN }),
+        ),
+    );
+    let (sink, out) = VectorSink::<Complex32>::instance();
+    let sink = fg.add("sink", sink);
+    fg.connect(src, 0, m, 0).unwrap();
+    fg.connect(m, 0, sink, 0).unwrap();
+    fg.start().unwrap().wait().unwrap();
+    let got = out.lock().unwrap().clone();
+    let got = &got[..want.len()];
+
+    // Least-squares scale, then the residual against the peak.
+    let (mut num, mut den) = (Complex32::default(), 0f32);
+    for (g, w) in got.iter().zip(&want) {
+        num += w * g.conj();
+        den += g.norm_sqr();
+    }
+    let k = num / den;
+    let worst = got
+        .iter()
+        .zip(&want)
+        .map(|(g, w)| (g * k - w).norm())
+        .fold(0f32, f32::max);
+    assert!(worst < 3.0, "worst error {worst} of a 30000 peak");
+}
+
 #[test]
 fn noise_alone_never_locks_and_a_signal_after_it_does() {
     let fs = elementary_rate(8.0);
