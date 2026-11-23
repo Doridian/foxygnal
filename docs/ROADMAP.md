@@ -242,8 +242,8 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
 - [ ] Analog TV pictures: a frame-level probe that drops whole frames when behind (see open
       questions)
 - [ ] DVB-T: OFDM 2k/8k, channel estimation from pilots, QPSK/16/64-QAM, inner
-      deinterleaving, Viterbi, outer deinterleaving, Reed-Solomon (204,188) → MPEG transport
-      stream. Needs 9.14 MS/s (HackRF, Airspy, Pluto): in SDR mode an RTL-SDR tops out near
+      deinterleaving, then the DVB-S FEC chain (Viterbi, outer deinterleaving, Reed-Solomon
+      (204,188), done) → MPEG transport stream. Needs 9.14 MS/s (HackRF, Airspy, Pluto): in SDR mode an RTL-SDR tops out near
       3.2 MS/s and its DVB-T demodulator isn't reachable through librtlsdr
 - [x] MPEG-TS handling in the browser: PAT/PMT/SDT (channel names), PES extraction,
       continuity and TEI counts, H.264 video via WebCodecs
@@ -251,7 +251,15 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
       `udp_sink` (u8, `payload = 1316`: seven packets) on the TS wire; a template is to come
 - [ ] ISDB-T one-segment (Japan, South America): 430 kHz wide, so within an RTL-SDR's
       reach, with H.264 video
-- [ ] Later: DVB-S/S2 (amateur DATV on QO-100), ATSC 1.0 (8VSB), DVB-T2
+- [x] DVB-S (EN 300 421), the mode of amateur DATV: `dvbs_modulator` and
+      `dvbs_demodulator` (TS in and out on a `u8` wire, whole 188-byte packets), timing,
+      carrier and a 4th-power frequency search, automatic code rate, puncturing phase and
+      phase ambiguity; "DATV loopback" and "DATV receiver" templates
+- [x] The DVB FEC chain, shared with DVB-T (`blocks/src/dvb/`): energy dispersal,
+      RS(204,188), Forney interleaver, K = 7 convolutional code with puncturing, soft
+      Viterbi, packet sync
+- [ ] DVB-S2 (most of QO-100 now): LDPC + BCH, π/2-BPSK to 32APSK, PL headers
+- [ ] Later: ATSC 1.0 (8VSB), DVB-T2
 
 ## Open questions
 

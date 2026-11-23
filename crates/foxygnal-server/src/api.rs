@@ -279,6 +279,18 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/ts-video.fox.toml"),
     },
     Example {
+        name: "datv-loopback",
+        title: "DATV loopback (DVB-S)",
+        description: "A transport stream file → DVB-S modulator → noise and a 2 kHz offset → DVB-S demodulator → the Video instrument (click `demod.ts`, choose Video). No hardware needed; make the TS file with ffmpeg as described at the top of the file.",
+        toml: include_str!("../../../examples/datv-loopback.fox.toml"),
+    },
+    Example {
+        name: "datv-rx",
+        title: "DATV receiver (DVB-S)",
+        description: "An SDR on a DVB-S amateur TV signal (23 cm, or QO-100 through an LNB) → DVB-S demodulator → TS over UDP for ffplay or VLC. Set the frequency and symbol rate. Needs a real receiver.",
+        toml: include_str!("../../../examples/datv-rx.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",

@@ -50,7 +50,14 @@ header, with slant correction) draws pictures in the Image instrument as they ar
 saves each one as a PNG with an Image Sink. Templates: "SSTV pictures" (the ISS on 145.8 MHz,
 `examples/sstv.fox.toml`) and "SSTV from a recording" (a WAV file, `examples/sstv-wav.fox.toml`).
 
-**Digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
+**Digital TV (DATV).** A DVB-S modulator and demodulator (EN 300 421, the mode of amateur
+digital TV on 23 cm and QO-100) turn an MPEG transport stream into QPSK and back: Viterbi,
+Reed-Solomon and the rest of the DVB FEC chain, with the code rate, carrier and phase found
+automatically, at several MBd on one core. Templates: "DATV loopback (DVB-S)" (a TS file
+through a noisy channel, no hardware, `examples/datv-loopback.fox.toml`) and "DATV receiver
+(DVB-S)" (an SDR to a TS over UDP for ffplay or VLC, `examples/datv-rx.fox.toml`).
+
+**Watching digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
 demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
 you pick with its AAC sound, and shows codecs, resolution, frame rate, bit rates and errors.
 H.264 and HEVC are decoded by the browser (WebCodecs); MPEG-2, which most DVB services still

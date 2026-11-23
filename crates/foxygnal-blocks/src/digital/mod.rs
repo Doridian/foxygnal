@@ -65,6 +65,11 @@ impl MsgQueue {
         self.sent == self.buf.len()
     }
 
+    /// Bytes queued and not sent yet.
+    pub fn pending(&self) -> usize {
+        self.buf.len() - self.sent
+    }
+
     /// Queue text (no newline: end the message with [`Self::line`]).
     pub fn text(&mut self, args: std::fmt::Arguments<'_>) {
         use std::io::Write;

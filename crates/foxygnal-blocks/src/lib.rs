@@ -7,6 +7,7 @@ pub mod convert;
 pub mod demod;
 mod design;
 pub mod digital;
+pub mod dvb;
 pub mod file;
 pub mod filters;
 pub mod flow;
@@ -56,4 +57,5 @@ pub fn register_all(r: &mut Registry) {
     net::register(r);
     broadcast::register(r);
     image::register(r);
+    dvb::register(r);
 }
