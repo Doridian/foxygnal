@@ -148,13 +148,13 @@ do the work through the same engine the UI uses.
 - [x] Tools for building graphs: list and search blocks (descriptors, help text, ports,
       settings), list examples and templates, read, check (the same type-checked errors
       as the editor, naming both endpoints, plus unconnected inputs), create and edit
-      `.fox.toml` graphs, import and export `.grc`. Not yet: inserting converters
-      automatically (the error names both types)
+      `.fox.toml` graphs (a converter is inserted when a wire's ends disagree and exactly
+      one fits), import and export `.grc`
 - [x] Tools for signals: run and stop, change live settings, read per-block and per-wire stats,
       attach a probe and get a *summary* rather than raw samples (strongest peaks and their
-      levels, noise floor, occupied bandwidth, level meter), read decoded messages, fetch the
-      current picture as a PNG, list SDR devices, record a short SigMF capture. Not yet: a
-      constellation summary (spread, symbol rate)
+      levels, noise floor, occupied bandwidth, level meter, constellation: PSK order, EVM/MER,
+      symbol rate), read decoded messages, fetch the current picture as a PNG, list SDR
+      devices, record a short SigMF capture
 - [x] Resources: the block catalog, docs, the open graph, examples; prompts for common jobs
       ("build a receiver", "find signals in this band", "decode this recording")
 - [x] Safety: transmitting is never possible over MCP: TX blocks stay disarmed until a person
