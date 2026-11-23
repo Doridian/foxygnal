@@ -77,6 +77,28 @@ pub struct Status {
     /// The graph changed in ways that only apply after a restart.
     pub stale: bool,
     pub errors: Vec<ErrorInfo>,
+    /// The current run transmits: TX was armed for it. The UI shows a red
+    /// indicator while this is set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tx_armed: bool,
+}
+
+/// A block in the graph that transmits, with the settings it would use, for
+/// the arm-TX confirmation. Values are resolved (variables evaluated).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TxInfo {
+    /// The block as resolved (`fm/tx` inside a hierarchical block `fm`).
+    pub block: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency: Option<f64>,
+    /// The rate it would run at (from upstream if the param is 0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gain: Option<f64>,
 }
 
 /// Server → client messages (JSON text frames).
@@ -91,6 +113,8 @@ pub enum Event {
         version: u64,
         status: Status,
         meta: Meta,
+        /// The server was started with `--allow-tx`.
+        allow_tx: bool,
     },
     Graph {
         graph: GraphSpec,
@@ -115,6 +139,9 @@ pub struct Meta {
     /// block needs a rate nothing provides). `None` when all is well.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorInfo>,
+    /// Blocks that would transmit if the graph ran.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tx: Vec<TxInfo>,
 }
 
 /// Client → server messages.
@@ -127,7 +154,12 @@ pub enum Command {
         #[serde(default)]
         name: Option<String>,
     },
-    Run,
+    Run {
+        /// Arm TX for this run only. Needed (with `--allow-tx`) to start a
+        /// graph with blocks that transmit; ignored for graphs without.
+        #[serde(default)]
+        arm_tx: bool,
+    },
     Stop,
     /// Watch a wire. `id` is chosen by the client; setting an existing id
     /// changes that probe. Frames arrive as binary messages.
@@ -158,6 +190,8 @@ struct Run {
     applied: GraphSpec,
     /// From the running graph's wires and blocks to the graph as drawn.
     map: Arc<EdgeMap>,
+    /// Held while the run lives if it transmits; dropping it disarms TX.
+    tx: Option<foxygnal_sdr::TxArm>,
 }
 
 /// A graph resolved, built and configured, ready to start.
@@ -168,6 +202,7 @@ struct Built {
     /// Edge metadata as drawn.
     edges: Vec<EdgeMeta>,
     map: EdgeMap,
+    tx: Vec<TxInfo>,
 }
 
 struct Inner {
@@ -185,6 +220,8 @@ struct Inner {
 
 pub struct Session {
     registry: Arc<Registry>,
+    /// Graphs with TX blocks may run (when armed); `--allow-tx`.
+    allow_tx: bool,
     /// Relative `path` parameters resolve against this directory.
     base_dir: PathBuf,
     /// Where `graph:NAME.fox.toml` blocks come from (the same directory).
@@ -202,8 +239,15 @@ fn now_ms() -> u64 {
 
 impl Session {
     pub fn new(registry: Arc<Registry>, base_dir: PathBuf) -> Arc<Self> {
+        Self::with_tx(registry, base_dir, false)
+    }
+
+    /// A session where graphs that transmit may run, each run only after
+    /// the client arms TX for it (`foxygnal serve --allow-tx`).
+    pub fn with_tx(registry: Arc<Registry>, base_dir: PathBuf, allow_tx: bool) -> Arc<Self> {
         let session = Arc::new(Self {
             registry,
+            allow_tx,
             graphs: ProjectGraphs {
                 dir: base_dir.clone(),
             },
@@ -272,6 +316,7 @@ impl Session {
             started_at: inner.started_at,
             stale: inner.stale,
             errors: inner.errors.clone(),
+            tx_armed: inner.run.as_ref().is_some_and(|r| r.tx.is_some()),
         }
     }
 
@@ -279,14 +324,14 @@ impl Session {
     pub fn subscribe(&self, client: u64) -> (broadcast::Receiver<Arc<str>>, Event) {
         let inner = self.lock();
         let rx = self.events.subscribe();
-        (rx, Self::hello(&inner, client))
+        (rx, self.hello(&inner, client))
     }
 
     pub fn snapshot(&self, client: u64) -> Event {
-        Self::hello(&self.lock(), client)
+        self.hello(&self.lock(), client)
     }
 
-    fn hello(inner: &Inner, client: u64) -> Event {
+    fn hello(&self, inner: &Inner, client: u64) -> Event {
         Event::Hello {
             client,
             graph: inner.graph.clone(),
@@ -294,6 +339,7 @@ impl Session {
             version: inner.version,
             status: Self::status(inner),
             meta: inner.meta.clone(),
+            allow_tx: self.allow_tx,
         }
     }
 
@@ -308,12 +354,49 @@ impl Session {
             Flowgraph::from_resolved(&r.graph, &self.registry).map_err(|e| map.error(&e))?;
         let edges = fg.configure().map_err(|e| map.error(&e))?;
         map.add_meta(&r, &edges);
+        let tx = self.tx_blocks(&r.graph, &edges);
         Ok(Built {
             fg,
             edges: map.meta(edges),
             graph: r.graph,
             map,
+            tx,
         })
+    }
+
+    /// The blocks of a resolved graph that transmit, with their settings.
+    fn tx_blocks(&self, graph: &GraphSpec, edges: &[EdgeMeta]) -> Vec<TxInfo> {
+        graph
+            .blocks
+            .iter()
+            .filter(|b| self.registry.is_tx(&b.kind))
+            .map(|b| {
+                let desc = self.registry.get(&b.kind);
+                let param = |name: &str| {
+                    b.params.get(name).cloned().or_else(|| {
+                        desc?
+                            .params
+                            .iter()
+                            .find(|p| p.name == name)
+                            .map(|p| p.default.clone())
+                    })
+                };
+                let num = |name: &str| param(name).and_then(|v| v.as_f64());
+                let prefix = format!("{}.", b.id);
+                let upstream = edges
+                    .iter()
+                    .find(|e| e.to.starts_with(&prefix))
+                    .and_then(|e| e.meta.sample_rate);
+                TxInfo {
+                    block: b.id.clone(),
+                    kind: b.kind.clone(),
+                    device: param("device").and_then(|v| v.as_str().map(str::to_owned)),
+                    frequency: num("frequency"),
+                    sample_rate: num("sample_rate").filter(|r| *r > 0.0).or(upstream),
+                    gain: num("gain"),
+                }
+            })
+            .collect()
     }
 
     /// Stream metadata of a build.
@@ -322,10 +405,12 @@ impl Session {
             Ok(b) => Meta {
                 edges: b.edges.clone(),
                 error: None,
+                tx: b.tx.clone(),
             },
             Err(e) => Meta {
                 edges: Vec::new(),
                 error: Some(e.clone()),
+                tx: Vec::new(),
             },
         }
     }
@@ -341,7 +426,7 @@ impl Session {
     pub fn handle(self: &Arc<Self>, client: u64, cmd: Command) {
         match cmd {
             Command::SetGraph { graph, name } => self.set_graph(client, graph, name),
-            Command::Run => self.run(),
+            Command::Run { arm_tx } => self.run_with(arm_tx),
             Command::Stop => self.stop(),
             Command::ProbeSet {
                 id,
@@ -369,6 +454,7 @@ impl Session {
         }
         let meta = Self::meta_of(&built);
         let meta_changed = meta.edges != inner.meta.edges
+            || meta.tx != inner.meta.tx
             || meta.error.as_ref().map(|e| &e.message)
                 != inner.meta.error.as_ref().map(|e| &e.message);
         inner.meta = meta;
@@ -396,7 +482,15 @@ impl Session {
         }
     }
 
+    /// Run without arming TX (graphs that transmit are refused).
     pub fn run(self: &Arc<Self>) {
+        self.run_with(false);
+    }
+
+    /// Run the graph. A graph with blocks that transmit only starts if the
+    /// server allows TX (`--allow-tx`) and `arm_tx` is set; TX stays armed
+    /// until this run ends.
+    pub fn run_with(self: &Arc<Self>, arm_tx: bool) {
         let mut inner = self.lock();
         if inner.run.is_some() {
             return;
@@ -405,8 +499,10 @@ impl Session {
         inner.stale = false;
         let started = self.build(&inner.graph).and_then(|b| {
             let map = Arc::new(b.map);
+            // Arm before starting: TX blocks check the switch in `start()`.
+            let tx = self.check_tx(&b.tx, arm_tx).map_err(|e| map.error(&e))?;
             match b.fg.start() {
-                Ok(running) => Ok((running, b.graph, map)),
+                Ok(running) => Ok((running, b.graph, map, tx)),
                 Err(e) => Err(map.error(&e)),
             }
         });
@@ -416,7 +512,10 @@ impl Session {
                 inner.started_at = None;
                 inner.errors = vec![e];
             }
-            Ok((running, graph, map)) => {
+            Ok((running, graph, map, tx)) => {
+                if tx.is_some() {
+                    tracing::warn!("TX armed for this run");
+                }
                 let id = inner.next_run;
                 inner.next_run += 1;
                 inner.run = Some(Run {
@@ -426,6 +525,7 @@ impl Session {
                     monitor: running.monitor(),
                     applied: graph,
                     map,
+                    tx,
                 });
                 inner.state = RunState::Running;
                 inner.started_at = Some(now_ms());
@@ -440,6 +540,32 @@ impl Session {
             }
         }
         self.emit(&Event::Status(Self::status(&inner)));
+    }
+
+    /// The safety gate for transmitting: `Ok(Some(guard))` arms TX for a
+    /// graph that transmits, `Ok(None)` for one that doesn't, and an error
+    /// pinned to the first TX block otherwise.
+    fn check_tx(&self, tx: &[TxInfo], arm: bool) -> Result<Option<foxygnal_sdr::TxArm>, Error> {
+        let Some(first) = tx.first() else {
+            return Ok(None);
+        };
+        let refuse = |msg: &str| Error::Block {
+            block: first.block.clone(),
+            source: Box::new(Error::Other(msg.to_owned())),
+        };
+        if !self.allow_tx {
+            return Err(refuse(
+                "this block transmits, and the engine was started without --allow-tx. \
+                 To allow transmitting, restart it with `foxygnal serve --allow-tx`.",
+            ));
+        }
+        if !arm {
+            return Err(refuse(
+                "this block transmits: arm TX for this run to start it (press Run and \
+                 confirm \"Arm TX and run\").",
+            ));
+        }
+        Ok(Some(foxygnal_sdr::arm_tx()))
     }
 
     /// The graph with relative `path` parameters made absolute under `base_dir`,

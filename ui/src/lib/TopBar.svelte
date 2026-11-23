@@ -59,7 +59,7 @@
 
 <svelte:window onclick={onwindowclick} onkeydown={(e) => e.key === 'Escape' && (menuOpen = false)} />
 
-<header class="topbar">
+<header class="topbar" class:transmitting={st.tx_armed}>
   <div class="brand">
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l4 6-2 6 7 5 7-5-2-6 4-6-6 3h-6z"></path><path d="M2 12c2-3 3 3 5 0"></path></svg>
     <strong>foxygnal</strong>
@@ -100,6 +100,11 @@
     >Load
   </button>
 
+  {#if st.tx_armed}
+    <span class="tx" role="status" title="TX is armed for this run: the graph is transmitting. Stop to disarm.">
+      <span class="txled"></span>TX · transmitting
+    </span>
+  {/if}
   {#if st.stale && st.state === 'running'}
     <span class="stale" title="Some changes only take effect after a restart">Restart to apply changes</span>
   {/if}
@@ -130,6 +135,38 @@
     height: 48px;
     background: var(--panel);
     border-bottom: 1px solid var(--line);
+  }
+  .topbar.transmitting {
+    box-shadow: inset 0 -3px 0 #d1242f;
+  }
+  .tx {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px;
+    border-radius: 6px;
+    background: #d1242f;
+    color: #fff;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.04em;
+  }
+  .txled {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #fff;
+    animation: txpulse 1s ease-in-out infinite;
+  }
+  @keyframes txpulse {
+    50% {
+      opacity: 0.25;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .txled {
+      animation: none;
+    }
   }
   .brand {
     display: flex;

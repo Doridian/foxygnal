@@ -1,6 +1,7 @@
 //! The standard block library.
 
 pub mod audio;
+pub mod browser_audio;
 pub mod convert;
 pub mod demod;
 mod design;
@@ -12,6 +13,7 @@ pub mod math;
 mod params;
 pub mod resample;
 pub mod ring;
+pub mod sdr;
 pub mod sigmf;
 pub mod sources;
 pub mod testing;
@@ -39,4 +41,6 @@ pub fn register_all(r: &mut Registry) {
     sigmf::register(r);
     convert::register(r);
     audio::register(r);
+    browser_audio::register(r);
+    sdr::register(r);
 }

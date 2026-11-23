@@ -12,8 +12,7 @@
 | WAV Source | `wav_source` | f32 (one channel), c32 (stereo as I/Q), i16; rate from the header, loop | ✅ |
 | SigMF Source | `sigmf_source` | c32 / f32 from any `c…` / `r…` datatype; i16 / u8 raw (ci16 / cu8 as interleaved pairs); rate and centre frequency from the metadata | ✅ |
 | Audio Source | `audio_source` | f32, one channel of the sound card (`audio` feature) | ✅ |
-| SDR Source | | c32 / ci16 / ci8 | 🔜 M4 |
-| rtl_tcp / SpyServer | | ci8 → c32 | 🔜 M4 |
+| SDR Source | `sdr_source` | c32 from any device (`sim:`, RTL-SDR, rtl_tcp, SpyServer, SoapySDR…); live frequency / gain / AGC / ppm, tags `rx_freq`, `rx_gain`, `overflow` | ✅ |
 
 ## Sinks
 | block | kind | types | status |
@@ -22,9 +21,10 @@
 | File Sink | `file_sink` | any | ✅ |
 | Vector Sink | `testing::VectorSink` | any (Rust API only) | ✅ |
 | Audio Sink | `audio_sink` | f32 at the stream's rate; the sound card paces the graph (`audio` feature) | ✅ |
+| Browser Audio | `browser_audio` | f32 at 3–768 kS/s, played in the tab that pressed Run (WebAudio); paces at the stream rate unless `pace` is off | ✅ |
 | WAV Sink | `wav_sink` | f32, c32 (stereo I/Q), i16 → float32 or pcm16 WAV at the stream's rate | ✅ |
 | SigMF Sink | `sigmf_sink` | any: `.sigmf-data` + `.sigmf-meta` with rate, frequency, datetime | ✅ |
-| SDR Sink (TX) | | c32 | 🔜 M4 |
+| SDR Sink (TX) | `sdr_sink` | c32; needs `--allow-tx` and TX armed for the run; live frequency / gain; `sim:` discards | ✅ |
 | UDP / TCP / ZeroMQ | | any | 🔜 later |
 
 ## Math

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import AudioPlayer from './AudioPlayer.svelte';
+  import { browserAudio } from './audio.svelte';
   import { SvelteFlow, Background, Controls, useSvelteFlow, type Connection, type OnConnectEnd } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import BlockNodeView from './BlockNode.svelte';
@@ -10,9 +12,10 @@
   import FileDialog from './FileDialog.svelte';
   import Dock from './Dock.svelte';
   import WireInfo from './WireInfo.svelte';
+  import TxDialog from './TxDialog.svelte';
   import { graphView } from './graphview.svelte';
   import { instruments } from './instruments.svelte';
-  import { GRAPH_KIND, emptyGraph, fetchBlocks, fetchExample, openFile, parseToml, renderToml, saveFile, type BlockDescriptor, type Exports, type GraphSpec } from './api';
+  import { GRAPH_KIND, emptyGraph, fetchBlocks, fetchExample, openFile, parseToml, renderToml, saveFile, type BlockDescriptor, type DeviceInfo, type Exports, type GraphSpec, type TxInfo } from './api';
   import { ID_RE, baseForCopy, baseForKind, convertersFor, edgeId, extrasOf, freshId, fromSpec, rejectReason, toSpec, typeOf, type BlockNode, type GraphExtras, type Wire } from './graph';
   import { renameRef, resolveVars } from './expr';
   import { session } from './session.svelte';
@@ -314,9 +317,9 @@
     return { x: p.x - 85 + k * 24, y: p.y - 40 + k * 24 };
   }
 
-  function addBlock(desc: BlockDescriptor, position = viewCentre()) {
+  function addBlock(desc: BlockDescriptor, position = viewCentre(), overrides: Record<string, unknown> = {}) {
     const id = freshId(baseForKind(desc.kind), new Set(nodes.map((n) => n.id)));
-    const params = Object.fromEntries(desc.params.map((p) => [p.name, p.default]));
+    const params = { ...Object.fromEntries(desc.params.map((p) => [p.name, p.default])), ...overrides };
     nodes = [...deselected(nodes), { id, type: 'block', position, selected: true, data: { desc, params } }];
     edges = deselected(edges);
     blankChosen = true;
@@ -490,9 +493,43 @@
 
   // ---- Run & keyboard ------------------------------------------------------
 
+  /** Asking to arm TX before a run of a graph that transmits. */
+  let txConfirm = $state(false);
+
+  /** Blocks that would transmit: the engine's resolved list, or (before it
+   *  has caught up with an edit) the TX blocks on the canvas. */
+  const txBlocks = $derived.by((): TxInfo[] => {
+    if (session.txBlocks.length) return session.txBlocks;
+    const num = (v: unknown) => (typeof v === 'number' ? v : undefined);
+    return nodes
+      .filter((n) => n.data.desc.tx)
+      .map((n) => ({
+        block: n.id,
+        kind: n.data.desc.kind,
+        device: String(n.data.params.device ?? ''),
+        frequency: num(n.data.params.frequency),
+        sample_rate: num(n.data.params.sample_rate) || undefined,
+        gain: num(n.data.params.gain),
+      }));
+  });
+
   function run() {
     commit();
-    session.run();
+    // Browsers start audio only from a click or key press: this is the one.
+    if (nodes.some((n) => n.data.desc.kind === 'browser_audio')) browserAudio.unlock();
+    if (txBlocks.length) txConfirm = true;
+    else session.run();
+  }
+
+  function armAndRun() {
+    txConfirm = false;
+    if (nodes.some((n) => n.data.desc.kind === 'browser_audio')) browserAudio.unlock();
+    session.run(true);
+  }
+
+  function addDevice(d: DeviceInfo) {
+    const desc = catalog.get('sdr_source');
+    if (desc) addBlock(desc, viewCentre(), { device: d.args });
   }
 
   function toggleRun() {
@@ -504,7 +541,7 @@
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
     if (e.key === 'Escape') wireMenu = null;
-    if (dialog) return;
+    if (dialog || txConfirm) return;
     if (mod && key === 's') {
       e.preventDefault();
       save(e.shiftKey);
@@ -557,7 +594,7 @@
   <div class="top">
     <TopBar {dirty} blocks={nodes.length} onrun={run} onstop={() => session.stop()} {actions} />
   </div>
-  <Palette catalog={descriptors} {loadError} onadd={(d) => addBlock(d)} bind:search bind:input={searchInput} />
+  <Palette catalog={descriptors} {loadError} onadd={(d) => addBlock(d)} ondevice={addDevice} bind:search bind:input={searchInput} />
   <main class="canvas" bind:this={canvas} {ondragover} {ondrop} {ondblclick}>
     <SvelteFlow
       bind:nodes
@@ -589,6 +626,7 @@
         <WireInfo edge={wireMenu.edge} onwatch={() => (wireMenu = null)} />
       </div>
     {/if}
+    <AudioPlayer {nodes} {edges} />
   </main>
   <Inspector
     node={selectedNode}
@@ -604,6 +642,10 @@
 </div>
 
 <input bind:this={fileInput} type="file" accept=".toml,.fox.toml" hidden onchange={onfile} />
+
+{#if txConfirm}
+  <TxDialog blocks={txBlocks} allowTx={session.allowTx} onarm={armAndRun} onclose={() => (txConfirm = false)} />
+{/if}
 
 {#if dialog}
   <FileDialog

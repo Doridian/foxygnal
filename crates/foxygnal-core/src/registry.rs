@@ -39,6 +39,9 @@ pub enum ParamKind {
     String,
     /// A filesystem path (UI shows a file picker).
     Path,
+    /// An SDR device string (`rtlsdr:serial=…`, empty = first found). The UI
+    /// offers the devices discovery finds.
+    Device,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,7 +90,7 @@ impl ParamSpec {
             },
             ParamKind::Bool => value.is_boolean(),
             ParamKind::Enum { options } => value.as_str().is_some_and(|v| options.contains(&v)),
-            ParamKind::String | ParamKind::Path => value.is_string(),
+            ParamKind::String | ParamKind::Path | ParamKind::Device => value.is_string(),
         };
         if ok {
             Ok(())
@@ -146,6 +149,7 @@ struct Entry {
     descriptor: BlockDescriptor,
     factory: Factory,
     response: Option<ResponseFn>,
+    tx: bool,
 }
 
 /// A descriptor as the catalog API serves it: the descriptor plus what the
@@ -157,6 +161,10 @@ pub struct CatalogEntry<'a> {
     /// The block can preview its frequency response ([`Registry::response`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub response: bool,
+    /// The block transmits RF ([`Registry::register_tx`]): runs that contain
+    /// it must arm TX first.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tx: bool,
 }
 
 #[derive(Default)]
@@ -170,7 +178,18 @@ impl Registry {
     }
 
     pub fn register(&mut self, descriptor: BlockDescriptor, factory: Factory) {
-        self.insert(descriptor, factory, None);
+        self.insert(descriptor, factory, None, false);
+    }
+
+    /// Register a block that transmits RF. Servers and the CLI refuse to
+    /// start a graph containing one unless TX was explicitly armed.
+    pub fn register_tx(&mut self, descriptor: BlockDescriptor, factory: Factory) {
+        self.insert(descriptor, factory, None, true);
+    }
+
+    /// Whether blocks of `kind` transmit (see [`Self::register_tx`]).
+    pub fn is_tx(&self, kind: &str) -> bool {
+        self.entries.get(kind).is_some_and(|e| e.tx)
     }
 
     /// Register a block that can also preview its frequency response.
@@ -180,7 +199,7 @@ impl Registry {
         factory: Factory,
         response: ResponseFn,
     ) {
-        self.insert(descriptor, factory, Some(response));
+        self.insert(descriptor, factory, Some(response), false);
     }
 
     fn insert(
@@ -188,6 +207,7 @@ impl Registry {
         descriptor: BlockDescriptor,
         factory: Factory,
         response: Option<ResponseFn>,
+        tx: bool,
     ) {
         let kind = descriptor.kind;
         let prev = self.entries.insert(
@@ -196,6 +216,7 @@ impl Registry {
                 descriptor,
                 factory,
                 response,
+                tx,
             },
         );
         assert!(prev.is_none(), "block kind `{kind}` registered twice");
@@ -210,6 +231,7 @@ impl Registry {
         self.entries.values().map(|e| CatalogEntry {
             descriptor: &e.descriptor,
             response: e.response.is_some(),
+            tx: e.tx,
         })
     }
 

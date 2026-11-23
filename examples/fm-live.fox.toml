@@ -1,0 +1,62 @@
+# Live broadcast FM: an SDR in, audio out in the browser tab.
+#
+# Press Run. With no device set, the first SDR found is used (an RTL-SDR,
+# HackRF, SoapySDR device…), or the built-in simulated FM band if there is
+# none. Change `station` while it runs to tune. The SDR is tuned `offset` away
+# from the station so its DC spike stays out of the audio.
+#
+#   2.4 MS/s ──xlate ÷10──▶ 240 kS/s ──FM demod──▶ resample ──▶ 48 kS/s ──▶ browser
+#
+#   foxygnal serve   (then open the "Live FM" template)
+
+[vars]
+station = "100.3M"
+offset = "250k"
+samp_rate = "2.4M"
+audio_rate = "48k"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$station - $offset", sample_rate = "$samp_rate", gain = 30.0 }
+ui = { x = 40, y = 120 }
+
+[[block]]
+id = "channel"
+kind = "freq_xlating_fir"
+params = { offset = "$offset", cutoff = 100000.0, transition = 40000.0, decimation = 10, window = "hamming" }
+ui = { x = 290, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "fm_demod"
+params = { deviation = 75000.0, deemphasis = "50us" }
+ui = { x = 540, y = 120 }
+
+[[block]]
+id = "resample"
+kind = "rational_resampler"
+params = { type = "f32", output_rate = "$audio_rate" }
+ui = { x = 790, y = 120 }
+
+[[block]]
+id = "audio"
+kind = "browser_audio"
+params = { pace = false }
+ui = { x = 1040, y = 120 }
+
+[[connect]]
+from = "sdr.out"
+to = "channel.in"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.out"
+to = "resample.in"
+
+[[connect]]
+from = "resample.out"
+to = "audio.in"

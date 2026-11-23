@@ -44,7 +44,14 @@ export interface MeterFrame {
   mean: [number, number];
 }
 
-export type Frame = ScopeFrame | SpectrumFrame | ConstellationFrame | MeterFrame;
+export interface AudioFrame {
+  kind: 'audio';
+  /** Samples were lost before this frame. */
+  gap: boolean;
+  samples: Float32Array;
+}
+
+export type Frame = ScopeFrame | SpectrumFrame | ConstellationFrame | MeterFrame | AudioFrame;
 
 export function decodeFrame(buf: ArrayBuffer): { id: number; seq: number; frame: Frame } | null {
   const v = new DataView(buf);
@@ -92,6 +99,10 @@ export function decodeFrame(buf: ArrayBuffer): { id: number; seq: number; frame:
           mean: [v.getFloat32(28, true), v.getFloat32(32, true)],
         },
       };
+    case 5: {
+      const n = v.getUint32(12, true);
+      return { id, seq, frame: { kind: 'audio', gap: (v.getUint8(16) & 1) !== 0, samples: f32(20, n) } };
+    }
   }
   return null;
 }

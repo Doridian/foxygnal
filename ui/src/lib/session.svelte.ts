@@ -1,7 +1,7 @@
 // The engine session over `/api/ws`: graph sync, run control, status, stats
 // and probe frames (binary messages).
 
-import type { ClientCommand, EdgeRef, ErrorInfo, GraphSpec, Meta, ProbeConfig, ServerEvent, Stats, Status } from './api';
+import type { ClientCommand, EdgeRef, ErrorInfo, GraphSpec, Meta, ProbeConfig, ServerEvent, Stats, Status, TxInfo } from './api';
 import { graphView } from './graphview.svelte';
 import { decodeFrame, type Frame } from './frames';
 
@@ -30,6 +30,10 @@ export class Session {
   stats = $state<StatsIndex | null>(null);
   /** Why the graph doesn't build or configure, as of the last edit. */
   metaError = $state<ErrorInfo | null>(null);
+  /** The engine was started with `--allow-tx`. */
+  allowTx = $state(false);
+  /** Blocks that would transmit if the graph ran, as of the last edit. */
+  txBlocks = $state<TxInfo[]>([]);
   /** Why a probe can't show anything (by probe id), as the engine reports it. */
   probeErrors = $state<Record<number, string>>({});
 
@@ -74,6 +78,7 @@ export class Session {
       case 'hello':
         this.#client = ev.client;
         this.status = ev.status;
+        this.allowTx = ev.allow_tx;
         this.#meta(ev.meta);
         this.#onGraph(ev.graph, ev.name, 'hello');
         break;
@@ -106,6 +111,7 @@ export class Session {
 
   #meta(m: Meta) {
     this.metaError = m.error ?? null;
+    this.txBlocks = m.tx ?? [];
     graphView.meta = new Map(m.edges.map((e) => [e.from, { sample_rate: e.sample_rate, center_freq: e.center_freq }]));
   }
 
@@ -138,8 +144,9 @@ export class Session {
   setGraph(graph: GraphSpec, name?: string | null) {
     return this.send({ op: 'set_graph', graph, name });
   }
-  run() {
-    this.send({ op: 'run' });
+  /** Run the graph; `armTx` arms transmitting for this run only. */
+  run(armTx = false) {
+    this.send(armTx ? { op: 'run', arm_tx: true } : { op: 'run' });
   }
   stop() {
     this.send({ op: 'stop' });

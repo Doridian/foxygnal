@@ -1,0 +1,20 @@
+[package]
+name = "foxygnal-sdr"
+description = "SDR hardware for foxygnal: a device trait, drivers and discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libloading = "0.8.9"
+num-complex = "0.4.6"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rustfft = "6.4.1"

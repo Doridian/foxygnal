@@ -10,6 +10,7 @@ repository.workspace = true
 axum = { version = "0.8.9", features = ["ws"] }
 foxygnal-core = { version = "0.1.0", path = "../foxygnal-core" }
 foxygnal-dsp = { version = "0.1.0", path = "../foxygnal-dsp" }
+foxygnal-sdr = { version = "0.1.0", path = "../foxygnal-sdr" }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 getrandom = "0.4.3"
 rust-embed = { version = "8.14.0", features = ["mime-guess"], optional = true }

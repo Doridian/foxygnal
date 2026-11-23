@@ -34,9 +34,21 @@ enum Cmd {
         /// Where the browser lists, opens and saves `.fox.toml` files.
         #[arg(long, default_value = ".")]
         project_dir: PathBuf,
+        /// Allow graphs that transmit. Each run still has to be armed in the
+        /// browser ("Arm TX and run"). Transmitting needs a licence and must
+        /// be legal where you are.
+        #[arg(long)]
+        allow_tx: bool,
     },
     /// Run a flowgraph file headless until it finishes (or Ctrl-C).
-    Run { graph: PathBuf },
+    Run {
+        graph: PathBuf,
+        /// Arm TX for this run: needed to run a graph with blocks that
+        /// transmit. Transmitting needs a licence and must be legal where
+        /// you are.
+        #[arg(long)]
+        arm_tx: bool,
+    },
     /// List available blocks.
     Blocks {
         #[arg(long)]
@@ -58,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
             allow_remote,
             ui_dir,
             project_dir,
+            allow_tx,
         } => {
             if !bind.ip().is_loopback() && !allow_remote {
                 bail!("refusing to listen on {bind}: pass --allow-remote to allow it");
@@ -89,16 +102,39 @@ async fn main() -> anyhow::Result<()> {
                 ui,
                 project_dir,
                 security,
+                allow_tx,
             };
             foxygnal_server::serve(cfg, registry).await?;
         }
-        Cmd::Run { graph } => {
+        Cmd::Run { graph, arm_tx } => {
             let text = std::fs::read_to_string(&graph)
                 .with_context(|| format!("reading {}", graph.display()))?;
             let spec = GraphSpec::from_toml(&text)?;
             // Sub-graphs (`graph:NAME.fox.toml`) sit next to the graph file.
             let dir = graph.parent().map(PathBuf::from).unwrap_or_default();
-            let running = Flowgraph::from_spec_with(&spec, &registry, &DirLoader(dir))?.start()?;
+            let resolved = foxygnal_core::resolve(&spec, &registry, &DirLoader(dir))?.graph;
+            let tx: Vec<&str> = resolved
+                .blocks
+                .iter()
+                .filter(|b| registry.is_tx(&b.kind))
+                .map(|b| b.id.as_str())
+                .collect();
+            if !tx.is_empty() && !arm_tx {
+                bail!(
+                    "this graph transmits (block {}); pass --arm-tx to run it. \
+                     Transmitting needs a licence and must be legal where you are.",
+                    tx.iter()
+                        .map(|b| format!("`{b}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            // Armed for exactly this run; dropped (disarmed) when it returns.
+            let _armed = (!tx.is_empty()).then(|| {
+                tracing::warn!("TX armed: {} will transmit", tx.join(", "));
+                foxygnal_sdr::arm_tx()
+            });
+            let running = Flowgraph::from_resolved(&resolved, &registry)?.start()?;
             let stop = running.stop_handle();
             tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
@@ -108,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Blocks { json } => {
             if json {
-                let all: Vec<_> = registry.descriptors().collect();
+                let all: Vec<_> = registry.catalog().collect();
                 println!("{}", serde_json::to_string_pretty(&all)?);
             } else {
                 for d in registry.descriptors() {

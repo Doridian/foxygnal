@@ -18,6 +18,7 @@ fn config(token: Option<&str>) -> Config {
             allow_remote: token.is_some(),
             token: token.map(str::to_owned),
         },
+        allow_tx: false,
     }
 }
 
@@ -372,4 +373,85 @@ async fn filter_response_preview() {
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = call(post("fir_filter", serde_json::json!({"sample_rate": 0.0}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// A browser audio block paces the graph at the stream rate, and its audio
+/// probe delivers every sample, in order, with no gaps.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_audio_streams_every_sample() {
+    use foxygnal_server::probe::Outgoing;
+    use foxygnal_server::session::Command;
+
+    let s = session();
+    s.set_graph(
+        1,
+        graph(
+            r#"
+[[block]]
+id = "tone"
+kind = "signal_source"
+params = { type = "f32", sample_rate = 48000.0, frequency = 1000.0 }
+[[block]]
+id = "speaker"
+kind = "browser_audio"
+[[connect]]
+from = "tone.out"
+to = "speaker.in"
+"#,
+        ),
+        None,
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    s.hub().add_client(7, tx);
+    let cmd = |json: serde_json::Value| serde_json::from_value::<Command>(json).unwrap();
+    s.handle(
+        7,
+        cmd(serde_json::json!({
+            "op": "probe_set", "id": 9, "fps": 60,
+            "edge": {"from": "tone.out", "to": "speaker.in"},
+            "probe": {"kind": "audio"},
+        })),
+    );
+    s.run();
+    let t0 = tokio::time::Instant::now();
+    let mut samples: Vec<f32> = Vec::new();
+    let mut frames = 0;
+    // Samples received during the second half-second onwards: the first
+    // frames may carry the buffer's backlog in one burst.
+    let mut steady = 0usize;
+    while t0.elapsed() < Duration::from_millis(1500) {
+        let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await else {
+            panic!("audio frames in time");
+        };
+        if let Outgoing::Binary(b) = msg {
+            assert_eq!(b[8], 5, "audio frame");
+            let n = u32::from_le_bytes(b[12..16].try_into().unwrap()) as usize;
+            // The first read can race the generator filling the buffer at
+            // start-up; after that, every sample must arrive.
+            if b[16] & 1 != 0 {
+                assert!(frames == 0, "gap after the first frame");
+            }
+            frames += 1;
+            assert_eq!(b.len(), 20 + 4 * n);
+            if t0.elapsed() >= Duration::from_millis(500) {
+                steady += n;
+            }
+            samples.extend(
+                b[20..]
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap())),
+            );
+        }
+    }
+    s.stop();
+    // Paced at 48 kS/s, not as fast as the CPU allows.
+    assert!(
+        (40_000..56_000).contains(&steady),
+        "{steady} samples in 1 s"
+    );
+    // A continuous 1 kHz sine: x[n+1] + x[n-1] = 2 cos(w) x[n].
+    let k = 2.0 * (2.0 * std::f32::consts::PI * 1000.0 / 48000.0).cos();
+    for w in samples.windows(3) {
+        assert!((w[2] + w[0] - k * w[1]).abs() < 1e-3, "discontinuity");
+    }
 }

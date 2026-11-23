@@ -47,6 +47,9 @@ pub struct Config {
     /// Where graphs are listed, opened and saved from the browser.
     pub project_dir: PathBuf,
     pub security: Security,
+    /// Graphs with blocks that transmit may run, each run only after the
+    /// client arms TX for it (`--allow-tx`). Off by default.
+    pub allow_tx: bool,
 }
 
 pub(crate) struct AppState {
@@ -63,6 +66,7 @@ pub fn router(cfg: &Config, session: Arc<Session>) -> Router {
         .route("/health", get(api::health))
         .route("/blocks", get(api::blocks))
         .route("/blocks/{kind}/response", post(api::block_response))
+        .route("/devices", get(api::devices))
         .route("/graph", get(api::get_graph).put(api::put_graph))
         .route("/graph.toml", get(api::get_graph_toml))
         .route("/toml/parse", post(api::parse_toml))
@@ -91,7 +95,10 @@ pub fn router(cfg: &Config, session: Arc<Session>) -> Router {
 }
 
 pub async fn serve(cfg: Config, registry: Registry) -> std::io::Result<()> {
-    let session = Session::new(Arc::new(registry), cfg.project_dir.clone());
+    let session = Session::with_tx(Arc::new(registry), cfg.project_dir.clone(), cfg.allow_tx);
+    if cfg.allow_tx {
+        tracing::warn!("transmitting is allowed (--allow-tx); each run still has to arm TX");
+    }
     let app = router(&cfg, session.clone());
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     let addr = listener.local_addr()?;

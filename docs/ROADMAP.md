@@ -55,11 +55,12 @@ Goal: build an FM broadcast receiver from a recording, with audio out.
 
 Goal: a live FM receiver from an RTL-SDR with three clicks.
 
-- [ ] `foxygnal-sdr` crate, device trait, discovery panel in the UI
-- [ ] SoapySDR backend (feature-gated, broad coverage)
-- [ ] Native RTL-SDR, plus `rtl_tcp` / SpyServer network sources
-- [ ] HackRF and others as needed; live retune/gain via live params and tags
-- [ ] TX path with the explicit arm-TX safety flow
+- [x] `foxygnal-sdr` crate, device trait, discovery panel in the UI, simulated receiver
+- [x] SoapySDR backend (loaded at run time, so no build dependency; broad coverage, tested on a PlutoSDR)
+- [x] Native RTL-SDR, plus `rtl_tcp` / SpyServer network sources
+- [x] HackRF and others as needed; live retune/gain via live params and tags
+- [x] Browser audio sink, and a "Live FM radio" template (open, pick, Run)
+- [x] TX path with the explicit arm-TX safety flow
 
 ## M5: Performance
 

@@ -322,6 +322,7 @@ async fn graph_files_with_exports_are_offered_as_blocks() {
             allow_remote: false,
             token: None,
         },
+        allow_tx: false,
     };
     let app = router(&cfg, session(dir));
     let resp = app

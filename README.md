@@ -34,7 +34,11 @@ cargo build --release
 cargo build --release --features embed-ui
 ```
 
-**Audio** (sound card sink and source) is behind the `audio` cargo feature, off by default
+**Listening** needs nothing extra: the `browser_audio` block plays in the browser tab that
+pressed Run (try the "Live FM radio" template). Build with `--release` for real-time graphs;
+debug builds are too slow for a 2.4 MS/s receiver.
+
+**Native audio** (sound card sink and source) is behind the `audio` cargo feature, off by default
 because on Linux it needs the ALSA headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel`
 on Fedora, `alsa-lib` on Arch). A plain `cargo build` needs no C libraries.
 
@@ -44,8 +48,22 @@ cargo build --release --features audio,embed-ui
 ```
 
 `serve` options: `--project-dir DIR` is where the browser opens and saves `.fox.toml` files
-(default: the current directory). `--allow-remote` permits a non-loopback `--bind` and
+(default: the current directory). `--allow-tx` allows graphs that transmit (each run still
+has to be armed). `--allow-remote` permits a non-loopback `--bind` and
 prints a URL with a random access token; put a TLS reverse proxy in front.
+
+### SDR hardware
+
+The **Devices** list at the top of the palette shows what the engine found (refresh to search
+again); **Add** puts an SDR Source for that device on the canvas. A **Simulated FM band**
+(`sim:`) is always there, so you can try everything without hardware. Network receivers that
+can't be discovered are typed into the source's *Device* field, e.g.
+`rtltcp:host=10.0.0.5,port=1234`. An empty device means the first one found.
+
+**Transmitting is off by default.** A graph with an SDR Sink (TX) only runs when the engine
+was started with `foxygnal serve --allow-tx` *and* you confirm "Arm TX and run" for that run
+(headless: `foxygnal run --arm-tx graph.fox.toml`). TX is disarmed when the run stops.
+Transmitting needs a licence and must be legal where you are.
 
 UI development with hot reload: run `foxygnal serve` in one terminal and `npm run dev` in
 `ui/` in another, then open the Vite URL (`http://127.0.0.1:5173`). It proxies `/api` to the engine.
@@ -56,6 +74,7 @@ UI development with hot reload: run `foxygnal serve` in one terminal and `npm ru
 crates/
   foxygnal-core     stream types, ring buffers, Block trait, registry, graph spec, scheduler
   foxygnal-blocks   standard block library
+  foxygnal-sdr      SDR device API, drivers, discovery, simulator, TX arm switch
   foxygnal-server   HTTP/WebSocket server (axum) for the UI
   foxygnal          the CLI binary (serve / run / blocks)
 ui/                 Svelte 5 + Vite + Svelte Flow browser editor

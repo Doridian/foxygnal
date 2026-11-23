@@ -2,14 +2,15 @@
 //! (JSON and TOML), bundled examples, and the server-side project directory.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use foxygnal_core::{FrequencyResponse, GraphSpec, Params};
+use foxygnal_sdr::Discovery;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -142,6 +143,60 @@ pub async fn render_toml(Json(g): Json<GraphSpec>) -> Result<Response, ApiError>
     Ok(([(header::CONTENT_TYPE, TOML_TYPE)], text).into_response())
 }
 
+// ---- Devices ----------------------------------------------------------------
+
+/// How long one driver may take to list its devices.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Drivers whose discovery is still running (from an earlier request that
+/// timed out). They are not asked again until it returns.
+static DISCOVERING: Mutex<Vec<&str>> = Mutex::new(Vec::new());
+
+/// SDR devices found by every driver. Each driver runs on a blocking thread
+/// with a timeout, so a slow or stuck one can't hang the request; its error
+/// (library not installed, timed out, …) comes back in its entry.
+pub async fn devices() -> Json<Vec<Discovery>> {
+    let lock = || DISCOVERING.lock().unwrap_or_else(|e| e.into_inner());
+    let tasks = foxygnal_sdr::drivers().iter().map(|d| {
+        let (driver, label) = (d.name(), d.label());
+        let result = |devices, error| Discovery {
+            driver,
+            label,
+            devices,
+            error,
+        };
+        let busy = {
+            let mut l = lock();
+            let busy = l.contains(&driver);
+            if !busy {
+                l.push(driver);
+            }
+            busy
+        };
+        let d = d.clone();
+        async move {
+            if busy {
+                return result(vec![], Some("still busy with an earlier search".into()));
+            }
+            let task = tokio::task::spawn_blocking(move || {
+                let r = d.discover();
+                lock().retain(|n| *n != driver);
+                r
+            });
+            match tokio::time::timeout(DISCOVERY_TIMEOUT, task).await {
+                Ok(Ok(Ok(devices))) => result(devices, None),
+                Ok(Ok(Err(e))) => result(vec![], Some(e.to_string())),
+                Ok(Err(_)) => {
+                    lock().retain(|n| *n != driver);
+                    result(vec![], Some("the driver crashed while searching".into()))
+                }
+                Err(_) => result(vec![], Some("timed out while searching".into())),
+            }
+        }
+    });
+    Json(futures_util::future::join_all(tasks).await)
+}
+
 // ---- Examples -------------------------------------------------------------
 
 struct Example {
@@ -157,6 +212,12 @@ const EXAMPLES: &[Example] = &[
         title: "Two tones + noise → instruments",
         description: "Runs until stopped. Click a wire to watch it on a scope, spectrum, waterfall or constellation.",
         toml: include_str!("../../../examples/two-tones.fox.toml"),
+    },
+    Example {
+        name: "fm-live",
+        title: "Live FM radio",
+        description: "An SDR in, audio in this tab. Uses the first device found, or a simulated FM band. Change `station` while it runs.",
+        toml: include_str!("../../../examples/fm-live.fox.toml"),
     },
     Example {
         name: "fm-receiver",

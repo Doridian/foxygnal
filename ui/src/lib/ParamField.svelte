@@ -2,6 +2,7 @@
   import type { ParamSpec } from './api';
   import { evaluate, evaluateValue, type Scope } from './expr';
   import { formatSi, formatWithUnit, parseSi } from './si';
+  import { devices } from './devices.svelte';
 
   let {
     spec,
@@ -92,6 +93,25 @@
         oninput={(e) => onchange(Number(e.currentTarget.value))}
       />
     {/if}
+  {:else if spec.kind === 'device'}
+    <input
+      id={fid}
+      class="mono"
+      type="text"
+      list="{fid}-devices"
+      value={String(value ?? '')}
+      placeholder="first device found"
+      onfocus={() => devices.ensure()}
+      onchange={(e) => onchange(e.currentTarget.value.trim())}
+    />
+    <datalist id="{fid}-devices">
+      {#each devices.all as d (d.args)}<option value={d.args}>{d.label}</option>{/each}
+    </datalist>
+    <p class="hint">
+      {devices.all.length ? `${devices.all.length} found` : devices.loading ? 'Searching…' : 'None found'} ·
+      <button type="button" class="link" disabled={devices.loading} onclick={() => devices.refresh()}>search again</button>
+      · or type one, e.g. <code>rtltcp:host=…,port=1234</code>
+    </p>
   {:else}
     <input id={fid} class:mono={spec.kind === 'path'} type="text" value={String(value ?? '')} placeholder={spec.kind === 'path' ? 'path on the engine host' : ''} onchange={(e) => onchange(e.currentTarget.value)} />
   {/if}
@@ -144,6 +164,18 @@
     margin: -2px 0 0;
     font-size: 11px;
     color: var(--muted);
+  }
+  .hint {
+    margin: -2px 0 0;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .link {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    font: inherit;
   }
   .help {
     margin: 0;

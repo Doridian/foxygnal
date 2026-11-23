@@ -22,13 +22,15 @@ frames of a few KB each.
 | crate | role | depends on |
 |---|---|---|
 | `foxygnal-core` | `StreamType`/`Sample`, ring buffers, `Block` trait, `Registry`, `GraphSpec`, runtime | — |
-| `foxygnal-blocks` | standard blocks + `registry()` | core |
+| `foxygnal-blocks` | standard blocks + `registry()` | core, dsp, sdr |
 | `foxygnal-dsp` | DSP math shared by blocks and probes: windows, FFT power spectra, FIR design and responses, polyphase resampler, rotator | — |
-| `foxygnal-server` | REST + WebSocket API, probes and instruments, static UI | core, dsp |
+| `foxygnal-sdr` | SDR device API, device strings, drivers and discovery, the TX arm switch | — |
+| `foxygnal-server` | REST + WebSocket API, probes and instruments, static UI | core, dsp, sdr |
 | `foxygnal` | CLI | all |
 
-Planned: `foxygnal-sdr` (hardware drivers behind cargo features, so `cargo build` needs no C
-libraries by default).
+`foxygnal-sdr` holds the device trait, discovery and the drivers. Drivers that need a C library
+(librtlsdr, libhackrf, SoapySDR) load it at run time, so `cargo build` needs no C libraries and no
+cargo feature; see [HARDWARE.md](HARDWARE.md).
 
 ## Stream types
 
@@ -88,6 +90,18 @@ code.
   return `TagPropagation::Manual` from `Block::tag_propagation` and forward tags themselves.
   A full queue drops new tags rather than block (`InputPort::dropped_tags`).
 
+## Browser audio
+
+`browser_audio` is a sink that consumes its input (paced at the stream rate unless hardware
+upstream sets the pace). While a graph with one runs, the UI opens an `audio` probe on the wire
+feeding it and plays the frames with WebAudio: each frame becomes an `AudioBuffer` at the
+stream's rate (the browser resamples to the device) scheduled right after the previous one,
+about 150 ms ahead of the playhead. If playback falls behind or the frame says samples were
+lost, it restarts at that lead; if it runs more than 600 ms ahead (the engine's clock faster
+than the sound card's), frames are skipped. Browsers only start audio from a user gesture,
+so the Run click unlocks it; otherwise a "Click to enable audio" button appears. Nothing on
+the engine's machine needs an audio library, and it works over a remote connection.
+
 ## Buffers
 
 Each output port owns one lock-free **single-writer / multi-reader** ring
@@ -146,6 +160,75 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
 - The sample rate (and centre frequency, for absolute spectrum axes) comes from stream
   metadata, or can be set per instrument.
 
+## Hardware (M4)
+
+`foxygnal-sdr` is the device layer; blocks never talk to hardware directly.
+
+- **Drivers** (`Driver`: `name`, `label`, `discover`, `open`) are collected in a `Drivers`
+  set. `default_drivers()` lists them in discovery order: hardware first, then network
+  sources, then the simulator. `foxygnal_sdr::drivers()` is the process-wide instance built
+  on first use, shared by the blocks (to open) and the server (to discover), so a driver that
+  loads a C library (`dlopen`) does so once. A missing library only means that driver
+  reports an error in discovery (no C library is needed to build).
+- **Device strings** (`args.rs`): `driver:key=value,…`, e.g. `rtlsdr:serial=00000001`,
+  `rtltcp:host=10.0.0.5,port=1234`, `soapy:driver=plutosdr,uri=ip:192.168.2.1`, `sim:`.
+  Empty opens the first receiver discovery finds, real devices before the simulator.
+  Discovery returns the exact string that reopens each device.
+- **Capabilities** (frequency ranges, sample rates, gain range, AGC, antennas) are checked by
+  the blocks before streaming, with messages in human units ("frequency 2 GHz is out of
+  range; tunable: 24 MHz–1.766 GHz").
+- **Threading.** A driver moves samples on its own thread into a lock-free SPSC ring
+  (`ring.rs`) and unparks the block's thread, which it registered with `set_waker` in
+  `start()`. `work()` only copies what is in the ring and returns `Blocked` when it's empty,
+  so a device never blocks the scheduler. When the graph falls behind, the driver drops whole
+  chunks and counts them (`overflows`). Control calls (retune, gain) may take milliseconds and
+  run from `set_param`, between `work` calls. TX is the mirror image: `work()` writes what
+  fits into the ring, the driver thread drains it at the device's pace and unparks the block
+  when space frees up.
+- **Blocks** (`blocks/src/sdr.rs`, category *Hardware*): `sdr_source` (c32 out) and
+  `sdr_sink` (c32 in, TX). Building and configuring open nothing; the source states its rate
+  and centre frequency as stream metadata, and the device opens in `start()`. Live
+  `frequency`/`gain`/`agc`/`ppm` changes retune the running stream and tag the next item
+  (`rx_freq` float Hz, `rx_gain` float dB, NaN for AGC); dropped samples tag the next item
+  `overflow` (int, the number dropped). Errors name the device ("Simulated FM band (sim:):
+  …").
+- The `device` parameter kind (`ParamKind::Device`) makes the inspector offer discovered
+  devices; any string can be typed (network receivers can't always be discovered).
+- **Simulator** (`sim.rs`, device `sim:`, always present): a simulated RTL-SDR (24–1766 MHz,
+  0.25–3.2 MS/s, gain 0–49.6 dB) that receives six FM broadcast stations (88.5, 94.1, 99.1,
+  100.3, 100.9 and 104.7 MHz, 75 kHz deviation, each with its own tone pattern) plus noise,
+  paced in real time by a driver thread. Retuning moves stations in and out of the passband;
+  gain scales everything and clips like an ADC. Options: `stations=88.5;94.1` (MHz),
+  `noise=0.01`. It also accepts a TX stream and discards the samples at the configured rate,
+  so the TX path is testable without a transmitter. Integer phase accumulators and a sine
+  table keep it cheap (2.4 MS/s with three stations in view uses a few percent of a core).
+
+### TX arming
+
+Transmitting must never happen by accident. Three independent gates:
+
+1. **Marked blocks.** A block that transmits is registered with `Registry::register_tx`; the
+   catalog serves `"tx": true` on its descriptor (`CatalogEntry`), and `Registry::is_tx`
+   answers for a kind. Checks run on the *resolved* graph, so a TX block inside a
+   hierarchical block counts too.
+2. **The runner refuses.** The server refuses to start a graph with TX blocks unless it was
+   started with `foxygnal serve --allow-tx` (off by default) **and** the run request arms TX
+   (`{"op": "run", "arm_tx": true}`). Either refusal is an error pinned to the TX block that
+   says how to proceed. `foxygnal run` needs `--arm-tx`.
+3. **The block refuses.** `foxygnal_sdr::arm_tx()` returns a `TxArm` guard; while one lives,
+   `foxygnal_sdr::tx_armed()` is true. The server takes the guard just before starting an
+   armed run and keeps it in the run, dropping it when the run ends for any reason (stop,
+   end of stream, error), after every block thread has finished; the CLI holds it for the
+   run. `sdr_sink::start()` checks `tx_armed()` and fails otherwise. The switch is
+   process-wide, which matches one session per server and one graph per CLI process.
+
+Arming lasts for one run: the next Run has to arm again. The UI asks before every run of a
+graph that transmits: a dialog lists each TX block's device, frequency, rate and gain (from
+`meta.tx`, so variables are resolved and a rate of 0 shows the upstream rate), reminds that
+transmitting needs a licence and must be legal, and offers **Arm TX and run** (never the
+default focus; disabled, with an explanation, when the server lacks `--allow-tx`). While
+`status.tx_armed` is set, the top bar shows a red **TX** indicator in every tab.
+
 ## Server API
 
 REST:
@@ -154,6 +237,11 @@ REST:
 - `GET /api/blocks`: block descriptors, plus graph files usable as blocks (see "Graph files")
 - A block descriptor with `"response": true` belongs to a block
   registered with `Registry::register_with_response` (filters, resamplers)
+- A block descriptor with `"tx": true` transmits (see "TX arming")
+- `GET /api/devices`: per-driver discovery, `[{driver, label, devices [{driver, args, label,
+  serial, rx, tx}], error}]`. Each driver searches on a blocking thread with a 4 s timeout,
+  so a slow driver can't hang the request; a driver still busy from an earlier timed-out
+  search isn't asked again until it returns
 - `POST /api/blocks/{kind}/response` `{params, sample_rate}` → `{freqs, db, taps}`: the magnitude
   response the block would have at that input rate (400 with a readable message for invalid
   params). The inspector draws it for any block whose descriptor says `response`
@@ -168,12 +256,15 @@ WebSocket `/api/ws`, one per browser tab:
 
 - **Text frames: JSON control messages** with `{"op": …}`. Client: `set_graph {graph, name}`
   (the whole graph; the server diffs it, pushes changed live params and marks other changes
-  stale), `run`, `stop`, `probe_set {id, edge {from, to}, probe {kind, …options}, fps}` (the
+  stale), `run {arm_tx?}` (`arm_tx: true` arms TX for this run, see "TX arming"), `stop`,
+  `probe_set {id, edge {from, to}, probe {kind, …options}, fps}` (the
   client picks `id`; sending it again changes the probe) and `probe_remove {id}`. Server:
-  `hello` (full snapshot on connect or after lag, including `meta`),
+  `hello` (full snapshot on connect or after lag, including `meta`, and `allow_tx`: the
+  server was started with `--allow-tx`),
   `graph {graph, name, version, from}`, `meta {edges [{from, to, sample_rate?, center_freq?}],
-  error?}` after every graph change,
-  `status {state, started_at, stale, errors[]}`, where each error names a `block`, an
+  error?, tx?}` after every graph change (`tx`: blocks that would transmit, `[{block, kind,
+  device?, frequency?, sample_rate?, gain?}]`),
+  `status {state, started_at, stale, errors[], tx_armed?}`, where each error names a `block`, an
   `edge {from, to}`, or neither, `stats {blocks[], edges[]}`, and, to the probe's tab only,
   `probe {id, error}` when a probe can't show anything (wire not running, wrong type) or
   recovers. Probes belong to the connection; the UI sets them up again after reconnecting.
@@ -188,6 +279,9 @@ WebSocket `/api/ws`, one per browser tab:
   - constellation (3): `u32 n`, then `f32[2n]` interleaved I, Q.
   - meter (4): `u32 count, u8 flags (1 complex), u8[3], f32 rms, f32 peak, f32 mean_i,
     f32 mean_q`.
+  - audio (5): `u32 n, u8 flags (1 gap: samples were lost before this frame), u8[3]`, then
+    `f32[n]`: every sample since the previous frame (real wires only). The UI plays these for
+    `browser_audio` blocks (see "Browser audio").
 
   A tab that can't keep up drops frames (bounded queue) rather than piling them up.
 
@@ -284,9 +378,9 @@ A local server that can write files (file sink) and later transmit RF needs care
   `/?token=…` sets an `HttpOnly; SameSite=Strict` cookie; API clients can send
   `Authorization: Bearer …`.
   Recommend a reverse proxy with TLS.
-- (M4) **Transmit is opt-in per session.** Any TX block requires an explicit "arm TX" action,
-  and the UI shows a persistent red banner while armed. The user is responsible for staying
-  legal.
+- **Transmit is opt-in twice**: per server (`--allow-tx`) and per run (arm TX, confirmed in
+  a dialog); TX blocks also refuse to start unless armed, and the UI shows a red TX indicator
+  while armed. See "TX arming". The user is responsible for staying legal.
 
 ## UI stack
 

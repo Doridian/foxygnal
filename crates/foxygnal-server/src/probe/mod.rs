@@ -10,6 +10,7 @@
 //! `u32 probe_id, u32 seq, u8 kind, u8[3] 0`, then the kind's payload; see
 //! the instrument modules and docs/ARCHITECTURE.md.
 
+mod audio;
 mod constellation;
 mod meter;
 mod scope;
@@ -39,6 +40,8 @@ pub enum ProbeConfig {
     Spectrum(SpectrumOptions),
     Constellation(ConstellationOptions),
     Meter {},
+    /// Every sample of a real (f32/i16/u8) stream, for playback in the browser.
+    Audio {},
 }
 
 impl ProbeConfig {
@@ -48,6 +51,7 @@ impl ProbeConfig {
             Self::Spectrum(_) => 2,
             Self::Constellation(_) => 3,
             Self::Meter {} => 4,
+            Self::Audio {} => 5,
         }
     }
 
@@ -63,6 +67,12 @@ impl ProbeConfig {
             }
             Self::Constellation(o) => Box::new(constellation::Constellation::new(o)),
             Self::Meter {} => Box::new(meter::Meter::new(complex)),
+            Self::Audio {} if complex => {
+                return Err(format!(
+                    "Audio needs a real wire (f32); this one carries {ty}. Demodulate it first."
+                ));
+            }
+            Self::Audio {} => Box::new(audio::Audio::default()),
         })
     }
 }

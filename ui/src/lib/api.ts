@@ -21,6 +21,8 @@ export type ParamSpec = {
   | { kind: 'enum'; options: string[] }
   | { kind: 'string' }
   | { kind: 'path' }
+  /** An SDR device string; the UI offers discovered devices. */
+  | { kind: 'device' }
 );
 
 export interface BlockDescriptor {
@@ -33,6 +35,8 @@ export interface BlockDescriptor {
   params: ParamSpec[];
   /** The block can preview its frequency response (`fetchResponse`). */
   response?: boolean;
+  /** The block transmits RF: running it needs TX armed. */
+  tx?: boolean;
 }
 
 /** A filter's magnitude response (`POST /api/blocks/{kind}/response`). */
@@ -90,6 +94,18 @@ export interface Status {
   started_at?: number;
   stale: boolean;
   errors: ErrorInfo[];
+  /** The current run transmits (TX was armed for it). */
+  tx_armed?: boolean;
+}
+
+/** A block that would transmit, with its resolved settings (`meta.tx`). */
+export interface TxInfo {
+  block: string;
+  kind: string;
+  device?: string;
+  frequency?: number;
+  sample_rate?: number;
+  gain?: number;
 }
 
 export interface EdgeRef {
@@ -106,6 +122,8 @@ export interface StreamMeta {
 export interface Meta {
   edges: ({ from: string; to: string } & StreamMeta)[];
   error?: ErrorInfo;
+  /** Blocks that would transmit if the graph ran. */
+  tx?: TxInfo[];
 }
 
 export interface Stats {
@@ -133,10 +151,11 @@ export type ProbeConfig =
     }
   | { kind: 'spectrum'; fft_size: number; window: FftWindow; average: number; peak_hold: boolean; bins: number; reset: number }
   | { kind: 'constellation'; points: number }
-  | { kind: 'meter' };
+  | { kind: 'meter' }
+  | { kind: 'audio' };
 
 export type ServerEvent =
-  | { op: 'hello'; client: number; graph: GraphSpec; name: string | null; version: number; status: Status; meta: Meta }
+  | { op: 'hello'; client: number; graph: GraphSpec; name: string | null; version: number; status: Status; meta: Meta; allow_tx: boolean }
   | { op: 'graph'; graph: GraphSpec; name: string | null; version: number; from: number }
   | ({ op: 'status' } & Status)
   | ({ op: 'stats' } & Stats)
@@ -145,7 +164,7 @@ export type ServerEvent =
 
 export type ClientCommand =
   | { op: 'set_graph'; graph: GraphSpec; name?: string | null }
-  | { op: 'run' }
+  | { op: 'run'; arm_tx?: boolean }
   | { op: 'stop' }
   | { op: 'probe_set'; id: number; edge: EdgeRef; probe: ProbeConfig; fps?: number }
   | { op: 'probe_remove'; id: number };
@@ -155,6 +174,26 @@ export interface ExampleInfo {
   title: string;
   description: string;
   blocks: number;
+}
+
+/** A device found by discovery (`GET /api/devices`). */
+export interface DeviceInfo {
+  driver: string;
+  /** The device string that opens exactly this device. */
+  args: string;
+  label: string;
+  serial: string | null;
+  rx: boolean;
+  tx: boolean;
+}
+
+/** One driver's discovery result. */
+export interface Discovery {
+  driver: string;
+  label: string;
+  devices: DeviceInfo[];
+  /** Why discovery failed (e.g. library not installed). */
+  error: string | null;
 }
 
 export interface FileInfo {
@@ -172,6 +211,7 @@ async function call<T>(method: string, url: string, body?: BodyInit, type?: stri
 const json = (v: unknown) => JSON.stringify(v);
 
 export const fetchBlocks = () => call<BlockDescriptor[]>('GET', '/api/blocks');
+export const fetchDevices = () => call<Discovery[]>('GET', '/api/devices');
 export const fetchExamples = () => call<ExampleInfo[]>('GET', '/api/examples');
 export const fetchExample = (name: string) => call<GraphSpec>('GET', `/api/examples/${encodeURIComponent(name)}`);
 export const listFiles = () => call<FileInfo[]>('GET', '/api/files');

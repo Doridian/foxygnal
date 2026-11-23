@@ -26,6 +26,7 @@
     Demodulators: '#ff9bd2',
     Flow: 'var(--warn)',
     Sinks: 'var(--muted)',
+    Hardware: 'var(--accent)',
   };
 </script>
 
@@ -39,6 +40,7 @@
   <header title={data.desc.help}>
     <span class="dot" style:background={CATEGORY_COLOURS[data.desc.category] ?? 'var(--muted)'}></span>
     {data.desc.label}
+    {#if data.desc.tx}<span class="txchip" title="Transmits: running it needs TX armed">TX</span>{/if}
     {#if cpu !== undefined}
       <span class="cpu mono" style:color={heat(Math.min(1, cpu))} title="Share of one CPU core spent in this block">{(cpu * 100).toFixed(cpu < 0.1 ? 1 : 0)}%</span>
     {:else if running && !error}<span class="live" title="Running"></span>{/if}
@@ -66,6 +68,14 @@
 </div>
 
 <style>
+  .txchip {
+    padding: 0 4px;
+    border-radius: 3px;
+    background: #d1242f;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+  }
   .block {
     position: relative;
     width: 170px;
