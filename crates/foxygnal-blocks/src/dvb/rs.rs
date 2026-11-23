@@ -4,16 +4,28 @@
 //!   51 zero bytes are put in front of the 188 data bytes, encoded, and left
 //!   out again.
 //! - [`ATSC`]: RS(207, 187, t = 10) (A/53 Part 2 §6.3.2), 48 zero bytes.
+//! - [`CCSDS`]: RS(255, 223, t = 16) (CCSDS 131.0-B §4), in the
+//!   conventional basis; `crate::ccsds::rs` adds the dual basis, interleaving
+//!   and shortening (virtual fill).
 //!
-//! Both use the field GF(2⁸) with p(x) = x⁸ + x⁴ + x³ + x² + 1 (`0x11D`),
-//! α = `0x02`, and the code generator g(x) = (x + α⁰)(x + α¹)…(x + α^(2t−1)).
+//! A code is defined by its field polynomial p(x), a primitive element β
+//! (given as a power of α = `0x02`), and its first consecutive root: the
+//! generator is g(x) = (x + β^f)(x + β^(f+1))…(x + β^(f+2t−1)).
+//!
+//! | code | p(x) | β | f |
+//! |---|---|---|---|
+//! | DVB, ATSC | x⁸ + x⁴ + x³ + x² + 1 (`0x11D`) | α | 0 |
+//! | CCSDS | x⁸ + x⁷ + x² + x + 1 (`0x187`) | α¹¹ | 112 |
+//!
 //! Systematic: the data bytes, then the parity bytes. The first byte sent is
 //! the coefficient of the highest power.
 //!
-//! The decoder computes the 2t syndromes (one table lookup per byte and
-//! syndrome), and only when one is not zero runs Berlekamp-Massey, a Chien
-//! search over the positions that exist and Forney's formula. Up to t wrong
-//! bytes anywhere in the codeword are corrected. Nothing allocates.
+//! Each [`Code`] keeps its field's tables with logarithms to the base β, so
+//! the decoder is the textbook one whatever β is: it computes the 2t
+//! syndromes (one table lookup per byte and syndrome), and only when one is
+//! not zero runs Berlekamp-Massey, a Chien search over the positions that
+//! exist and Forney's formula. Up to t wrong bytes anywhere in the codeword
+//! are corrected. Nothing allocates.
 
 /// DVB bytes per codeword.
 pub const N: usize = 204;
@@ -25,62 +37,63 @@ pub const PARITY: usize = N - K;
 pub const T: usize = PARITY / 2;
 
 /// The most parity bytes a [`Code`] may have.
-pub const MAX_PARITY: usize = 20;
+pub const MAX_PARITY: usize = 32;
 const MAX_T: usize = MAX_PARITY / 2;
 
-/// Field polynomial without the x⁸ term.
-const POLY: u16 = 0x11D;
+/// The DVB/ATSC field polynomial.
+pub const POLY_DVB: u16 = 0x11D;
+/// The CCSDS field polynomial.
+pub const POLY_CCSDS: u16 = 0x187;
 
-/// Field lookup tables, all built at compile time.
+/// Field lookup tables, built at compile time, with logarithms to a chosen
+/// primitive element β.
 pub struct Gf {
-    /// α^i for i in 0..512 (doubled so a sum of two logs needs no modulo).
+    /// β^i for i in 0..512 (doubled so a sum of two logs needs no modulo).
     pub exp: [u8; 512],
-    /// log_α(x); `log[0]` is unused.
+    /// log_β(x); `log[0]` is unused.
     pub log: [u8; 256],
-    /// `mul_alpha[j][x] = x·α^j`, for the syndromes.
-    mul_alpha: [[u8; 256]; MAX_PARITY],
 }
 
-pub static GF: Gf = Gf::build();
-
-const fn tables() -> ([u8; 512], [u8; 256]) {
-    let mut exp = [0u8; 512];
-    let mut log = [0u8; 256];
-    let mut x: u16 = 1;
-    let mut i = 0;
-    while i < 255 {
-        exp[i] = x as u8;
-        exp[i + 255] = x as u8;
-        log[x as usize] = i as u8;
-        x <<= 1;
-        if x & 0x100 != 0 {
-            x ^= POLY;
-        }
-        i += 1;
-    }
-    exp[510] = exp[0];
-    exp[511] = exp[1];
-    (exp, log)
-}
+/// GF(2⁸) with `0x11D` and β = α: DVB and ATSC.
+pub static GF: Gf = Gf::new(POLY_DVB, 1);
 
 impl Gf {
-    const fn build() -> Self {
-        let (exp, log) = tables();
-        let mut mul_alpha = [[0u8; 256]; MAX_PARITY];
-        let mut j = 0;
-        while j < MAX_PARITY {
-            let mut v = 1;
-            while v < 256 {
-                mul_alpha[j][v] = exp[log[v] as usize + j];
-                v += 1;
+    /// The field with polynomial `poly` (the x⁸ term included) and
+    /// β = α^`prim`, which must be primitive (`prim` coprime with 255).
+    pub const fn new(poly: u16, prim: usize) -> Self {
+        assert!(
+            poly & 0x100 != 0
+                && !prim.is_multiple_of(3)
+                && !prim.is_multiple_of(5)
+                && !prim.is_multiple_of(17)
+        );
+        // Powers of α first.
+        let mut alpha = [0u8; 255];
+        let mut x: u16 = 1;
+        let mut i = 0;
+        while i < 255 {
+            alpha[i] = x as u8;
+            x <<= 1;
+            if x & 0x100 != 0 {
+                x ^= poly;
             }
-            j += 1;
+            i += 1;
         }
-        Gf {
-            exp,
-            log,
-            mul_alpha,
+        assert!(x == 1, "the field polynomial is not primitive");
+        // Then β^i = α^(prim·i).
+        let mut exp = [0u8; 512];
+        let mut log = [0u8; 256];
+        let mut i = 0;
+        while i < 255 {
+            let v = alpha[(i * prim) % 255];
+            exp[i] = v;
+            exp[i + 255] = v;
+            log[v as usize] = i as u8;
+            i += 1;
         }
+        exp[510] = exp[0];
+        exp[511] = exp[1];
+        Gf { exp, log }
     }
 
     #[inline]
@@ -102,18 +115,18 @@ impl Gf {
         }
     }
 
-    /// α^e for any e ≥ 0.
+    /// β^e for any e ≥ 0.
     #[inline]
     pub fn pow(&self, e: usize) -> u8 {
         self.exp[e % 255]
     }
-}
 
-const fn mul_const(exp: &[u8; 512], log: &[u8; 256], a: u8, b: u8) -> u8 {
-    if a == 0 || b == 0 {
-        0
-    } else {
-        exp[log[a as usize] as usize + log[b as usize] as usize]
+    const fn mul_const(&self, a: u8, b: u8) -> u8 {
+        if a == 0 || b == 0 {
+            0
+        } else {
+            self.exp[self.log[a as usize] as usize + self.log[b as usize] as usize]
+        }
     }
 }
 
@@ -121,47 +134,74 @@ const fn mul_const(exp: &[u8; 512], log: &[u8; 256], a: u8, b: u8) -> u8 {
 pub struct Code {
     n: usize,
     parity: usize,
+    /// First consecutive root, as a power of β.
+    fcr: usize,
+    gf: Gf,
     /// Generator coefficients: `generator[d]` is the coefficient of x^d.
     generator: [u8; MAX_PARITY + 1],
     /// log of `generator[d]` for d < parity (all are non-zero).
     gen_log: [u8; MAX_PARITY],
+    /// `root_mul[j][x] = x·β^(fcr + j)`, for the syndromes.
+    root_mul: [[u8; 256]; MAX_PARITY],
 }
 
 /// RS(204, 188): DVB.
 pub static DVB: Code = Code::new(N, PARITY);
 /// RS(207, 187): ATSC.
 pub static ATSC: Code = Code::new(207, 20);
+/// RS(255, 223) of CCSDS, conventional basis, not shortened.
+pub static CCSDS: Code = Code::with_field(255, 32, POLY_CCSDS, 11, 112);
 
 impl Code {
+    /// A code over DVB's field (`0x11D`, β = α, first root α⁰).
     pub const fn new(n: usize, parity: usize) -> Self {
+        Self::with_field(n, parity, POLY_DVB, 1, 0)
+    }
+
+    /// A code over the field `poly` with β = α^`prim` and the generator's
+    /// first root β^`fcr`.
+    pub const fn with_field(n: usize, parity: usize, poly: u16, prim: usize, fcr: usize) -> Self {
         assert!(parity.is_multiple_of(2) && parity <= MAX_PARITY && n <= 255 && n > parity);
-        let (exp, log) = tables();
-        // g(x) = Π (x + α^i), built up one factor at a time.
+        let gf = Gf::new(poly, prim);
+        // g(x) = Π (x + β^(fcr + i)), built up one factor at a time.
         let mut g = [0u8; MAX_PARITY + 1];
         g[0] = 1;
         let mut i = 0;
         while i < parity {
-            let r = exp[i];
+            let r = gf.exp[(fcr + i) % 255];
             // Multiply by (x + r): new[d] = g[d − 1] + r·g[d].
             let mut d = i + 1;
             while d > 0 {
-                g[d] = g[d - 1] ^ mul_const(&exp, &log, r, g[d]);
+                g[d] = g[d - 1] ^ gf.mul_const(r, g[d]);
                 d -= 1;
             }
-            g[0] = mul_const(&exp, &log, r, g[0]);
+            g[0] = gf.mul_const(r, g[0]);
             i += 1;
         }
         let mut gen_log = [0u8; MAX_PARITY];
         let mut d = 0;
         while d < parity {
-            gen_log[d] = log[g[d] as usize];
+            gen_log[d] = gf.log[g[d] as usize];
             d += 1;
+        }
+        let mut root_mul = [[0u8; 256]; MAX_PARITY];
+        let mut j = 0;
+        while j < parity {
+            let mut v = 1;
+            while v < 256 {
+                root_mul[j][v] = gf.exp[gf.log[v] as usize + (fcr + j) % 255];
+                v += 1;
+            }
+            j += 1;
         }
         Code {
             n,
             parity,
+            fcr,
+            gf,
             generator: g,
             gen_log,
+            root_mul,
         }
     }
 
@@ -175,9 +215,19 @@ impl Code {
         self.n - self.parity
     }
 
+    /// Parity bytes per codeword.
+    pub fn parity(&self) -> usize {
+        self.parity
+    }
+
     /// Correctable byte errors.
     pub fn t(&self) -> usize {
         self.parity / 2
+    }
+
+    /// The code's field (logarithms to the base β).
+    pub fn field(&self) -> &Gf {
+        &self.gf
     }
 
     /// The generator's coefficients, constant term first.
@@ -189,11 +239,20 @@ impl Code {
     /// `n` bytes long.
     pub fn encode(&self, cw: &mut [u8]) {
         assert_eq!(cw.len(), self.n);
-        let gf = &GF;
-        let p = self.parity;
         let k = self.k();
+        let (data, parity) = cw.split_at_mut(k);
+        self.encode_parts(data.iter().copied(), parity);
+    }
+
+    /// Compute the parity of the data bytes `data` (any count up to k: a
+    /// shorter code, the missing leading bytes being zero) into `parity`
+    /// (`2t` bytes).
+    pub fn encode_parts(&self, data: impl IntoIterator<Item = u8>, parity: &mut [u8]) {
+        let gf = &self.gf;
+        let p = self.parity;
+        assert_eq!(parity.len(), p);
         let mut par = [0u8; MAX_PARITY];
-        for &b in &cw[..k] {
+        for b in data {
             let fb = b ^ par[0];
             if fb == 0 {
                 par.copy_within(1..p, 0);
@@ -206,7 +265,7 @@ impl Code {
                 par[p - 1] = gf.exp[lf + self.gen_log[0] as usize];
             }
         }
-        cw[k..].copy_from_slice(&par[..p]);
+        parity.copy_from_slice(&par[..p]);
     }
 
     /// Correct `cw` (`n` bytes) in place. Returns the number of bytes
@@ -214,19 +273,28 @@ impl Code {
     /// errors, as far as can be told), in which case `cw` is left as it was.
     pub fn decode(&self, cw: &mut [u8]) -> Result<usize, Uncorrectable> {
         assert_eq!(cw.len(), self.n);
-        let gf = &GF;
+        self.decode_shortened(cw)
+    }
+
+    /// [`Self::decode`] for a codeword shortened further than `n`: `cw` holds
+    /// the last `cw.len()` (> 2t) bytes of an `n`-byte codeword whose leading
+    /// bytes are zero.
+    pub fn decode_shortened(&self, cw: &mut [u8]) -> Result<usize, Uncorrectable> {
+        let gf = &self.gf;
         let p = self.parity;
         let t = self.t();
-        let n = self.n;
-        // Syndromes S_j = c(α^j), by Horner's rule.
+        let n = cw.len();
+        assert!(n > p && n <= self.n);
+        // Syndromes S_j = c(β^(fcr + j)), by Horner's rule.
         let mut s = [0u8; MAX_PARITY];
         match p {
-            16 => syndromes::<16>(cw, &mut s),
-            20 => syndromes::<20>(cw, &mut s),
+            16 => self.syndromes::<16>(cw, &mut s),
+            20 => self.syndromes::<20>(cw, &mut s),
+            32 => self.syndromes::<32>(cw, &mut s),
             _ => {
                 for &b in cw.iter() {
                     for (j, sj) in s[..p].iter_mut().enumerate() {
-                        *sj = gf.mul_alpha[j][*sj as usize] ^ b;
+                        *sj = self.root_mul[j][*sj as usize] ^ b;
                     }
                 }
             }
@@ -278,13 +346,15 @@ impl Code {
             *o = v;
         }
 
+        // X^(1 − fcr) in Forney's formula, as a power of X.
+        let xpow = (256 - self.fcr % 255) % 255;
         // Chien search over the positions that exist (the shortened code's
         // leading positions are always zero), then Forney.
         let mut pos = [0usize; MAX_T];
         let mut val = [0u8; MAX_T];
         let mut found = 0;
         for k in 0..n {
-            // Byte k is the coefficient of x^e.
+            // Byte k is the coefficient of x^e, X = β^e.
             let e = n - 1 - k;
             let xinv = (255 - e) % 255; // log of X⁻¹
             let mut sum = 0u8;
@@ -299,7 +369,7 @@ impl Code {
             if found == t {
                 return Err(Uncorrectable);
             }
-            // e = X·Ω(X⁻¹) / Λ'(X⁻¹), first root α⁰.
+            // e = X^(1 − fcr)·Ω(X⁻¹) / Λ'(X⁻¹).
             let mut om = 0u8;
             for (i, &c) in omega[..p].iter().enumerate() {
                 if c != 0 {
@@ -317,7 +387,7 @@ impl Code {
                 return Err(Uncorrectable);
             }
             pos[found] = k;
-            val[found] = gf.mul(gf.pow(e), gf.div(om, der));
+            val[found] = gf.mul(gf.pow(e * xpow), gf.div(om, der));
             found += 1;
         }
         if found != l {
@@ -328,19 +398,19 @@ impl Code {
         }
         Ok(found)
     }
-}
 
-/// The first `P` syndromes (a fixed count, so the inner loop unrolls).
-#[inline]
-fn syndromes<const P: usize>(cw: &[u8], s: &mut [u8; MAX_PARITY]) {
-    let gf = &GF;
-    let mut acc = [0u8; P];
-    for &b in cw {
-        for (j, sj) in acc.iter_mut().enumerate() {
-            *sj = gf.mul_alpha[j][*sj as usize] ^ b;
+    /// The first `P` syndromes (a fixed count, so the inner loop unrolls).
+    #[inline]
+    fn syndromes<const P: usize>(&self, cw: &[u8], s: &mut [u8; MAX_PARITY]) {
+        let mut acc = [0u8; P];
+        let tab: &[[u8; 256]; P] = self.root_mul[..P].try_into().unwrap();
+        for &b in cw {
+            for (sj, t) in acc.iter_mut().zip(tab) {
+                *sj = t[*sj as usize] ^ b;
+            }
         }
+        s[..P].copy_from_slice(&acc);
     }
-    s[..P].copy_from_slice(&acc);
 }
 
 /// Compute the 16 parity bytes of `cw[..188]` into `cw[188..]` (DVB).
@@ -406,17 +476,18 @@ mod tests {
     #[test]
     fn codewords_have_zero_syndromes() {
         let mut seed = 0x1234_5678_9abc_def1;
-        for code in [&DVB, &ATSC] {
+        for code in [&DVB, &ATSC, &CCSDS] {
             for _ in 0..20 {
                 let mut cw = codeword(code, &mut seed);
                 let orig = cw.clone();
                 assert_eq!(code.decode(&mut cw), Ok(0));
                 assert_eq!(cw, orig);
                 // Every root of g(x) is a root of the codeword.
+                let gf = code.field();
                 for j in 0..code.n() - code.k() {
                     let mut v = 0u8;
                     for &b in &cw {
-                        v = GF.mul(v, GF.pow(j)) ^ b;
+                        v = gf.mul(v, gf.pow(code.fcr + j)) ^ b;
                     }
                     assert_eq!(v, 0, "root α^{j}");
                 }
@@ -427,7 +498,7 @@ mod tests {
     #[test]
     fn corrects_up_to_t_byte_errors() {
         let mut seed = 0xfeed_beef_0bad_cafe;
-        for code in [&DVB, &ATSC] {
+        for code in [&DVB, &ATSC, &CCSDS] {
             let n = code.n();
             for errors in 1..=code.t() {
                 for _ in 0..30 {
@@ -460,13 +531,14 @@ mod tests {
     #[test]
     fn too_many_errors_are_detected_and_left_alone() {
         let mut seed = 42;
-        for code in [&DVB, &ATSC] {
+        for code in [&DVB, &ATSC, &CCSDS] {
             let mut failed = 0;
             for _ in 0..200 {
                 let orig = codeword(code, &mut seed);
                 let mut cw = orig.clone();
+                let step = code.n() / (code.t() + 4);
                 for p in 0..code.t() + 4 {
-                    cw[p * 15] ^= (rng(&mut seed) % 255 + 1) as u8;
+                    cw[p * step] ^= (rng(&mut seed) % 255 + 1) as u8;
                 }
                 let bad = cw.clone();
                 match code.decode(&mut cw) {
@@ -479,6 +551,61 @@ mod tests {
                 }
             }
             assert!(failed > 190, "{failed}");
+        }
+    }
+
+    #[test]
+    fn ccsds_field_and_generator() {
+        // α = 0x02 in 0x187, β = α¹¹. CCSDS 131.0-B §4.2.2: g(x) is
+        // symmetric (its roots come in reciprocal pairs, 112 + 143 = 255).
+        let gf = CCSDS.field();
+        let alpha11 = {
+            let mut x: u16 = 1;
+            for _ in 0..11 {
+                x <<= 1;
+                if x & 0x100 != 0 {
+                    x ^= POLY_CCSDS;
+                }
+            }
+            x as u8
+        };
+        assert_eq!(gf.exp[1], alpha11);
+        let g = CCSDS.generator();
+        assert_eq!(g.len(), 33);
+        for d in 0..=32 {
+            assert_eq!(g[d], g[32 - d], "x^{d}");
+        }
+        // The published coefficients (conventional basis), x³² first:
+        // 1, 0x5B, 0x7F, 0x56, 0x10, 0x1E, … (Berlekamp's code).
+        assert_eq!(g[27..], [0x1E, 0x10, 0x56, 0x7F, 0x5B, 1]);
+    }
+
+    #[test]
+    fn shortened_decoding_matches_zero_padding() {
+        let mut seed = 77;
+        let code = &CCSDS;
+        for short in [0usize, 1, 33, 100] {
+            let mut full = vec![0u8; 255];
+            for b in &mut full[short..223] {
+                *b = rng(&mut seed) as u8;
+            }
+            code.encode(&mut full);
+            assert!(full[..short].iter().all(|&b| b == 0));
+            let mut parity = [0u8; 32];
+            code.encode_parts(full[short..223].iter().copied(), &mut parity);
+            assert_eq!(parity, full[223..]);
+            let orig = full[short..].to_vec();
+            let mut cw = orig.clone();
+            for k in 0..16 {
+                let at = (k * 13 + short) % cw.len();
+                cw[at] ^= 0x5A;
+            }
+            assert_eq!(
+                code.decode_shortened(&mut cw),
+                Ok(16),
+                "shortened by {short}"
+            );
+            assert_eq!(cw, orig);
         }
     }
 }

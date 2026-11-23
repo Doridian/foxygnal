@@ -96,6 +96,14 @@ against GNU Radio's gr-dtv in both directions. Templates: "ATSC loopback"
 Video instrument plays the MPEG-2 video with its AC-3 sound, and picks between subchannels
 and sound tracks.
 
+**Weather satellite links (CCSDS).** The link layer that Meteor-M LRPT, Metop AHRPT and GOES
+HRIT share: a deframer that finds the sync marker through any phase the carrier loop locked
+to, decodes the convolutional code (Viterbi), removes the randomizer and corrects the
+frames with Reed-Solomon (checked against libfec and GNU Radio), then reassembles CCSDS space
+packets per virtual channel. Frames come out as `.cadu` data, so recordings from other tools
+play straight into it. The satellites' own decoders build on it. Template: "CCSDS loopback"
+(`examples/ccsds-loopback.fox.toml`).
+
 **Watching digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
 demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
 you pick with its sound (choosing between sound tracks by language), and shows codecs,

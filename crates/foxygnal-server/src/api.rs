@@ -351,6 +351,12 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/atsc-rx.fox.toml"),
     },
     Example {
+        name: "ccsds-loopback",
+        title: "CCSDS loopback (weather satellite link)",
+        description: "Random bytes → CCSDS space packets and frames → Reed-Solomon, randomizer, rate 1/2 code, QPSK at 72 kBd → noise and a 300 Hz offset → RRC, clock recovery, Costas loop → CCSDS deframer → packets in the log, with the deframer's lock, RS and Viterbi statistics. The link layer Meteor-M LRPT, Metop AHRPT and GOES HRIT share. No hardware needed.",
+        toml: include_str!("../../../examples/ccsds-loopback.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",

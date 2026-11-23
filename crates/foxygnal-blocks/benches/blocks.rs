@@ -489,6 +489,51 @@ fn atsc_demodulator(c: &mut Criterion) {
     bench_chain(c, "graph", "atsc_8vsb_12msps", chain);
 }
 
+/// The CCSDS deframer on QPSK symbols (one per symbol), rate 1/2 code, RS
+/// I = 4, 1024-byte CADUs, Eb/N0 about 4 dB, rotated by 90°: the sync search
+/// (every symmetry), Viterbi, derandomizer and RS. Throughput is symbols/s
+/// (Metop AHRPT is 2.33 MSym/s, GOES HRIT 927 kSym/s BPSK).
+fn ccsds_deframer(c: &mut Criterion) {
+    use foxygnal_blocks::testing::VectorSink;
+    let reg = foxygnal_blocks::registry();
+    let bytes: Vec<u8> = (0..300_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8)
+        .collect();
+    let mut fg = Flowgraph::new();
+    let src = fg.add("src", VectorSource::instance(bytes));
+    let f = fg.add(
+        "framer",
+        reg.build("ccsds_framer", &params(json!({}))).unwrap(),
+    );
+    let m = fg.add(
+        "mod",
+        reg.build("ccsds_modulator", &params(json!({}))).unwrap(),
+    );
+    let (sink, out) = VectorSink::<Complex32>::instance();
+    let sink = fg.add("sink", sink);
+    fg.connect(src, 0, f, 0).unwrap();
+    fg.connect(f, 0, m, 0).unwrap();
+    fg.connect(m, 0, sink, 0).unwrap();
+    fg.start().unwrap().wait().unwrap();
+    let clean = out.lock().unwrap().clone();
+    let nz = cnoise(clean.len(), 11);
+    // Es/N0 = Eb/N0 ≈ 4 dB: σ² = 0.4 in all; cnoise is uniform with σ ≈ 0.29
+    // per component.
+    let k = (0.4f32 / 2.0).sqrt() / 0.2887;
+    let data: Vec<Complex32> = clean
+        .iter()
+        .zip(&nz)
+        .map(|(&x, &n)| Complex32::new(-x.im, x.re) + n * k)
+        .collect();
+    let chain = Chain {
+        data,
+        rate: 72_000.0,
+        blocks: vec![("ccsds_deframer", json!({}))],
+        sink_type: "u8",
+    };
+    bench_chain(c, "graph", "ccsds_deframer_qpsk_r12", chain);
+}
+
 criterion_group!(
     benches,
     blocks,
@@ -496,6 +541,7 @@ criterion_group!(
     fm_receiver,
     dvbs_demodulator,
     dvbt_demodulator,
-    atsc_demodulator
+    atsc_demodulator,
+    ccsds_deframer
 );
 criterion_main!(benches);

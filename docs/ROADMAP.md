@@ -308,11 +308,15 @@ Goal: point a small dish (a Discovery Dish with the L-band weather feed, 1675–
 any 60–100 cm dish with an LNA) at GOES and watch the full-disk pictures and NWS bulletins
 arrive; with a rotator or a steady hand, the polar orbiters too.
 
-- [ ] A shared CCSDS layer (`blocks/src/ccsds/`): attached sync marker search with BPSK/QPSK
-      phase-ambiguity resolution, the CCSDS randomizer, Viterbi r=1/2 K=7 (the DVB decoder
-      with the second output inverted), RS(255,223) with the dual basis and interleaving
-      depth 1–5, VCDU / M_PDU / CCSDS packet reassembly, and frame statistics (lock, RS
-      corrections, Viterbi BER) for the UI
+- [x] A shared CCSDS layer (`blocks/src/ccsds/`): attached sync marker search with BPSK/QPSK
+      phase-ambiguity resolution (on the encoded marker for coded links), the CCSDS
+      randomizer, Viterbi r=1/2 K=7 (the DVB decoder with the second output inverted),
+      RS(255,223) with the dual basis, interleaving depth 1–5 and virtual fill (DVB's RS made
+      generic over the field and roots), NRZ-M, VCDU / M_PDU / CCSDS packet reassembly, and
+      frame statistics (lock, RS corrections, Viterbi BER) for the UI. Blocks
+      `ccsds_deframer` (symbols → CADUs), `ccsds_packets`, and `ccsds_framer` /
+      `ccsds_modulator` for the transmit side; RS and the code checked against libfec and
+      GNU Radio; "CCSDS loopback" template
 - [ ] GOES-R HRIT / LRIT (GOES-18/19, 1694.1 MHz, BPSK 927 kSym/s): HRIT file layer, Rice
       (CCSDS 121) decompression, full disk, CONUS, mesoscale and the false-colour products
       as pictures; EMWIN (NWS text, warnings, charts) as messages and files. "GOES HRIT"

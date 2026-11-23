@@ -1,0 +1,192 @@
+# CCSDS loopback: the link layer weather satellites share (Meteor-M LRPT, Metop
+# AHRPT, GOES HRIT), from bytes to packets and back, with no radio.
+#
+#   random bytes ─▶ framer ─▶ modulator ─▶ RRC ×4 ─×300 Hz─+noise─▶ RRC ─▶ clock
+#                  (packets,  (RS, randomizer,                        recovery
+#                   VCDUs)     r=1/2 code, QPSK)                         │
+#        log ◀── packets ◀── deframer ◀── Costas loop (order 4) ◀───────┘
+#             └◀── status ◀──┘
+#
+# The framer cuts the bytes into 1000-byte space packets (APID 100) and packs
+# them into 1024-byte CADUs (I = 4 Reed-Solomon, the CCSDS randomizer, rate 1/2
+# convolutional code), QPSK at 72 kBd like Meteor-M LRPT. The receive side is
+# the usual PSK chain of standard blocks; the deframer finds the sync marker
+# whatever phase the Costas loop locked to. `log` shows one line per packet
+# (`scid=0 vcid=1 apid=100 seq=… len=1000 data=…`) and the deframer's status
+# once a second (`state=lock frames=… rs_corrected=… ber=…`): `ber` is the
+# channel's bit error rate that the Viterbi decoder corrected.
+#
+# Raise `noise` to find the threshold: the signal has unit power over 4
+# samples a symbol and QPSK at rate 1/2 carries one data bit a symbol, so
+# Eb/N0 = 10·log10(4 / noise²) dB: 1.0 is 6 dB, 1.4 about 3 dB. Below that
+# the Costas loop starts to slip (each slip costs a few frames while the
+# deframer finds the new phase). Watch the constellation on the wire into the
+# deframer.
+#
+#   foxygnal run examples/ccsds-loopback.fox.toml
+
+[vars]
+symbol_rate = "72k"
+sps = 4
+offset = 300
+noise = 1.0
+
+[[block]]
+id = "bits"
+kind = "noise_source"
+params = { type = "f32", amplitude = 1.0, seed = 1 }
+ui = { x = 50, y = 60 }
+
+[[block]]
+id = "bytes"
+kind = "binary_slicer"
+params = { threshold = 0.0 }
+ui = { x = 280, y = 60 }
+
+[[block]]
+id = "framer"
+kind = "ccsds_framer"
+params = { spacecraft = 0, vcid = 1, apid = 100, packet_len = 1000 }
+ui = { x = 500, y = 60 }
+
+[[block]]
+id = "mod"
+kind = "ccsds_modulator"
+params = { modulation = "qpsk", code = "conv", symbol_rate = "$symbol_rate" }
+ui = { x = 740, y = 60 }
+
+[[block]]
+id = "realtime"
+kind = "throttle"
+params = { type = "c32", sample_rate = 0 }
+ui = { x = 980, y = 60 }
+
+[[block]]
+id = "shape"
+kind = "rrc_filter"
+params = { type = "c32", mode = "interpolate", sps = "$sps", rolloff = 0.5, span = 11 }
+ui = { x = 1200, y = 60 }
+
+[[block]]
+id = "carrier"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = "$offset", amplitude = 1.0, sample_rate = "$symbol_rate * $sps" }
+ui = { x = 1200, y = 220 }
+
+[[block]]
+id = "shift"
+kind = "multiply"
+params = { type = "c32" }
+ui = { x = 1450, y = 120 }
+
+[[block]]
+id = "noise"
+kind = "noise_source"
+params = { type = "c32", amplitude = "$noise", seed = 0 }
+ui = { x = 1450, y = 280 }
+
+[[block]]
+id = "channel"
+kind = "add"
+params = { type = "c32" }
+ui = { x = 1680, y = 160 }
+
+[[block]]
+id = "matched"
+kind = "rrc_filter"
+params = { type = "c32", mode = "filter", sps = "$sps", rolloff = 0.5, span = 11 }
+ui = { x = 50, y = 440 }
+
+[[block]]
+id = "clock"
+kind = "clock_recovery"
+params = { type = "c32", sps = "$sps", loop_bw = 0.01, ted = "gardner" }
+ui = { x = 300, y = 440 }
+
+[[block]]
+id = "carrier_loop"
+kind = "costas_loop"
+params = { order = "4", loop_bw = 0.005 }
+ui = { x = 550, y = 440 }
+
+[[block]]
+id = "deframer"
+kind = "ccsds_deframer"
+params = { modulation = "qpsk", code = "conv", nrzm = false, randomizer = true, rs_interleave = 4, dual_basis = true, frame_len = 1020, bad_frames = "drop" }
+ui = { x = 800, y = 440 }
+
+[[block]]
+id = "packets"
+kind = "ccsds_packets"
+params = { frame_len = 1020, rs_interleave = 4, insert_zone = 0, trailer = 0, format = "text" }
+ui = { x = 1080, y = 400 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true, inputs = 2 }
+ui = { x = 1350, y = 460 }
+
+[[connect]]
+from = "bits.out"
+to = "bytes.in"
+
+[[connect]]
+from = "bytes.out"
+to = "framer.in"
+
+[[connect]]
+from = "framer.out"
+to = "mod.in"
+
+[[connect]]
+from = "mod.out"
+to = "realtime.in"
+
+[[connect]]
+from = "realtime.out"
+to = "shape.in"
+
+[[connect]]
+from = "shape.out"
+to = "shift.a"
+
+[[connect]]
+from = "carrier.out"
+to = "shift.b"
+
+[[connect]]
+from = "shift.out"
+to = "channel.a"
+
+[[connect]]
+from = "noise.out"
+to = "channel.b"
+
+[[connect]]
+from = "channel.out"
+to = "matched.in"
+
+[[connect]]
+from = "matched.out"
+to = "clock.in"
+
+[[connect]]
+from = "clock.out"
+to = "carrier_loop.in"
+
+[[connect]]
+from = "carrier_loop.out"
+to = "deframer.in"
+
+[[connect]]
+from = "deframer.frames"
+to = "packets.in"
+
+[[connect]]
+from = "packets.out"
+to = "log.in"
+
+[[connect]]
+from = "deframer.status"
+to = "log.in1"

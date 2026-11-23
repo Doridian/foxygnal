@@ -1086,8 +1086,9 @@ resampler ≈ 0.05 ms, the FFT 0.01 ms.
 structs (tables, encoder, Viterbi, outer decoder), `mod.rs` the two blocks and the transmit
 shaper, `rx.rs` the receiver. The RS code and the convolutional interleaver are DVB's, made
 generic: `rs::Code::new(n, parity)` (DVB is (204, 16), ATSC (207, 20); both GF(256) with
-0x11D, first root α⁰) and `ConvInterleaver::with(branches, m, inverse)` (ATSC: 52 × 4, a delay
-of 10 608 bytes, 51 bytes past a whole number of 207-byte segments).
+0x11D, first root α⁰; `Code::with_field` takes another field, primitive element and first
+root, which CCSDS uses) and `ConvInterleaver::with(branches, m, inverse)` (ATSC: 52 × 4, a
+delay of 10 608 bytes, 51 bytes past a whole number of 207-byte segments).
 
 **Signal.** 10.762238 MSym/s (4.5 MHz × 684/286) of levels ±1, ±3, ±5, ±7 in segments of 832
 symbols (4 sync, +5 −5 −5 +5, then 828 data), 313 segments a field (one field sync, 312 data
@@ -1169,6 +1170,113 @@ Viterbi decoders and 5 for RS.
 errors once the equalizer has converged, apart from a few short bursts; its MPEG-2 video and
 AC-3 play in ffmpeg. Watch the gain: the Pluto clips on strong channels long before the
 picture looks bad.
+
+## CCSDS (M15)
+
+`blocks/src/ccsds/` is the space link layer the weather satellites share (GOES HRIT/LRIT,
+Meteor-M LRPT, Metop AHRPT): CCSDS 131.0-B (synchronization and channel coding), 732.0-B
+(AOS transfer frames) and 133.0-B (space packets). Like the DVB chain it is plain structs
+that know nothing about blocks, so a satellite's demodulator can embed them, and four
+blocks on top.
+
+**Wires.** Two formats, both on `u8` wires, chosen so that everything downstream is a
+plain byte stream (as with TS and decoded messages):
+
+- **Frames are CADUs**: the attached sync marker `1A CF FC 1D`, then the codeblock
+  (`frame_len` bytes: transfer frame and Reed-Solomon parity), derandomized and corrected,
+  back to back. That is the `.cadu` format SatDump and others read and write, so
+  `file_sink` records one and `file_source` plays one (or a SatDump recording) back into
+  `ccsds_packets`. Frames RS couldn't correct are dropped, or with `bad_frames = mark` sent
+  with the inverted marker `E5 30 03 E2`, which `wire::CaduReader` reports as bad and other
+  tools skip. A per-frame header of our own would have cost that interop; the VCDU's own
+  frame counter tells a consumer what was lost.
+- **Packets are records**: `FXSP`, spacecraft id, VCID, flags (bit 0: data was lost on this
+  virtual channel before this packet), 0, then the space packet itself (its length field
+  gives the record's length). The magic lets a reader joining mid-stream resync
+  (`wire::RecordReader`), like picture rows. `ccsds_packets` writes these with `format =
+  records`, or one text line per packet (`scid=… vcid=… apid=… seq=… len=… data=<first 16
+  bytes>`) for the Messages instrument.
+
+**Codes**, reusing the DVB chain:
+
+| stage | module | details |
+|---|---|---|
+| randomizer | `randomizer` | h(x) = x⁸ + x⁷ + x⁵ + x³ + 1, all ones per codeblock; 255 bytes = 8 periods, so one 255-byte table XORed cyclically |
+| convolutional code | `conv` | DVB's K = 7 (171₈, 133₈) encoder with G2 inverted (`code = conv`) or not (`conv_noninverted`); decoding is DVB's `Viterbi` fed −G2. GNU Radio's `encode_ccsds_27_bb` sends G2 first and doesn't invert |
+| Reed-Solomon | `rs` | `dvb::rs::Code` is now generic: field polynomial, primitive element β = α^p and first root. CCSDS: `0x187`, β = α¹¹, roots β¹¹²…β¹⁴³; the code keeps its tables in base β, so Berlekamp-Massey, Chien and Forney (with X^(1−f)) are unchanged. `ccsds::rs::Codec` adds interleaving (byte j belongs to codeword j mod I), virtual fill (`decode_shortened`: the missing leading bytes are zeros) and Berlekamp's dual basis (libfec's `Taltab`/`Tal1tab`, built from the 8-byte matrix) |
+
+**Receiver** (`deframer::Deframer`, wrapped by `ccsds_deframer`): symbols in, one per symbol
+after timing and carrier recovery.
+
+1. **Soft bits**: an AGC (mean |I| or (|I| + |Q|)/2, 1/512 per symbol) scales the symbols
+   so the mean channel bit is ±40 as `i8`.
+2. **Search**: two frames' worth of symbols (plus 64 data bits of margin) are collected. For
+   every symmetry of the constellation (BPSK ±, QPSK 4 rotations × conjugate = every I/Q
+   swap) the hard channel bits are packed into `u64`s and the pattern compared at every
+   channel bit position by XOR and popcount: the ASM itself (32 bits, ≤ 5 wrong), or for
+   coded links the encoder's output for the ASM without its first 6 pairs (52 bits, which
+   don't depend on the data before, ≤ 12 wrong). It has to appear again exactly one frame
+   later; the best (symmetry, position) wins. With NRZ-M the pattern is the NRZ-M-coded ASM
+   and its complement matches too. Searching every bit position also finds the pairing of
+   coded bits (BPSK) and an ASM that starts on a Q bit. Not found: the oldest frame's worth
+   is dropped. Cost: about 16 symmetry-bit operations per channel bit, only while unlocked.
+3. **Lock**: the buffer is replayed from 64 data bits before the first ASM through the
+   symmetry, the pairing, the Viterbi decoder (so its state has settled at the ASM),
+   NRZ-M decoding, and the frame grid.
+4. **Frames**: each slot of the grid is checked for the ASM (≤ 6 wrong bits). An inverted
+   ASM flips the data polarity: an uncoded link's 180° slip is followed without losing
+   lock (a coded link's 180° slip decodes to inverted data, which the same check catches).
+   Each frame is derandomized and RS-decoded, then handed out with its `Corrections` and
+   ASM errors. A frame without its ASM that RS can't correct either is a miss, and the grid
+   flies on (a burst on the marker alone costs nothing); 2 misses in a row (a 90° slip of
+   the carrier loop, a fade) start the search again, so a slip costs about 5 frames.
+
+At the end of a stream `flush` releases the Viterbi decoder's last 384 bits. `Stats` counts
+frames, bad frames, RS bytes corrected and codewords failed, ASM misses, locks and unlocks,
+the Viterbi decoder's re-encoded channel bit errors and the ASM bit errors. The block's
+`status` output follows DVB's: `event=lock modulation=qpsk rotation=90 conj=1` /
+`event=unlock`, and once a second of stream time (every 2²⁰ symbols if the rate isn't
+known) `t=… state=lock|search frames=… bad=… rs_corrected=… rs_failed=… ber=… asm_ber=…
+fps=…`, where `ber` is the channel BER the Viterbi decoder corrected and `asm_ber` the
+error rate of the decoded ASMs. Lines are dropped, not queued, if the log stalls.
+
+**Packets** (`vcdu::PacketAssembler`, wrapped by `ccsds_packets`): the VCDU header
+(version, spacecraft, VCID, 24-bit VC frame count), a mission's insert zone (`insert_zone`:
+2 bytes for Meteor-M LRPT) and trailer, the M_PDU's first header pointer, then packets cut
+from the stream of packet zones, per virtual channel (64 channels, each buffer reserved on
+first use and grown to the longest packet seen, at most 65 542 bytes). A gap in the frame
+count drops the packet in progress and flags the next one; a first header pointer that
+disagrees with where the packet in progress ends counts as a gap too. Fill frames (VCID 63)
+and idle packets (APID 2047) are skipped. `ccsds_packets` takes every frame of a CADU
+wire up to `frame_len` and assumes `32 × rs_interleave` bytes of parity at its end.
+
+**Transmit side**, for loopback tests and the template: `vcdu::FrameBuilder` packs packets
+into transfer frames of one virtual channel (first header pointers, idle-packet fill), and
+`encoder::Encoder` turns codeblocks into symbols (RS parity, randomizer, ASM, NRZ-M,
+convolutional code, BPSK ±1 or QPSK ±1/√2, I first). `ccsds_framer` (bytes → packets →
+CADUs with zeroed parity) and `ccsds_modulator` (CADUs → symbols at one sample per symbol;
+shape them with `rrc_filter` in interpolate mode) wrap them. The "CCSDS loopback" template
+runs random bytes through both, an RRC, a 300 Hz offset and noise, then the standard PSK
+chain (`rrc_filter`, `clock_recovery`, `costas_loop` order 4) into the deframer and
+`ccsds_packets`. A satellite's own receiver can do the same, or embed `Deframer` in a
+demodulator that also owns the front end (as DVB-S does).
+
+**Checked** against independent implementations (`scripts/ccsds-vectors.py`, fixtures in
+`tests/fixtures/ccsds`, tests in `src/ccsds/vectors.rs`): RS(255,223) codewords from libfec's
+`encode_rs_ccsds` (dual basis; whole, shortened by 33 and 95, and I = 4 and 5 codeblocks), and
+GNU Radio's `encode_ccsds_27_bb` (which our encoder matches with the pairs swapped and G2
+inverted, and our decoder decodes). The randomizer starts with the 40 bits CCSDS 131.0-B
+lists. `tests/ccsds.rs` runs packets → frames → symbols → channel → deframer → packets
+through every QPSK and BPSK symmetry, coded and uncoded, with and without NRZ-M, a 90° slip
+mid-stream (unlock, relock, the gap flagged), an uncoded 180° slip (followed), the blocks in
+a graph, and the RF chain above at Eb/N0 4 dB with a 300 Hz offset. Frame error rate
+(`threshold_sweep`, 200 frames of 1020 bytes, r = 1/2 + RS I = 4): 3–5 % frames lost at
+Eb/N0 1.5 dB, none from 2.0 dB, BPSK and QPSK alike (per bit into the code, soft symbols,
+ideal timing and carrier). Through the template's chain the Costas loop (order 4, 0.005
+rad/sample) holds lock without slips at 6 dB, and slips now and then around 3 dB. Speed
+(`cargo bench -p foxygnal-blocks --bench blocks -- ccsds`, one core, AVX2): about 33 M
+coded QPSK symbols/s through the deframer, search included, so Metop's 2.33 MSym/s uses a
+small part of a core. Not checked yet: real recordings of any satellite.
 
 ## Recording and playback (M6)
 

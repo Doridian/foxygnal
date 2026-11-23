@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod broadcast;
 pub mod browser_audio;
+pub mod ccsds;
 pub mod convert;
 pub mod demod;
 mod design;
@@ -60,4 +61,5 @@ pub fn register_all(r: &mut Registry) {
     image::register(r);
     dvb::register(r);
     sat::register(r);
+    ccsds::register(r);
 }
