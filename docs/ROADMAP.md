@@ -88,6 +88,16 @@ Goal: credible numbers on a Raspberry Pi.
 - [x] GNU Radio `.grc` import, common blocks only (`foxygnal import`, or open a `.grc` in the
   browser; [GRC_IMPORT.md](GRC_IMPORT.md))
 
+## M7: Catalog and broadcast
+
+Goal: the blocks people reach for first, and a broadcast FM receiver that shows off.
+
+- [x] Math, flow and filter blocks planned since M3: subtract, divide, conjugate, add const,
+      abs, log power; skip, selector, valve, delay; RRC, IIR biquad, DC blocker, Hilbert
+- [x] Network I/O: UDP and TCP sources and sinks (ZeroMQ skipped: no mature pure-Rust PUB/SUB)
+- [x] Broadcast FM stereo and RDS (PS, RadioText, clock), stereo browser audio, "FM stereo + RDS" template
+- [x] Easier wire selection in the editor; resamplers place tags exactly
+
 ## Open questions
 
 - **Plugin strategy** (M6). WASM gives sandboxing and portability at some per-call cost.

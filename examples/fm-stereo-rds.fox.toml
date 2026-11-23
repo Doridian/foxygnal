@@ -1,0 +1,98 @@
+# Live broadcast FM in stereo, with RDS: station name, RadioText, programme type
+# and clock time.
+#
+# The FM demodulator runs without de-emphasis so its output is the flat MPX
+# signal: the stereo decoder takes the 19 kHz pilot and the 38 kHz L−R from it,
+# the RDS decoder the 57 kHz data subcarrier (the 240 kS/s channel carries
+# both). Click the wire into the log and choose Messages to read the RDS lines.
+# Set `deemphasis` on the stereo decoder to 75us in the Americas and Korea.
+#
+#   2.4 MS/s ──xlate ÷10──▶ 240 kS/s ──FM demod (flat)──┬─▶ stereo ──L/R──▶ 48 kS/s stereo ──▶ browser
+#                                                       └─▶ RDS ──▶ log
+#
+#   foxygnal serve   (then open the "FM stereo + RDS" template)
+
+[vars]
+station = "100.3M"
+offset = "250k"
+samp_rate = "2.4M"
+audio_rate = "48k"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$station - $offset", sample_rate = "$samp_rate", gain = 30.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "channel"
+kind = "freq_xlating_fir"
+params = { offset = "$offset", cutoff = 100000.0, transition = 40000.0, decimation = 10, window = "hamming" }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "fm_demod"
+params = { deviation = 75000.0, deemphasis = "off" }
+ui = { x = 700, y = 120 }
+
+[[block]]
+id = "stereo"
+kind = "fm_stereo"
+params = { audio_rate = "$audio_rate", deemphasis = "50us", mode = "auto" }
+ui = { x = 1030, y = 60 }
+
+[[block]]
+id = "lr"
+kind = "f32_pair_to_c32"
+ui = { x = 1350, y = 60 }
+
+[[block]]
+id = "audio"
+kind = "browser_audio"
+params = { type = "c32", pace = false }
+ui = { x = 1680, y = 60 }
+
+[[block]]
+id = "rds"
+kind = "rds_decoder"
+params = { fix_errors = true, standard = "rds", verbose = false }
+ui = { x = 1030, y = 240 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = false }
+ui = { x = 1350, y = 240 }
+
+[[connect]]
+from = "sdr.out"
+to = "channel.in"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.out"
+to = "stereo.in"
+
+[[connect]]
+from = "stereo.left"
+to = "lr.re"
+
+[[connect]]
+from = "stereo.right"
+to = "lr.im"
+
+[[connect]]
+from = "lr.out"
+to = "audio.in"
+
+[[connect]]
+from = "demod.out"
+to = "rds.in"
+
+[[connect]]
+from = "rds.out"
+to = "log.in"

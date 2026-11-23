@@ -37,7 +37,9 @@ cargo build --release --features embed-ui
 
 **Listening** needs nothing extra: the `browser_audio` block plays in the browser tab that
 pressed Run (try the "Live FM radio" template). Build with `--release` for real-time graphs;
-debug builds are too slow for a 2.4 MS/s receiver.
+debug builds are too slow for a 2.4 MS/s receiver. The "FM stereo + RDS" template
+(`examples/fm-stereo-rds.fox.toml`) plays a station in stereo and decodes its RDS: station
+name, RadioText, programme type and clock time, shown in the Messages instrument.
 
 **Native audio** (sound card sink and source) is behind the `audio` cargo feature, off by default
 because on Linux it needs the ALSA headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel`

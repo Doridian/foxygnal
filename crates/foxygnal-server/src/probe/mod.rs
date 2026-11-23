@@ -41,7 +41,8 @@ pub enum ProbeConfig {
     Spectrum(SpectrumOptions),
     Constellation(ConstellationOptions),
     Meter {},
-    /// Every sample of a real (f32/i16/u8) stream, for playback in the browser.
+    /// Every sample of a stream, for playback in the browser: real wires are
+    /// mono, c32 wires stereo (real part left, imaginary part right).
     Audio {},
     /// The lines of a `u8` wire carrying UTF-8 text (decoded messages).
     Text {},
@@ -71,12 +72,8 @@ impl ProbeConfig {
             }
             Self::Constellation(o) => Box::new(constellation::Constellation::new(o)),
             Self::Meter {} => Box::new(meter::Meter::new(complex)),
-            Self::Audio {} if complex => {
-                return Err(format!(
-                    "Audio needs a real wire (f32); this one carries {ty}. Demodulate it first."
-                ));
-            }
-            Self::Audio {} => Box::new(audio::Audio::default()),
+            // c32 is stereo audio: real part left, imaginary part right.
+            Self::Audio {} => Box::new(audio::Audio::new(complex)),
             Self::Text {} if ty != StreamType::U8 => {
                 return Err(format!(
                     "Messages need a text (u8) wire, such as a decoder's output; this one \

@@ -19,19 +19,19 @@ from = "sum.out"
 id = "tone"
 kind = "signal_source"
 params = { type = "c32", waveform = "sine", frequency = "$freq", amplitude = "$amplitude", sample_rate = "$rate" }
-ui = { x = 40, y = 40 }
+ui = { x = 50, y = 40 }
 
 [[block]]
 id = "noise"
 kind = "noise_source"
 params = { type = "c32", amplitude = "$noise" }
-ui = { x = 40, y = 200 }
+ui = { x = 50, y = 200 }
 
 [[block]]
 id = "sum"
 kind = "add"
 params = { type = "c32" }
-ui = { x = 300, y = 120 }
+ui = { x = 390, y = 120 }
 
 [[connect]]
 from = "tone.out"

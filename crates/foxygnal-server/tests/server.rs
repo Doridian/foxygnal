@@ -456,6 +456,68 @@ to = "speaker.in"
     }
 }
 
+/// Stereo browser audio: a c32 wire's frames are flagged stereo and carry
+/// interleaved L (real), R (imaginary) pairs, every one of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_audio_streams_stereo_pairs() {
+    use foxygnal_server::probe::Outgoing;
+    use foxygnal_server::session::Command;
+
+    let s = session();
+    s.set_graph(
+        1,
+        graph(
+            r#"
+[[block]]
+id = "tone"
+kind = "signal_source"
+params = { type = "c32", sample_rate = 48000.0, frequency = 1000.0 }
+[[block]]
+id = "speaker"
+kind = "browser_audio"
+params = { type = "c32" }
+[[connect]]
+from = "tone.out"
+to = "speaker.in"
+"#,
+        ),
+        None,
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    s.hub().add_client(7, tx);
+    let cmd = |json: serde_json::Value| serde_json::from_value::<Command>(json).unwrap();
+    s.handle(
+        7,
+        cmd(serde_json::json!({
+            "op": "probe_set", "id": 9, "fps": 60,
+            "edge": {"from": "tone.out", "to": "speaker.in"},
+            "probe": {"kind": "audio"},
+        })),
+    );
+    s.run();
+    let t0 = tokio::time::Instant::now();
+    let mut pairs: Vec<(f32, f32)> = Vec::new();
+    while t0.elapsed() < Duration::from_millis(600) {
+        let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await else {
+            panic!("audio frames in time");
+        };
+        if let Outgoing::Binary(b) = msg {
+            assert_eq!(b[8], 5, "audio frame");
+            assert_eq!(b[16] & 2, 2, "stereo flag");
+            let n = u32::from_le_bytes(b[12..16].try_into().unwrap()) as usize;
+            assert_eq!(b.len(), 20 + 8 * n);
+            let f = |i: usize| f32::from_le_bytes(b[20 + 4 * i..24 + 4 * i].try_into().unwrap());
+            pairs.extend((0..n).map(|i| (f(2 * i), f(2 * i + 1))));
+        }
+    }
+    s.stop();
+    assert!(pairs.len() > 10_000, "{}", pairs.len());
+    // Left = cos, right = sin of the same phase.
+    for &(l, r) in &pairs {
+        assert!((l * l + r * r - 1.0).abs() < 1e-3, "({l}, {r})");
+    }
+}
+
 /// A `text` probe on a `u8` wire delivers whole lines of text (what decoders
 /// emit), and refuses a wire that doesn't carry bytes.
 #[tokio::test(flavor = "multi_thread")]

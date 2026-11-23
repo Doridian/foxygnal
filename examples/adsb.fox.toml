@@ -18,25 +18,25 @@ samp_rate = "2M"
 id = "sdr"
 kind = "sdr_source"
 params = { device = "", frequency = "1090M", sample_rate = "$samp_rate", gain = 40.0 }
-ui = { x = 40, y = 120 }
+ui = { x = 50, y = 120 }
 
 [[block]]
 id = "mag"
 kind = "c32_to_f32"
 params = { part = "magnitude" }
-ui = { x = 290, y = 120 }
+ui = { x = 380, y = 120 }
 
 [[block]]
 id = "adsb"
 kind = "adsb_decoder"
 params = { fix_errors = true }
-ui = { x = 540, y = 120 }
+ui = { x = 700, y = 120 }
 
 [[block]]
 id = "log"
 kind = "message_log"
 params = { stdout = true }
-ui = { x = 790, y = 120 }
+ui = { x = 1030, y = 120 }
 
 [[connect]]
 from = "sdr.out"

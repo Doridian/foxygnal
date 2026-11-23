@@ -27,7 +27,7 @@
 
   const matches = $derived.by(() => {
     const q = search.trim().toLowerCase();
-    return catalog.filter((d) => !q || `${d.label} ${d.kind} ${d.category} ${d.help}`.toLowerCase().includes(q));
+    return catalog.filter((d) => !q || `${d.label} ${d.kind} ${d.category} ${d.help} ${(d.keywords ?? []).join(' ')}`.toLowerCase().includes(q));
   });
 
   const categories = $derived.by(() => {

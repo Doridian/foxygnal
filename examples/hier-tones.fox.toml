@@ -11,31 +11,31 @@ base = 1500.0
 id = "low"
 kind = "graph:tone-and-noise.fox.toml"
 params = { rate = "$samp_rate", freq = "$base", amplitude = 0.6, noise = 0.02 }
-ui = { x = 40, y = 40 }
+ui = { x = 50, y = 40 }
 
 [[block]]
 id = "high"
 kind = "graph:tone-and-noise.fox.toml"
 params = { rate = "$samp_rate", freq = "-$base * 3", amplitude = 0.2, noise = 0.0 }
-ui = { x = 40, y = 220 }
+ui = { x = 50, y = 220 }
 
 [[block]]
 id = "mix"
 kind = "add"
 params = { type = "c32" }
-ui = { x = 300, y = 130 }
+ui = { x = 390, y = 130 }
 
 [[block]]
 id = "throttle"
 kind = "throttle"
 params = { type = "c32", sample_rate = "$samp_rate" }
-ui = { x = 520, y = 130 }
+ui = { x = 680, y = 130 }
 
 [[block]]
 id = "sink"
 kind = "null_sink"
 params = { type = "c32" }
-ui = { x = 740, y = 130 }
+ui = { x = 960, y = 130 }
 
 [[connect]]
 from = "low.out"

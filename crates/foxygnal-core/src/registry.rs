@@ -137,7 +137,7 @@ pub struct FrequencyResponse {
     pub freqs: Vec<f64>,
     /// Gain at each frequency, in dB.
     pub db: Vec<f32>,
-    /// Number of taps the design has.
+    /// Number of taps the design has (0 for an IIR filter).
     pub taps: usize,
 }
 
@@ -150,6 +150,7 @@ struct Entry {
     factory: Factory,
     response: Option<ResponseFn>,
     tx: bool,
+    keywords: &'static [&'static str],
 }
 
 /// A descriptor as the catalog API serves it: the descriptor plus what the
@@ -165,6 +166,10 @@ pub struct CatalogEntry<'a> {
     /// it must arm TX first.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub tx: bool,
+    /// Extra words the palette search matches ([`Registry::set_keywords`]),
+    /// e.g. `abs` and `envelope` for a block labelled "Complex → Float".
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub keywords: &'static [&'static str],
 }
 
 #[derive(Default)]
@@ -217,6 +222,7 @@ impl Registry {
                 factory,
                 response,
                 tx,
+                keywords: &[],
             },
         );
         assert!(prev.is_none(), "block kind `{kind}` registered twice");
@@ -232,7 +238,24 @@ impl Registry {
             descriptor: &e.descriptor,
             response: e.response.is_some(),
             tx: e.tx,
+            keywords: e.keywords,
         })
+    }
+
+    /// Search keywords for an already registered block: other names people
+    /// may look for it by (aliases, the operation it performs). The palette
+    /// matches them along with the label, kind, category and help.
+    pub fn set_keywords(&mut self, kind: &str, keywords: &'static [&'static str]) {
+        let e = self
+            .entries
+            .get_mut(kind)
+            .unwrap_or_else(|| panic!("set_keywords: block kind `{kind}` is not registered"));
+        e.keywords = keywords;
+    }
+
+    /// The search keywords of `kind` (empty if none or unknown).
+    pub fn keywords(&self, kind: &str) -> &'static [&'static str] {
+        self.entries.get(kind).map_or(&[], |e| e.keywords)
     }
 
     /// The frequency response a block of `kind` would have with `params` at

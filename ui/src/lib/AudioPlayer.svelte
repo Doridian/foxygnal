@@ -35,7 +35,7 @@
       ids.push(id);
       const rate = f.rate;
       session.setProbe(id, { from: f.from, to: f.to }, { kind: 'audio' }, (frame) => {
-        if (frame.kind === 'audio') browserAudio.play(id, frame.samples, rate, frame.gap);
+        if (frame.kind === 'audio') browserAudio.play(id, frame.samples, frame.channels, rate, frame.gap);
       }, 60);
     });
     return () => {

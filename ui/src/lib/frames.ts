@@ -48,6 +48,8 @@ export interface AudioFrame {
   kind: 'audio';
   /** Samples were lost before this frame. */
   gap: boolean;
+  /** 1 (mono) or 2 (stereo: `samples` interleaves left, right). */
+  channels: 1 | 2;
   samples: Float32Array;
 }
 
@@ -110,8 +112,11 @@ export function decodeFrame(buf: ArrayBuffer): { id: number; seq: number; frame:
         },
       };
     case 5: {
+      // n frames; flag 2 = stereo, f32[2n] interleaved L, R.
       const n = v.getUint32(12, true);
-      return { id, seq, frame: { kind: 'audio', gap: (v.getUint8(16) & 1) !== 0, samples: f32(20, n) } };
+      const flags = v.getUint8(16);
+      const channels = (flags & 2) !== 0 ? 2 : 1;
+      return { id, seq, frame: { kind: 'audio', gap: (flags & 1) !== 0, channels, samples: f32(20, n * channels) } };
     }
     case 6: {
       const n = v.getUint32(12, true);

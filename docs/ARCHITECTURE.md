@@ -104,6 +104,13 @@ than the sound card's), frames are skipped. Browsers only start audio from a use
 so the Run click unlocks it; otherwise a "Click to enable audio" button appears. Nothing on
 the engine's machine needs an audio library, and it works over a remote connection.
 
+**Stereo** travels as one c32 wire: `browser_audio` with `type = "c32"` takes the real part as
+left and the imaginary part as right (`fm_stereo`'s two outputs go through `f32_pair_to_c32`).
+One wire means one probe and one lossless stream, so the channels can't drift apart or lose
+samples independently. The audio probe on a c32 wire sets the frame's stereo flag and
+interleaves L, R; the UI builds a two-channel `AudioBuffer`. A real wire stays mono, and the
+frame format is unchanged for it (the flag is a new bit; `n` counts sample instants).
+
 ## Buffers
 
 Each output port owns one lock-free **single-writer / multi-reader** ring
@@ -187,7 +194,7 @@ there are pooled blocks). Workers are named `fox:worker-N`.
   comparison and as a fallback.
 
 **Idle CPU (M5).** Nothing polls: idle workers and dedicated threads park without a timeout
-until a wake or a timer. The throttle passes 2 ms of stream at a time and sleeps until the
+until a wake or a timer. The throttle passes 10 ms of stream at a time and sleeps until the
 next batch is due (passing each item as soon as it was due made it ping-pong with its
 neighbours, each of which wakes it). Measured on a 32-core x86-64 desktop (release build,
 process CPU from `getrusage` over 3 s; before = thread-per-block with 50 ms polling):
@@ -271,8 +278,8 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
 
 ## Decoded messages (M6)
 
-Decoders (`adsb_decoder`, `packet_decoder` in hex mode, …) need a way to show a person what
-they found, without per-block UI code. The convention: **a decoded message is one line of
+Decoders (`adsb_decoder`, `rds_decoder`, `packet_decoder` in hex mode, …) need a way to show a
+person what they found, without per-block UI code. The convention: **a decoded message is one line of
 UTF-8 text, `\n`-terminated, on a `u8` output.** Lines are `key=value` fields where that
 makes sense (`t=1.234567 icao=4840D6 df=17 tc=4 type=ident callsign=KLM1023 raw=…`), so
 they read well and grep well. Everything downstream is generic:
@@ -404,6 +411,34 @@ transmitting needs a licence and must be legal, and offers **Arm TX and run** (n
 default focus; disabled, with an explanation, when the server lacks `--allow-tx`). While
 `status.tx_armed` is set, the top bar shows a red **TX** indicator in every tab.
 
+## Network blocks
+
+`blocks/src/net/` (category *Network*): `udp_source`, `udp_sink`, `tcp_source`, `tcp_sink`
+move raw little-endian items, so they interoperate with GNU Radio's UDP/TCP blocks, `nc` and
+`socat` (see [BLOCKS.md](BLOCKS.md)). They reuse the SDR drivers' pattern and their ring
+(`foxygnal_sdr::ring`; blocks already depend on the sdr crate, so no new crate or copy):
+
+- **Sources** (dedicated thread) bind or connect in `start()`'s I/O thread, which pushes bytes
+  into a byte ring plus a small event ring (`dropped`, `connected`, stamped with a byte
+  offset) and unparks the block. `work()` copies whole items and tags them; it never waits.
+  The I/O thread keeps a partial item until the rest arrives and, after a loss, skips to the
+  sender's item grid, so items stay aligned. UDP pushes whole datagrams or drops them
+  (counted as `dropped`, like a sequence gap); TCP waits for room in the ring, which pushes
+  back on the sender through TCP's flow control.
+- **`udp_sink`** (pooled) sends from `work()` on a non-blocking connected socket; a partial
+  datagram waits up to 10 ms for more items (`Wait`), and a full socket buffer retries after
+  1 ms.
+- **`tcp_sink`** (dedicated) has a connection thread (accept loop, or connect with retry)
+  that gives each client a bounded SPSC queue and a writer thread; new clients reach `work()`
+  over a channel (`try_recv`), and gone ones are noticed when their queue is abandoned.
+  `work()` copies into every queue: whatever doesn't fit is skipped for that client and
+  logged (at most every 5 s), unless `backpressure` makes it consume only what every client
+  can take. At the end of the stream the queues get up to 1 s to drain.
+- I/O threads poll a stop flag every 50 ms (socket timeouts), so stopping a graph is prompt.
+- **Security:** every address defaults to `127.0.0.1`; a listener on any other address must
+  be typed into the block, and the engine prints a note that the stream (which has no
+  authentication) is reachable. This is separate from the server's `--allow-remote`.
+
 ## Server API
 
 REST:
@@ -413,11 +448,13 @@ REST:
 - A block descriptor with `"response": true` belongs to a block
   registered with `Registry::register_with_response` (filters, resamplers)
 - A block descriptor with `"tx": true` transmits (see "TX arming")
+- `"keywords"` (optional, `Registry::set_keywords`): aliases the palette search also matches
+  (`abs`, `envelope` for `c32_to_f32`)
 - `GET /api/devices`: per-driver discovery, `[{driver, label, devices [{driver, args, label,
   serial, rx, tx}], error}]`. Each driver searches on a blocking thread with a 4 s timeout,
   so a slow driver can't hang the request; a driver still busy from an earlier timed-out
   search isn't asked again until it returns
-- `POST /api/blocks/{kind}/response` `{params, sample_rate}` → `{freqs, db, taps}`: the magnitude
+- `POST /api/blocks/{kind}/response` `{params, sample_rate}` → `{freqs, db, taps}` (`taps` 0: IIR): the magnitude
   response the block would have at that input rate (400 with a readable message for invalid
   params). The inspector draws it for any block whose descriptor says `response`
 - `GET/PUT /api/graph`: current graph as `GraphSpec` JSON; `GET /api/graph.toml`
@@ -468,9 +505,10 @@ WebSocket `/api/ws`, one per browser tab:
   - constellation (3): `u32 n`, then `f32[2n]` interleaved I, Q.
   - meter (4): `u32 count, u8 flags (1 complex), u8[3], f32 rms, f32 peak, f32 mean_i,
     f32 mean_q`.
-  - audio (5): `u32 n, u8 flags (1 gap: samples were lost before this frame), u8[3]`, then
-    `f32[n]`: every sample since the previous frame (real wires only). The UI plays these for
-    `browser_audio` blocks (see "Browser audio").
+  - audio (5): `u32 n, u8 flags (1 gap: samples were lost before this frame, 2 stereo), u8[3]`,
+    then `f32[n]` (mono, real wires) or, with the stereo flag, `f32[2n]` interleaved L, R (c32
+    wires: real = left, imaginary = right): every sample since the previous frame. The UI plays
+    these for `browser_audio` blocks (see "Browser audio").
   - text (6): `u32 n, u8 flags (1 gap: lines were lost before this frame), u8[3]`, then
     `n` bytes of UTF-8, whole lines only (each ends in `\n`), padded to 4 bytes. Lossless
     while the probe keeps up, like audio (u8 wires only; see "Decoded messages").
@@ -563,6 +601,8 @@ units/help per variable, and string (path) variables.
 A local server that can write files (file sink) and later transmit RF needs care:
 
 - It binds `127.0.0.1` by default. Non-loopback binds need `--allow-remote`.
+  (Network blocks are separate: their listeners also default to `127.0.0.1`, and anything
+  else is typed into the block; see "Network blocks".)
 - **Host and Origin checks** on every request and WebSocket upgrade. These block DNS
   rebinding attacks and cross-site requests from pages open in the same browser. This matters
   even on localhost.

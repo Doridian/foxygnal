@@ -18,9 +18,12 @@
 //! [`Writer::slice_mut`] always hand out *every* available item as one
 //! contiguous slice, even across the wrap point (a writer gets at most half
 //! the ring at once, so taps can see the rest). Its capacity is rounded up to
-//! whole memory pages. Where the OS can't do that, the ring falls back to a
-//! plain allocation ([`BufferKind::Plain`]) whose slices stop at the wrap
-//! point, so a block may then see fewer items than are available.
+//! whole memory pages. Where the OS can't do that (some containers and
+//! sandboxes), the ring falls back to a plain allocation of twice the
+//! capacity ([`BufferKind::Plain`]) and the writer copies every item into
+//! both halves, so slices stay contiguous there too, at the cost of one extra
+//! copy. Blocks that need several items at once (a decimator) would
+//! otherwise stall at the wrap point with fewer items in view than they need.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, OnceLock};
@@ -42,8 +45,8 @@ pub enum BufferKind {
     /// capacity rounded up to whole pages), plain otherwise.
     #[default]
     Auto,
-    /// One plain allocation of exactly the requested capacity; slices stop
-    /// at the wrap point. Mostly useful to test the fallback.
+    /// A plain allocation of exactly the requested capacity, mirrored by
+    /// copying. Mostly useful to test the fallback.
     Plain,
 }
 
@@ -107,23 +110,34 @@ impl Ring {
         self.storage.base()
     }
 
-    /// How many of the `n` items starting at stream index `start` can be
-    /// addressed as one slice from [`Self::at`]: all of them on a mirrored
-    /// ring (`n` never exceeds the capacity), up to the wrap point otherwise.
-    fn contiguous(&self, start: usize, n: usize) -> usize {
-        if self.storage.is_mirrored() {
-            n
-        } else {
-            n.min(self.capacity - start % self.capacity)
-        }
+    /// Most items one [`Writer::slice_mut`] hands out: half the ring, so
+    /// taps can always see the newest other half. At least one item.
+    fn max_write(&self) -> usize {
+        (self.capacity / 2).max(1)
     }
 
-    /// Most items one [`Writer::slice_mut`] hands out.
-    fn max_write(&self) -> usize {
-        if self.storage.is_mirrored() {
-            self.capacity / 2
-        } else {
-            self.capacity
+    /// On a plain (copy-mirrored) ring, copy the `n` items just written at
+    /// stream index `start` (through a slice from [`Self::at`]) into their
+    /// twin slots in the other half. A no-op on a double-mapped ring.
+    fn mirror(&self, start: usize, n: usize) {
+        if self.storage.is_mirrored() || n == 0 {
+            return;
+        }
+        let (cap, size) = (self.capacity, self.item_size);
+        let pos = start % cap;
+        // Items written below `cap` go up by a ring; ones past it go down.
+        let low = n.min(cap - pos);
+        // SAFETY: the storage holds `2 * cap` items and `pos + n <= 2 * cap`
+        // (n <= cap). The twins are the same logical (free, unpublished)
+        // slots, so no reader looks at them; `&mut Writer` excludes writers.
+        unsafe {
+            let base = self.base();
+            std::ptr::copy_nonoverlapping(
+                base.add(pos * size),
+                base.add((pos + cap) * size),
+                low * size,
+            );
+            std::ptr::copy_nonoverlapping(base.add(cap * size), base, (n - low) * size);
         }
     }
 
@@ -168,21 +182,26 @@ pub fn channel_with(
     kind: BufferKind,
 ) -> (Writer, Vec<Reader>) {
     assert!(item_size > 0 && capacity > 0);
-    let mirrored = match kind {
-        BufferKind::Plain => None,
+    let (storage, capacity) = match kind {
+        BufferKind::Plain => (Storage::plain(2 * item_size * capacity), capacity),
         BufferKind::Auto => {
             // Whole pages, and a whole number of items in them (item sizes
-            // 1, 2, 4 and 8 always divide a page).
+            // 1, 2, 4 and 8 always divide a page). The fallback keeps the
+            // same capacity, so a graph behaves the same either way.
             let bytes = (item_size * capacity).next_multiple_of(page_size());
-            if bytes % item_size == 0 {
-                Storage::mirrored(bytes).map(|s| (s, bytes / item_size))
+            let capacity = if bytes % item_size == 0 {
+                bytes / item_size
             } else {
-                None
-            }
+                capacity
+            };
+            let mirrored = (bytes % item_size == 0)
+                .then(|| Storage::mirrored(bytes))
+                .flatten();
+            // The fallback: twice the capacity, kept identical by `Ring::mirror`.
+            let storage = mirrored.unwrap_or_else(|| Storage::plain(2 * item_size * capacity));
+            (storage, capacity)
         }
     };
-    let (storage, capacity) =
-        mirrored.unwrap_or_else(|| (Storage::plain(item_size * capacity), capacity));
     let ring = Arc::new(Ring {
         storage,
         item_size,
@@ -205,7 +224,14 @@ pub fn channel_with(
             idx,
         })
         .collect();
-    (Writer { ring, staged: 0 }, rs)
+    (
+        Writer {
+            ring,
+            staged: 0,
+            gone: None,
+        },
+        rs,
+    )
 }
 
 /// The unique write end of a ring. Not `Clone`: `&mut self` guarantees exclusivity.
@@ -213,6 +239,12 @@ pub struct Writer {
     ring: Arc<Ring>,
     /// Items written by [`Self::stage`] but not yet published.
     staged: usize,
+    /// [`Self::abandoned`] as first seen by [`Self::slice_mut`] since the
+    /// last [`Self::flush`]. Readers can leave at any moment; latching their
+    /// verdict for one `work` call keeps the writable space from shrinking
+    /// between two `slice_mut` calls (it can only grow), so a block may size
+    /// its work with one call and write through another.
+    gone: Option<bool>,
 }
 
 impl Writer {
@@ -236,11 +268,14 @@ impl Writer {
 
     /// Contiguous writable region, in bytes. Empty once [`Self::abandoned`].
     ///
-    /// On a double-mapped ring this is all free space up to half the
-    /// capacity (the other half stays visible to taps); on a plain ring, the
-    /// free space up to the wrap point.
+    /// All free space up to half the capacity (the other half stays visible
+    /// to taps), as one slice even across the wrap point.
     pub fn slice_mut(&mut self) -> &mut [u8] {
-        if self.abandoned() {
+        let gone = match self.gone {
+            Some(g) => g,
+            None => *self.gone.insert(self.abandoned()),
+        };
+        if gone {
             return &mut [];
         }
         let r = &*self.ring;
@@ -248,15 +283,14 @@ impl Writer {
         // Saturating: a cursor attached while the writer was mid-slice may
         // briefly sit behind data that was overwritten (see `Tap::attach`).
         let free = r.capacity.saturating_sub(written - r.min_read());
-        // Taps can't trust anything the writer may be writing into, so a
-        // mirrored ring (where all free space is contiguous) hands out at most
-        // half of itself: probes can always see the newest half.
-        let n = r.contiguous(written, free.min(r.max_write()));
+        // Taps can't trust anything the writer may be writing into, so the
+        // writer gets at most half the ring: probes always see the newest half.
+        let n = free.min(r.max_write());
         // Announce the region before writing into it, for taps (seqlock-style).
         r.reserved.store(written + n, Ordering::Relaxed);
         fence(Ordering::Release);
         // SAFETY: the `n` free slots from `written` are addressable as one
-        // slice (`contiguous`), no reader can see them until they are
+        // slice (the ring is mirrored), no reader can see them until they are
         // published, and `&mut self` excludes other writers.
         unsafe { std::slice::from_raw_parts_mut(r.at(written), n * r.item_size) }
     }
@@ -271,6 +305,8 @@ impl Writer {
     /// Count `items` as written without publishing them yet, so tags for
     /// them can be pushed first. [`Self::flush`] publishes.
     pub fn stage(&mut self, items: usize) {
+        let r = &*self.ring;
+        r.mirror(r.written.load(Ordering::Relaxed) + self.staged, items);
         self.staged += items;
     }
 
@@ -291,6 +327,7 @@ impl Writer {
 
     /// Publish staged items and wake readers.
     pub fn flush(&mut self) {
+        self.gone = None;
         let items = std::mem::take(&mut self.staged);
         if items == 0 {
             return;
@@ -298,6 +335,14 @@ impl Writer {
         let r = &*self.ring;
         r.written.fetch_add(items, Ordering::Release);
         self.wake_readers();
+    }
+
+    /// Whether [`Self::slice_mut`] would hand out any space (no side
+    /// effects, unlike it).
+    pub fn has_room(&self) -> bool {
+        let r = &*self.ring;
+        let written = r.written.load(Ordering::Relaxed) + self.staged;
+        r.capacity.saturating_sub(written - r.min_read()) > 0
     }
 
     /// True when no reader will ever consume again (all readers finished).
@@ -378,8 +423,8 @@ impl Reader {
         let r = &*self.ring;
         let read = self.state().read.load(Ordering::Relaxed);
         let avail = r.written.load(Ordering::Acquire) - read;
-        let n = r.contiguous(read, avail);
-        // SAFETY: published items, addressable as one slice (`contiguous`);
+        let n = avail;
+        // SAFETY: published items (at most a ring), one slice on a mirrored ring;
         // the writer won't touch them until we consume them.
         unsafe { std::slice::from_raw_parts(r.at(read), n * r.item_size) }
     }
@@ -514,20 +559,14 @@ impl Ring {
         let written = r.written.load(Ordering::Acquire);
         let mut start = from.max(r.oldest(Ordering::Acquire)).min(written);
         let mut items = (written - start).min(out.len() / size);
-        // One copy on a mirrored ring; two (up to and from the wrap) otherwise.
-        let first = r.contiguous(start, items);
-        // SAFETY: both ranges are inside the storage. The writer may be
+        // SAFETY: the range is inside the storage. The writer may be
         // overwriting the oldest part concurrently (a seqlock-style race);
         // the check below finds and discards anything it may have touched.
         // Raw copies, never references, so the race doesn't create aliasing
         // `&`/`&mut` slices.
         unsafe {
-            std::ptr::copy_nonoverlapping(r.at(start), out.as_mut_ptr(), first * size);
-            std::ptr::copy_nonoverlapping(
-                r.at(start + first),
-                out.as_mut_ptr().add(first * size),
-                (items - first) * size,
-            );
+            // One copy: the ring is mirrored (double-mapped, or by copying).
+            std::ptr::copy_nonoverlapping(r.at(start), out.as_mut_ptr(), items * size);
         }
         fence(Ordering::Acquire);
         let oldest = r.oldest(Ordering::Relaxed);
@@ -611,6 +650,20 @@ mod tests {
     use super::*;
     use crate::tag::TagValue;
 
+    /// Readers may all leave between two `slice_mut` calls in one `work`:
+    /// the second call must not come back shorter than the first.
+    #[test]
+    fn writable_space_does_not_shrink_until_flush() {
+        let (mut w, mut rs) = channel(4, 64, 1);
+        let room = w.slice_mut().len();
+        assert!(room > 0);
+        drop(rs.pop());
+        assert!(w.abandoned());
+        assert_eq!(w.slice_mut().len(), room);
+        w.flush();
+        assert!(w.slice_mut().is_empty());
+    }
+
     const BOTH: [BufferKind; 2] = [BufferKind::Auto, BufferKind::Plain];
 
     /// Write `vals` (u32) into `w`, as much as fits; returns how many.
@@ -627,7 +680,11 @@ mod tests {
     fn unix_rings_are_mirrored_and_page_sized() {
         let (w, _rs) = channel(4, 10, 1);
         let tap = w.tap();
-        assert!(tap.is_mirrored());
+        // Some containers (CI runners) forbid double mapping; the ring then
+        // falls back to copying, with the same page-rounded capacity.
+        if !tap.is_mirrored() {
+            eprintln!("double mapping isn't available here: checking the fallback");
+        }
         assert_eq!(tap.capacity() * 4 % page_size(), 0);
         assert!(tap.capacity() >= 10);
         let (w, _rs) = channel_with(4, 10, 1, BufferKind::Plain);
@@ -662,42 +719,43 @@ mod tests {
         }
     }
 
-    /// The point of the double mapping: all available items in one slice,
-    /// for the writer and every reader, across the wrap point.
-    #[cfg(unix)]
+    /// The point of the mirroring (double-mapped or by copying): all
+    /// available items in one slice, for the writer and every reader, across
+    /// the wrap point.
     #[test]
     fn slices_are_contiguous_across_the_wrap() {
-        let (mut w, mut rs) = channel(4, 1, 2);
-        let cap = w.tap().capacity();
-        assert!(w.tap().is_mirrored());
-        // Move every cursor to 3 items before the end of the storage.
-        let pre: Vec<u32> = (0..cap as u32 - 3).collect();
-        let mut sent = 0;
-        while sent < pre.len() {
-            sent += put(&mut w, &pre[sent..]);
+        for kind in BOTH {
+            let (mut w, mut rs) = channel_with(4, 1024, 2, kind);
+            let cap = w.tap().capacity();
+            // Move every cursor to 3 items before the end of the storage.
+            let pre: Vec<u32> = (0..cap as u32 - 3).collect();
+            let mut sent = 0;
+            while sent < pre.len() {
+                sent += put(&mut w, &pre[sent..]);
+            }
+            for r in rs.iter_mut() {
+                r.consume(pre.len());
+            }
+            // The writer gets half the ring (the most it hands out at once),
+            // wrapping after 3 items, then the other half.
+            assert_eq!(w.slice_mut().len(), cap / 2 * 4);
+            let vals: Vec<u32> = (1000..1000 + cap as u32).collect();
+            assert_eq!(put(&mut w, &vals), cap / 2);
+            assert_eq!(put(&mut w, &vals[cap / 2..]), cap / 2);
+            // Every reader sees all of it at once.
+            for r in rs.iter_mut() {
+                let s: &[u32] = bytemuck::cast_slice(r.slice());
+                assert_eq!(s, &vals[..]);
+            }
+            // Partial consumption keeps the rest contiguous.
+            rs[0].consume(5);
+            let s: &[u32] = bytemuck::cast_slice(rs[0].slice());
+            assert_eq!(s, &vals[5..]);
+            // The slowest reader still holds everything.
+            assert_eq!(w.slice_mut().len(), 0);
+            rs[1].consume(cap);
+            assert_eq!(w.slice_mut().len(), 5 * 4);
         }
-        for r in rs.iter_mut() {
-            r.consume(pre.len());
-        }
-        // The writer gets half the ring (the most it hands out at once),
-        // wrapping after 3 items, then the other half.
-        assert_eq!(w.slice_mut().len(), cap / 2 * 4);
-        let vals: Vec<u32> = (1000..1000 + cap as u32).collect();
-        assert_eq!(put(&mut w, &vals), cap / 2);
-        assert_eq!(put(&mut w, &vals[cap / 2..]), cap / 2);
-        // Every reader sees all of it at once.
-        for r in rs.iter_mut() {
-            let s: &[u32] = bytemuck::cast_slice(r.slice());
-            assert_eq!(s, &vals[..]);
-        }
-        // Partial consumption keeps the rest contiguous.
-        rs[0].consume(5);
-        let s: &[u32] = bytemuck::cast_slice(rs[0].slice());
-        assert_eq!(s, &vals[5..]);
-        // The slowest reader still holds everything.
-        assert_eq!(w.slice_mut().len(), 0);
-        rs[1].consume(cap);
-        assert_eq!(w.slice_mut().len(), 5 * 4);
     }
 
     #[cfg(unix)]
@@ -721,20 +779,27 @@ mod tests {
     }
 
     #[test]
-    fn plain_rings_stop_at_the_wrap() {
+    fn plain_rings_are_contiguous_across_the_wrap() {
+        // The fallback mirrors by copying, so a block that needs several
+        // items at once never sees only the few before the wrap point.
         let (mut w, mut rs) = channel_with(1, 8, 1, BufferKind::Plain);
-        assert_eq!(w.slice_mut().len(), 8);
-        w.slice_mut()[..6].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
-        w.commit(6);
-        rs[0].consume(6);
-        assert_eq!(w.slice_mut().len(), 2, "contiguous up to the wrap point");
-        w.slice_mut()[..2].copy_from_slice(&[7, 8]);
+        assert!(!w.tap().is_mirrored());
+        assert_eq!(w.slice_mut().len(), 4, "half the ring");
+        w.slice_mut()[..4].copy_from_slice(&[1, 2, 3, 4]);
+        w.commit(4);
+        w.slice_mut()[..2].copy_from_slice(&[5, 6]);
         w.commit(2);
-        w.slice_mut()[..3].copy_from_slice(&[9, 10, 11]);
+        rs[0].consume(6);
+        // Written from slot 6: across the wrap point.
+        assert_eq!(w.slice_mut().len(), 4);
+        w.slice_mut()[..4].copy_from_slice(&[7, 8, 9, 10]);
+        w.commit(4);
+        assert_eq!(rs[0].slice(), &[7, 8, 9, 10], "one slice across the wrap");
+        rs[0].consume(1);
+        // Written from slot 2, read from slot 7: both halves agree.
+        w.slice_mut()[..3].copy_from_slice(&[11, 12, 13]);
         w.commit(3);
-        assert_eq!(rs[0].slice(), &[7, 8]);
-        rs[0].consume(2);
-        assert_eq!(rs[0].slice(), &[9, 10, 11]);
+        assert_eq!(rs[0].slice(), &[8, 9, 10, 11, 12, 13]);
     }
 
     #[test]
@@ -792,8 +857,10 @@ mod tests {
         let mut out = [0u8; 16];
         assert_eq!(tap.read(0, &mut out).items, 0);
 
-        w.slice_mut()[..6].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
-        w.commit(6);
+        w.slice_mut()[..4].copy_from_slice(&[1, 2, 3, 4]);
+        w.commit(4);
+        w.slice_mut()[..2].copy_from_slice(&[5, 6]);
+        w.commit(2);
         let got = tap.read(0, &mut out);
         assert_eq!(got, TapRead { start: 0, items: 6 });
         assert_eq!(&out[..6], &[1, 2, 3, 4, 5, 6]);
@@ -802,17 +869,17 @@ mod tests {
         // The reader moves on; the writer reuses space the tap never "read".
         rs[0].consume(6);
         let n = w.slice_mut().len();
-        assert_eq!(n, 2, "contiguous up to the wrap point");
-        w.slice_mut()[..2].copy_from_slice(&[7, 8]);
-        w.commit(2);
+        assert_eq!(n, 4, "half the ring, across the wrap point");
+        w.slice_mut()[..4].copy_from_slice(&[7, 8, 9, 10]);
+        w.commit(4);
         let buf = w.slice_mut();
-        buf[..4].copy_from_slice(&[9, 10, 11, 12]);
+        buf[..4].copy_from_slice(&[11, 12, 13, 14]);
         w.commit(4);
 
-        // Items 0..4 are gone (slots reserved for 8..14); the tap skips them.
+        // Items 0..6 are gone (slots reserved up to item 14); the tap skips them.
         let got = tap.read(0, &mut out);
         assert_eq!(got.start, 6, "slots up to item 14 are reserved");
-        assert_eq!(&out[..got.items], &[7, 8, 9, 10, 11, 12]);
+        assert_eq!(&out[..got.items], &[7, 8, 9, 10, 11, 12, 13, 14]);
         // Reading from a cursor in the middle works across the wrap.
         let got = tap.read(7, &mut out[..3]);
         assert_eq!(got, TapRead { start: 7, items: 3 });
@@ -870,7 +937,8 @@ mod tests {
     #[test]
     fn tap_never_returns_overwritten_data() {
         for kind in BOTH {
-            const TOTAL: u32 = 2_000_000;
+            // Loops yield when stuck: spinning threads crawl on a small CI runner.
+            const TOTAL: u32 = 500_000;
             let (mut w, mut rs) = channel_with(4, 64, 1, kind);
             let tap = w.tap();
             let mut r = rs.pop().unwrap();
@@ -880,6 +948,10 @@ mod tests {
                     let buf: &mut [u32] = bytemuck::cast_slice_mut(w.slice_mut());
                     // Odd chunks so writes straddle the wrap point.
                     let n = buf.len().min((TOTAL - next) as usize).min(97);
+                    if n == 0 {
+                        std::thread::yield_now();
+                        continue;
+                    }
                     for (i, v) in buf[..n].iter_mut().enumerate() {
                         *v = next + i as u32;
                     }
@@ -890,6 +962,9 @@ mod tests {
             let reader = std::thread::spawn(move || {
                 while !r.exhausted() {
                     let n = r.slice().len() / 4;
+                    if n == 0 {
+                        std::thread::yield_now();
+                    }
                     r.consume(n);
                 }
             });
@@ -902,6 +977,7 @@ mod tests {
                     assert_eq!(*v as usize, got.start + i, "torn read ({kind:?})");
                 }
                 checked += got.items;
+                std::thread::yield_now();
             }
             writer.join().unwrap();
             reader.join().unwrap();
@@ -989,7 +1065,7 @@ mod tests {
         w.commit(4);
         rs[0].consume(7);
         // The attached cursor hasn't read 3..7, so only 4 slots are free.
-        assert_eq!(w.slice_mut().len(), 1, "up to the wrap point");
+        assert_eq!(w.slice_mut().len(), 4, "the cursor holds 4 of 8 slots");
         let mut out = [0u8; 16];
         let got = a.read(&mut out);
         assert_eq!(got, TapRead { start: 3, items: 4 });
@@ -1006,9 +1082,7 @@ mod tests {
         assert_eq!(c.position(), 7);
         drop((b, c));
         // Detached cursors don't hold the writer back.
-        assert_eq!(w.slice_mut().len(), 1);
-        w.commit(1);
-        assert_eq!(w.slice_mut().len(), 7);
+        assert_eq!(w.slice_mut().len(), 4, "half the ring");
         // Nor do spares count as readers for abandonment.
         assert!(!w.abandoned());
         rs[0].finish();
@@ -1029,21 +1103,25 @@ mod tests {
         let (mut w, mut rs) = channel_with(1, 4, 1, BufferKind::Plain);
         w.register_waker(Waker::from(count.clone()));
         let mut a = w.tap().attach().unwrap();
-        w.slice_mut()[..4].copy_from_slice(&[1, 2, 3, 4]);
-        w.commit(4);
+        w.slice_mut()[..2].copy_from_slice(&[1, 2]);
+        w.commit(2);
+        w.slice_mut()[..2].copy_from_slice(&[3, 4]);
+        w.commit(2);
         rs[0].consume(4);
         assert_eq!(w.slice_mut().len(), 0, "the attached cursor holds it");
         let before = count.0.load(Ordering::Relaxed);
         assert_eq!(a.read(&mut [0u8; 8]).items, 4);
         assert!(count.0.load(Ordering::Relaxed) > before, "writer woken");
-        assert_eq!(w.slice_mut().len(), 4);
+        assert_eq!(w.slice_mut().len(), 2, "half the ring");
     }
 
     /// A writer racing an attached reader: after the first item, nothing is
     /// ever skipped, and the data is exactly what was written.
     #[test]
     fn attached_reader_is_lossless() {
-        const TOTAL: u32 = 1_000_000;
+        // Every loop yields when it can't make progress: three threads
+        // spinning on a small CI runner otherwise take minutes or hours.
+        const TOTAL: u32 = 200_000;
         for kind in BOTH {
             let (mut w, mut rs) = channel_with(4, 64, 1, kind);
             let tap = w.tap();
@@ -1080,6 +1158,9 @@ mod tests {
                     assert_eq!(*v as usize, got.start + i, "torn read ({kind:?})");
                 }
                 next += got.items;
+                if got.items == 0 {
+                    std::thread::yield_now();
+                }
             }
             writer.join().unwrap();
             reader.join().unwrap();

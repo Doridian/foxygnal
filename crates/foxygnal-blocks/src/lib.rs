@@ -1,6 +1,7 @@
 //! The standard block library.
 
 pub mod audio;
+pub mod broadcast;
 pub mod browser_audio;
 pub mod convert;
 pub mod demod;
@@ -9,8 +10,10 @@ pub mod digital;
 pub mod file;
 pub mod filters;
 pub mod flow;
+pub mod iir;
 pub mod level;
 pub mod math;
+pub mod net;
 mod params;
 pub mod resample;
 pub mod ring;
@@ -35,6 +38,7 @@ pub fn register_all(r: &mut Registry) {
     flow::register(r);
     file::register(r);
     filters::register(r);
+    iir::register(r);
     resample::register(r);
     demod::register(r);
     level::register(r);
@@ -45,4 +49,6 @@ pub fn register_all(r: &mut Registry) {
     browser_audio::register(r);
     sdr::register(r);
     digital::register(r);
+    net::register(r);
+    broadcast::register(r);
 }

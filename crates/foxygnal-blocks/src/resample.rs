@@ -3,7 +3,7 @@
 
 use foxygnal_core::{
     Block, BlockDescriptor, Complex32, Configure, Error, FrequencyResponse, Instance, ParamReader,
-    PortSpec, Registry, Sample, StreamType, WorkIo, WorkStatus,
+    PortSpec, Registry, Sample, StreamType, TagPropagation, WorkIo, WorkStatus,
 };
 use foxygnal_dsp::{FilterSample, Resampler, fir};
 
@@ -215,6 +215,8 @@ fn response(p: &ParamReader<'_>, rate: f64) -> Result<FrequencyResponse, Error> 
 pub struct RateChange<T> {
     cfg: RateConfig,
     kernel: Option<Resampler<T>>,
+    /// Interpolation and decimation after `configure`, for moving tags.
+    lm: (u64, u64),
 }
 
 impl<T: FilterSample + Sample> Block for RateChange<T> {
@@ -223,6 +225,7 @@ impl<T: FilterSample + Sample> Block for RateChange<T> {
         let (l, m) = self.cfg.ratio(rate)?;
         let taps = self.cfg.taps(l, m, rate.unwrap_or(1.0))?;
         self.kernel = Some(Resampler::new(l, m, &taps));
+        self.lm = (l as u64, m as u64);
         // Unknown in, unknown out: a decimator doesn't need the rate.
         for o in cx.outputs.iter_mut() {
             o.sample_rate = rate.map(|r| r * l as f64 / m as f64);
@@ -237,9 +240,23 @@ impl<T: FilterSample + Sample> Block for RateChange<T> {
         if used == 0 && made == 0 {
             return Ok(WorkStatus::Blocked);
         }
+        // Input item j goes with output item ⌊j·L/M⌋, the one covering it.
+        // The runtime's default (this call's produced ÷ consumed) is skewed
+        // by the filter's history; the output item may only come in a later
+        // call when the output is full, and the tag waits for it.
+        let (l, m) = self.lm;
+        let (inp, out) = (&io.inputs[0], &mut io.outputs[0]);
+        let base = out.position();
+        for (_, t) in inp.tags_in(used) {
+            out.forward_tag((t.offset * l / m).saturating_sub(base) as usize, t);
+        }
         io.consume(0, used);
         io.produce(0, made);
         Ok(WorkStatus::Ok)
+    }
+
+    fn tag_propagation(&self) -> TagPropagation {
+        TagPropagation::Manual
     }
 }
 
@@ -247,8 +264,16 @@ fn build(p: &ParamReader<'_>) -> Result<Instance, Error> {
     let ty = p.stream_type("type")?;
     let cfg = RateConfig::from_params(p)?;
     let block: Box<dyn Block> = match ty {
-        StreamType::C32 => Box::new(RateChange::<Complex32> { cfg, kernel: None }),
-        _ => Box::new(RateChange::<f32> { cfg, kernel: None }),
+        StreamType::C32 => Box::new(RateChange::<Complex32> {
+            cfg,
+            kernel: None,
+            lm: (1, 1),
+        }),
+        _ => Box::new(RateChange::<f32> {
+            cfg,
+            kernel: None,
+            lm: (1, 1),
+        }),
     };
     Ok(Instance {
         block,

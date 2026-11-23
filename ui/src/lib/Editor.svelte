@@ -1,5 +1,6 @@
 <script lang="ts">
   import AudioPlayer from './AudioPlayer.svelte';
+  import { setContext } from 'svelte';
   import { browserAudio } from './audio.svelte';
   import { SvelteFlow, Background, Controls, useSvelteFlow, type Connection, type OnConnectEnd } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
@@ -500,6 +501,16 @@
   }
 
   // ---- Wires and instruments -----------------------------------------------
+
+  // A wire's label (rate, fill, instrument badges) sits on top of the wire and
+  // often covers most of a short one, so clicking it acts like clicking the wire.
+  setContext('wireclick', (id: string, event: MouseEvent) => {
+    const edge = edges.find((e) => e.id === id);
+    if (!edge) return;
+    nodes = deselected(nodes);
+    edges = edges.map((e) => (e.id === id ? (e.selected ? e : { ...e, selected: true }) : e.selected ? { ...e, selected: false } : e));
+    onedgeclick({ edge, event });
+  });
 
   function onedgeclick({ edge, event }: { edge: Wire; event: MouseEvent }) {
     const r = canvas?.getBoundingClientRect();

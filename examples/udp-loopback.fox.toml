@@ -1,0 +1,47 @@
+# A tone sent through UDP and received again, on this machine only (127.0.0.1).
+#   foxygnal run examples/udp-loopback.fox.toml
+# Probe `rx.out` in the browser to see it arrive. Either half can talk to another program
+# instead: socat / nc (header = "none"), or GNU Radio's UDP Sink / UDP Source (header
+# "64-bit Sequence Number" = seq64 here). See "Network" in docs/BLOCKS.md.
+
+[[block]]
+id = "tone"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = 1000.0, amplitude = 0.8, sample_rate = 48000.0 }
+ui = { x = 50, y = 40 }
+
+[[block]]
+id = "throttle"
+kind = "throttle"
+params = { type = "c32" }
+ui = { x = 390, y = 40 }
+
+[[block]]
+id = "tx"
+kind = "udp_sink"
+params = { type = "c32", host = "127.0.0.1", port = 2000, header = "seq64" }
+ui = { x = 700, y = 40 }
+
+[[block]]
+id = "rx"
+kind = "udp_source"
+params = { type = "c32", host = "127.0.0.1", port = 2000, header = "seq64", sample_rate = 48000.0 }
+ui = { x = 50, y = 220 }
+
+[[block]]
+id = "out"
+kind = "null_sink"
+params = { type = "c32" }
+ui = { x = 390, y = 220 }
+
+[[connect]]
+from = "tone.out"
+to = "throttle.in"
+
+[[connect]]
+from = "throttle.out"
+to = "tx.in"
+
+[[connect]]
+from = "rx.out"
+to = "out.in"

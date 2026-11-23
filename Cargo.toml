@@ -15,6 +15,14 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
+# Smaller debug builds: CI caches target/ (rust-cache), and full DWARF for
+# every dependency made it ~5 GB. Line tables keep backtraces readable.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

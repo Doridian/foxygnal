@@ -7,43 +7,43 @@
 id = "carrier"
 kind = "signal_source"
 params = { type = "c32", waveform = "sine", frequency = 2000.0, amplitude = 0.6, sample_rate = 48000.0 }
-ui = { x = 40, y = 20 }
+ui = { x = 50, y = 20 }
 
 [[block]]
 id = "spur"
 kind = "signal_source"
 params = { type = "c32", waveform = "sine", frequency = -7500.0, amplitude = 0.15, sample_rate = 48000.0 }
-ui = { x = 40, y = 170 }
+ui = { x = 50, y = 170 }
 
 [[block]]
 id = "noise"
 kind = "noise_source"
 params = { type = "c32", amplitude = 0.03 }
-ui = { x = 40, y = 320 }
+ui = { x = 50, y = 320 }
 
 [[block]]
 id = "tones"
 kind = "add"
 params = { type = "c32" }
-ui = { x = 290, y = 90 }
+ui = { x = 380, y = 90 }
 
 [[block]]
 id = "sum"
 kind = "add"
 params = { type = "c32" }
-ui = { x = 520, y = 200 }
+ui = { x = 680, y = 200 }
 
 [[block]]
 id = "throttle"
 kind = "throttle"
 params = { type = "c32", sample_rate = 48000.0 }
-ui = { x = 750, y = 200 }
+ui = { x = 980, y = 200 }
 
 [[block]]
 id = "sink"
 kind = "null_sink"
 params = { type = "c32" }
-ui = { x = 980, y = 200 }
+ui = { x = 1270, y = 200 }
 
 [[connect]]
 from = "carrier.out"

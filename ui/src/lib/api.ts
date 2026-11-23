@@ -37,6 +37,8 @@ export interface BlockDescriptor {
   response?: boolean;
   /** The block transmits RF: running it needs TX armed. */
   tx?: boolean;
+  /** Extra words the palette search matches (aliases, the operation). */
+  keywords?: string[];
 }
 
 /** A filter's magnitude response (`POST /api/blocks/{kind}/response`). */
@@ -44,6 +46,7 @@ export interface FrequencyResponse {
   /** Hz, increasing. */
   freqs: number[];
   db: number[];
+  /** FIR taps; 0 for an IIR filter. */
   taps: number;
 }
 

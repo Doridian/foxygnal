@@ -220,6 +220,12 @@ const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/fm-live.fox.toml"),
     },
     Example {
+        name: "fm-stereo-rds",
+        title: "FM stereo + RDS",
+        description: "Live FM in stereo in this tab, plus the station's RDS name, RadioText and clock in a message log. Uses the first device found, or a simulated FM band.",
+        toml: include_str!("../../../examples/fm-stereo-rds.fox.toml"),
+    },
+    Example {
         name: "adsb",
         title: "ADS-B aircraft decoder",
         description: "An SDR at 1090 MHz, 2 MS/s → ADS-B decoder. Needs a real receiver. Click the wire into the log and choose Messages to read call signs, altitudes and positions.",

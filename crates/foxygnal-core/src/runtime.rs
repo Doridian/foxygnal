@@ -90,8 +90,8 @@ impl Flowgraph {
         self
     }
 
-    /// Choose the buffer layout ([`BufferKind::Plain`] forces the fallback
-    /// with short slices at the wrap point, e.g. to test blocks with it).
+    /// Choose the buffer layout ([`BufferKind::Plain`] forces the
+    /// copy-mirrored fallback, e.g. to test blocks with it).
     pub fn with_buffer_kind(mut self, kind: BufferKind) -> Self {
         self.buffer_kind = kind;
         self
@@ -622,6 +622,12 @@ impl BlockRun {
         for (b, o) in out_before.iter_mut().zip(&self.outputs) {
             *b = o.position();
         }
+        // Whether every output had room going in: blocked with room and
+        // ended input means done; blocked on a full output doesn't (see below).
+        let had_room = self
+            .outputs
+            .iter()
+            .all(|o| o.writer.abandoned() || o.writer.has_room());
         let mut io = WorkIo {
             inputs: &mut self.inputs,
             outputs: &mut self.outputs,
@@ -645,11 +651,14 @@ impl BlockRun {
             WorkStatus::Done => Step::Finished,
             WorkStatus::Wait(d) => Step::Wait(d),
             WorkStatus::Blocked => {
-                // Upstream ended and we can't make progress: we're done too.
-                let ended = self.inputs.iter().any(InputPort::exhausted);
                 // Every consumer is gone: nobody wants our output.
                 let abandoned =
                     !self.outputs.is_empty() && self.outputs.iter().all(|o| o.writer.abandoned());
+                // Upstream ended and we made no progress although every
+                // output had room: we're done too. Blocked on a full output,
+                // a block may still have output due for input it already took
+                // (an interpolator): wait for room (consumers wake us).
+                let ended = had_room && self.inputs.iter().any(InputPort::exhausted);
                 if ended || abandoned {
                     Step::Finished
                 } else {

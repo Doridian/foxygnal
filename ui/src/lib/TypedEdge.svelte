@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { BaseEdge, EdgeLabel, getBezierPath, useNodesData, type EdgeProps } from '@xyflow/svelte';
+  import { BaseEdge, EdgeLabel, getBezierPath, useNodesData, useViewport, type EdgeProps } from '@xyflow/svelte';
   import { portType } from './api';
   import type { BlockData } from './graph';
   import { session } from './session.svelte';
@@ -8,6 +8,12 @@
   import { prefs } from './prefs.svelte';
   import { graphView } from './graphview.svelte';
   import { fmtRate, heat } from './plot';
+  import { getContext } from 'svelte';
+
+  // Hit area of at least ~24 screen pixels however far out the view is zoomed.
+  const viewport = useViewport();
+  const hitWidth = $derived(Math.max(28, 24 / (viewport.current.zoom || 1)));
+  const wireclick = getContext<((id: string, e: MouseEvent) => void) | undefined>('wireclick');
 
   let { id, source, target, sourceHandleId, targetHandleId, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, selected }: EdgeProps = $props();
 
@@ -42,11 +48,21 @@
 <BaseEdge
   {id}
   {path}
+  interactionWidth={hitWidth}
   style="stroke: {colour}; stroke-width: {selected ? 3 : 2}px;{error ? ' stroke-dasharray: 5 4;' : ''}"
   aria-label={error ?? `${type ?? ''} wire${watchers.length ? `, watched by instrument ${watchers.join(', ')}` : ''}`}
 />
 {#if watchers.length || stat || rate}
-  <EdgeLabel x={labelX} y={labelY} transparent>
+  <EdgeLabel
+    x={labelX}
+    y={labelY}
+    transparent
+    class="wire-label"
+    onclick={(e: MouseEvent) => {
+      e.stopPropagation();
+      wireclick?.(id, e);
+    }}
+  >
     <span class="label">
       {#each watchers as n (n)}<span class="badge" title="Instrument {n}">{n}</span>{/each}
       {#if rate && !stat}<span class="rate mono" title="Sample rate">{fmtRate(rate)}</span>{/if}
@@ -60,6 +76,19 @@
 {/if}
 
 <style>
+  :global(.svelte-flow__edge-label.wire-label) {
+    cursor: pointer;
+  }
+  :global(.svelte-flow__edge:hover .svelte-flow__edge-path) {
+    stroke-width: 4px !important;
+  }
+  /* xyflow draws the wide hit path with stroke-opacity 0 but no stroke, and
+     `pointer-events: visibleStroke` ignores a path whose stroke is none: the
+     hit area was only the 2px wire itself. An invisible paint fixes it. */
+  :global(.svelte-flow__edge .svelte-flow__edge-interaction) {
+    stroke: transparent;
+    cursor: pointer;
+  }
   .label {
     display: flex;
     align-items: center;

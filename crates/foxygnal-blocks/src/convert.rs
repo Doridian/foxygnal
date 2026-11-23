@@ -83,6 +83,44 @@ pub fn register(r: &mut Registry) {
         vec![],
         |_| Ok(map_instance(|x: f32| Complex32::new(x, 0.0))),
     );
+    r.set_keywords(
+        "c32_to_f32",
+        &[
+            "magnitude",
+            "abs",
+            "envelope",
+            "phase",
+            "angle",
+            "arg",
+            "real",
+            "imaginary",
+            "power",
+            "complex to real",
+            "complex to imag",
+        ],
+    );
+    r.register(
+        BlockDescriptor {
+            kind: "c32_to_f32_pair",
+            label: "Complex → Re + Im",
+            category: CATEGORY,
+            help: "Splits a complex stream into its real and imaginary parts, on two outputs.",
+            inputs: vec![port("in", C32)],
+            outputs: vec![port("re", F32), port("im", F32)],
+            params: vec![],
+        },
+        |_| {
+            Ok(Instance {
+                block: Box::new(ComplexToPair),
+                inputs: vec![("in".into(), C32)],
+                outputs: vec![("re".into(), F32), ("im".into(), F32)],
+            })
+        },
+    );
+    r.set_keywords(
+        "c32_to_f32_pair",
+        &["complex to float", "real", "imaginary", "deinterleave"],
+    );
     r.register(
         BlockDescriptor {
             kind: "f32_pair_to_c32",
@@ -100,6 +138,10 @@ pub fn register(r: &mut Registry) {
                 outputs: vec![("out".into(), C32)],
             })
         },
+    );
+    r.set_keywords(
+        "f32_pair_to_c32",
+        &["float to complex", "real", "imaginary", "interleave"],
     );
     simple(
         r,
@@ -311,6 +353,30 @@ fn build_c32_to_f32(p: &ParamReader<'_>) -> Result<Instance, Error> {
     })
 }
 
+pub struct ComplexToPair;
+
+impl Block for ComplexToPair {
+    fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
+        let inp = io.inputs[0].slice::<Complex32>();
+        let (re, im) = match &mut *io.outputs {
+            [re, im] => (re.slice_mut::<f32>(), im.slice_mut::<f32>()),
+            _ => unreachable!("built with two outputs"),
+        };
+        let n = inp.len().min(re.len()).min(im.len());
+        if n == 0 {
+            return Ok(WorkStatus::Blocked);
+        }
+        for ((x, r), i) in inp[..n].iter().zip(&mut re[..n]).zip(&mut im[..n]) {
+            *r = x.re;
+            *i = x.im;
+        }
+        io.consume(0, n);
+        io.produce(0, n);
+        io.produce(1, n);
+        Ok(WorkStatus::Ok)
+    }
+}
+
 pub struct PairToComplex;
 
 impl Block for PairToComplex {
@@ -448,6 +514,34 @@ mod tests {
     }
 
     #[test]
+    fn complex_to_re_im() {
+        let mut fg = Flowgraph::new()
+            .with_buffer_capacity(3)
+            .with_buffer_kind(BufferKind::Plain);
+        let x: Vec<Complex32> = (0..10)
+            .map(|i| Complex32::new(i as f32, -(i as f32)))
+            .collect();
+        let src = fg.add("src", VectorSource::instance(x));
+        let conv = fg.add(
+            "conv",
+            crate::registry()
+                .build("c32_to_f32_pair", &Params::new())
+                .unwrap(),
+        );
+        let (s_re, re) = VectorSink::<f32>::instance();
+        let (s_im, im) = VectorSink::<f32>::instance();
+        let (s_re, s_im) = (fg.add("re", s_re), fg.add("im", s_im));
+        fg.connect(src, 0, conv, 0).unwrap();
+        fg.connect(conv, 0, s_re, 0).unwrap();
+        fg.connect(conv, 1, s_im, 0).unwrap();
+        fg.start().unwrap().wait().unwrap();
+        let want: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        assert_eq!(*re.lock().unwrap(), want);
+        let neg: Vec<f32> = want.iter().map(|v| -v).collect();
+        assert_eq!(*im.lock().unwrap(), neg);
+    }
+
+    #[test]
     fn real_to_complex() {
         let out = run::<f32, Complex32>("f32_to_c32", json!({}), vec![1.0, -2.0]);
         assert_eq!(
@@ -550,7 +644,7 @@ mod tests {
             .descriptors()
             .filter(|d| d.category == CATEGORY)
             .collect();
-        assert_eq!(convs.len(), 8);
+        assert_eq!(convs.len(), 9);
         for d in convs {
             assert!(
                 d.inputs.iter().chain(&d.outputs).all(|p| p.ty.is_some()),

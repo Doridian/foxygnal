@@ -21,31 +21,31 @@ audio_rate = "48k"
 id = "iq"
 kind = "file_source"
 params = { type = "c32", path = "fm-recording.c32", sample_rate = "$samp_rate", center_freq = "$center" }
-ui = { x = 40, y = 120 }
+ui = { x = 50, y = 120 }
 
 [[block]]
 id = "channel"
 kind = "freq_xlating_fir"
 params = { offset = "$station - $center", cutoff = 100000.0, transition = 40000.0, decimation = 10, window = "hamming" }
-ui = { x = 290, y = 120 }
+ui = { x = 380, y = 120 }
 
 [[block]]
 id = "demod"
 kind = "fm_demod"
 params = { deviation = 75000.0, deemphasis = "50us" }
-ui = { x = 540, y = 120 }
+ui = { x = 700, y = 120 }
 
 [[block]]
 id = "resample"
 kind = "rational_resampler"
 params = { type = "f32", output_rate = "$audio_rate" }
-ui = { x = 790, y = 120 }
+ui = { x = 1030, y = 120 }
 
 [[block]]
 id = "audio"
 kind = "wav_sink"
 params = { type = "f32", path = "fm-audio.wav", format = "pcm16" }
-ui = { x = 1040, y = 120 }
+ui = { x = 1350, y = 120 }
 
 [[connect]]
 from = "iq.out"

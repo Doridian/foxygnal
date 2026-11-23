@@ -6,6 +6,10 @@
 //! unless something upstream (an SDR) already sets the pace. The server
 //! streams the samples to the browser through an `audio` probe on the wire
 //! feeding it.
+//!
+//! With `type = "c32"` it is a stereo sink: each complex sample is one
+//! frame, the real part left and the imaginary part right, so the channels
+//! travel together and can't drift apart.
 
 use std::time::{Duration, Instant};
 
@@ -25,27 +29,46 @@ pub fn register(r: &mut Registry) {
             label: "Browser Audio",
             category: "Sinks",
             help: "Plays its input in the browser tab that pressed Run. Needs a known sample \
-                   rate (48 kS/s is a safe choice) and samples in −1…1.",
+                   rate (48 kS/s is a safe choice) and samples in −1…1. For stereo set the \
+                   channels to c32 and feed left as the real part, right as the imaginary \
+                   part (e.g. through Re + Im → Complex).",
             inputs: vec![PortSpec {
                 name: "in",
-                ty: Some(StreamType::F32),
+                ty: None,
             }],
             outputs: vec![],
-            params: vec![ParamSpec {
-                name: "pace",
-                label: "Pace",
-                kind: ParamKind::Bool,
-                default: json!(true),
-                help: "Consume at the stream's rate, so files and generators play in real \
-                       time. Turn off when hardware (an SDR) already sets the pace.",
-                live: false,
-            }],
+            params: vec![
+                ParamSpec {
+                    name: "type",
+                    label: "Channels",
+                    kind: ParamKind::Enum {
+                        options: vec!["f32", "c32"],
+                    },
+                    default: json!("f32"),
+                    help: "f32: mono. c32: stereo, real part = left, imaginary part = right.",
+                    live: false,
+                },
+                ParamSpec {
+                    name: "pace",
+                    label: "Pace",
+                    kind: ParamKind::Bool,
+                    default: json!(true),
+                    help: "Consume at the stream's rate, so files and generators play in real \
+                           time. Turn off when hardware (an SDR) already sets the pace.",
+                    live: false,
+                },
+            ],
         },
         build,
     );
 }
 
 fn build(p: &ParamReader<'_>) -> Result<Instance, Error> {
+    // Older graphs have no `type`: the default, mono.
+    let ty = match p.stream_type("type")? {
+        StreamType::C32 => StreamType::C32,
+        _ => StreamType::F32,
+    };
     Ok(Instance {
         block: Box::new(BrowserAudio {
             pace: p.bool("pace")?,
@@ -53,7 +76,7 @@ fn build(p: &ParamReader<'_>) -> Result<Instance, Error> {
             start: None,
             consumed: 0,
         }),
-        inputs: vec![("in".into(), StreamType::F32)],
+        inputs: vec![("in".into(), ty)],
         outputs: vec![],
     })
 }
@@ -79,7 +102,9 @@ impl Block for BrowserAudio {
     }
 
     fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
-        let avail = io.inputs[0].slice::<f32>().len();
+        // One item is one frame, mono (f32) or stereo (c32).
+        let input = &io.inputs[0];
+        let avail = input.bytes().len() / input.stream_type().item_size();
         let mut n = avail;
         if self.pace {
             let start = *self.start.get_or_insert_with(Instant::now);

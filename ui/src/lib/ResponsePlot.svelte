@@ -181,7 +181,7 @@
   <div class="head">
     <span class="small">Frequency response</span>
     <span class="mono muted small">
-      {#if resp}{resp.taps} taps{/if}
+      {#if resp}{resp.taps > 0 ? `${resp.taps} taps` : 'IIR'}{/if}
       {#if rate !== null}· {fmtRate(rate)}{/if}
     </span>
   </div>
@@ -195,7 +195,7 @@
         bind:this={canvas}
         {onpointermove}
         onpointerleave={() => (hover = null)}
-        aria-label="Magnitude response from {fmtHz(fmin)} to {fmtHz(fmax)}{resp ? `, ${resp.taps} taps` : ''}"
+        aria-label="Magnitude response from {fmtHz(fmin)} to {fmtHz(fmax)}{resp ? (resp.taps > 0 ? `, ${resp.taps} taps` : ', IIR') : ''}"
       ></canvas>
       {#if hoverPoint}
         <span class="label mono" style:left="{(hover ?? 0) * 100}%" class:flip={(hover ?? 0) > 0.6}>
