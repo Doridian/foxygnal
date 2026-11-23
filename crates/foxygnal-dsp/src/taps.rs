@@ -41,7 +41,7 @@ pub fn rrc_into(taps: &mut [f32], sps: f64, beta: f64, gain: f64) {
 }
 
 /// The (unnormalized) RRC impulse response at `t` symbols from the peak.
-fn rrc_at(t: f64, beta: f64) -> f64 {
+pub fn rrc_at(t: f64, beta: f64) -> f64 {
     if t.abs() < 1e-9 {
         return 1.0 - beta + 4.0 * beta / PI;
     }

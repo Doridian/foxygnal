@@ -286,7 +286,15 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
       RS(204,188), Forney interleaver, K = 7 convolutional code with puncturing, soft
       Viterbi, packet sync
 - [ ] DVB-S2 (most of QO-100 now): LDPC + BCH, π/2-BPSK to 32APSK, PL headers
-- [ ] Later: ATSC 1.0 (8VSB), DVB-T2
+- [x] ATSC 1.0 (A/53, 8VSB), North American terrestrial TV: `atsc_modulator` and
+      `atsc_demodulator`; pilot search and PLL, segment sync timing, field sync with
+      polarity and field parity, a 64 + 192 tap DFE trained on the field syncs, 12-way
+      trellis deinterleaving and Viterbi, RS(207,187). Bit-exact against gr-dtv both ways
+      (committed fixtures), clean decode down to about 15.5 dB C/N, 1.35× real time at
+      12 MS/s on one core. Checked off air with a PlutoSDR. "ATSC loopback" and "ATSC
+      receiver" templates
+- [ ] ATSC PSIP (virtual channel names)
+- [ ] Later: DVB-T2
 
 ## Open questions
 

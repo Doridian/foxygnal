@@ -17,6 +17,7 @@
 //! not correct is still sent, with its transport_error_indicator bit set, so
 //! the stream keeps its timing.
 
+pub mod atsc;
 pub mod conv;
 mod dvbs;
 pub mod dvbt;
@@ -31,6 +32,7 @@ mod grdtv_vectors;
 
 use foxygnal_core::Registry;
 
+pub use atsc::{AtscDemodulator, AtscModulator};
 pub use dvbs::{DvbsDemodulator, DvbsModulator};
 pub use dvbt::{DvbtDemodulator, DvbtModulator};
 
@@ -44,6 +46,7 @@ pub const SYNC: u8 = 0x47;
 pub const SYNC_INV: u8 = 0xB8;
 
 pub fn register(r: &mut Registry) {
+    atsc::register(r);
     dvbs::register(r);
     dvbt::register(r);
 }

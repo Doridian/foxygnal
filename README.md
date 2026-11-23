@@ -77,6 +77,16 @@ in real time on one core. Templates: "DVB-T loopback" (`examples/dvbt-loopback.f
 and "DVB-T receiver" (an SDR at 9.14 MS/s, e.g. a PlutoSDR or HackRF, to a TS over UDP,
 `examples/dvbt-rx.fox.toml`).
 
+**Digital TV (ATSC).** An ATSC 1.0 modulator and demodulator (A/53 8VSB, terrestrial TV in
+North America and South Korea). The demodulator finds the pilot, segment and field syncs, the
+sample clock and an inverted spectrum by itself, cancels multipath with a decision-feedback
+equalizer trained on the field syncs, and decodes a 19.39 Mbit/s channel in real time on one
+core from any rate ≥ 6.25 MS/s (an SDR at 12 MS/s, e.g. a PlutoSDR). It is bit-exact
+against GNU Radio's gr-dtv in both directions. Templates: "ATSC loopback"
+(`examples/atsc-loopback.fox.toml`) and "ATSC receiver" (`examples/atsc-rx.fox.toml`). The
+Video instrument plays the MPEG-2 video with its AC-3 sound, and picks between subchannels
+and sound tracks.
+
 **Watching digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
 demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
 you pick with its sound (choosing between sound tracks by language), and shows codecs,

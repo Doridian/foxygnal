@@ -1,0 +1,71 @@
+# ATSC receiver: a North American terrestrial digital TV channel (ATSC 1.0,
+# 8VSB) from an SDR, to an MPEG transport stream.
+#
+#   SDR ──▶ ATSC demod ──ts──▶ UDP 127.0.0.1:1234 (ffplay / VLC)
+#                      └─status──▶ message log
+#
+# Set `freq` to the channel's centre frequency. US channels are 6 MHz wide:
+# UHF 14–36 have their lower edge at 470 MHz + 6 MHz × (channel − 14), VHF
+# 7–13 at 174 MHz + 6 MHz × (channel − 7); the centre is 3 MHz above the
+# edge, and the pilot 309.44 kHz above it (2.69 MHz below the centre).
+# Channel 27 (548–554 MHz) is centred on 551 MHz.
+#
+# The demodulator wants at least 6.25 MS/s and is happiest at or above the
+# symbol rate, 4.5 MHz × 684 / 286 = 10.762 MS/s; any rate is resampled
+# inside it. That rules out an RTL-SDR (3.2 MS/s at most). A PlutoSDR
+# (`soapy:driver=plutosdr,uri=ip:192.168.2.1`) or HackRF works at 12M, an
+# Airspy R2 at 10M. Leave `device` empty to use the first device found. It
+# finds the pilot within ±250 kHz, the clock, the segment and field syncs and
+# the spectrum's orientation by itself, and trains its equalizer on the
+# field syncs against multipath.
+#
+# Watch `demod.status` (Messages): `state=lock`, MER and the RS counts. The TS
+# goes to UDP port 1234 on this machine, one datagram per 7 packets:
+#
+#   ffplay -fflags nobuffer udp://127.0.0.1:1234    (or VLC: udp://@:1234)
+#
+# or click the wire out of `demod.ts` and choose Video. A channel carries
+# several subchannels (MPEG-2 video, AC-3 audio); the Video instrument and
+# ffplay pick one.
+#
+#   foxygnal run examples/atsc-rx.fox.toml
+
+[vars]
+freq = "551M"
+rate = "12M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$freq", sample_rate = "$rate", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "atsc_demodulator"
+params = {}
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "ts_out"
+kind = "udp_sink"
+params = { type = "u8", host = "127.0.0.1", port = 1234, header = "none", payload = 1316 }
+ui = { x = 700, y = 60 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 700, y = 200 }
+
+[[connect]]
+from = "sdr.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.ts"
+to = "ts_out.in"
+
+[[connect]]
+from = "demod.status"
+to = "log.in"

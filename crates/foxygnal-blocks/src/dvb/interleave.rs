@@ -8,6 +8,9 @@
 //! in the interleaver: they appear in the interleaved stream exactly where
 //! they were, which is how a receiver finds the packet grid before
 //! deinterleaving. Both sides must start branch 0 on a sync byte.
+//!
+//! The same structure with other sizes is ATSC's byte interleaver (A/53:
+//! 52 branches, M = 4): [`ConvInterleaver::with`].
 
 /// Branches.
 pub const I: usize = 12;
@@ -16,40 +19,50 @@ pub const M: usize = 17;
 /// End-to-end delay in bytes.
 pub const DELAY: usize = (I - 1) * M * I;
 
+/// The most branches [`ConvInterleaver::with`] takes.
+pub const MAX_BRANCHES: usize = 52;
+
 /// One side of the interleaver pair: [`Self::interleaver`] or
 /// [`Self::deinterleaver`].
 pub struct ConvInterleaver {
     /// Every branch's FIFO, back to back.
     buf: Box<[u8]>,
-    start: [usize; I],
-    len: [usize; I],
-    pos: [usize; I],
+    start: [usize; MAX_BRANCHES],
+    len: [usize; MAX_BRANCHES],
+    pos: [usize; MAX_BRANCHES],
+    branches: usize,
     branch: usize,
 }
 
 impl ConvInterleaver {
+    /// The DVB interleaver (I = 12, M = 17).
     pub fn interleaver() -> Self {
-        Self::new(|j| j * M)
+        Self::with(I, M, false)
     }
 
+    /// The DVB deinterleaver.
     pub fn deinterleaver() -> Self {
-        Self::new(|j| (I - 1 - j) * M)
+        Self::with(I, M, true)
     }
 
-    fn new(len_of: impl Fn(usize) -> usize) -> Self {
-        let mut start = [0; I];
-        let mut len = [0; I];
+    /// `branches` branches (at most [`MAX_BRANCHES`]), branch j a FIFO of
+    /// j·m bytes, or (branches − 1 − j)·m for the `inverse`.
+    pub fn with(branches: usize, m: usize, inverse: bool) -> Self {
+        assert!((1..=MAX_BRANCHES).contains(&branches));
+        let mut start = [0; MAX_BRANCHES];
+        let mut len = [0; MAX_BRANCHES];
         let mut total = 0;
-        for j in 0..I {
+        for j in 0..branches {
             start[j] = total;
-            len[j] = len_of(j);
+            len[j] = if inverse { branches - 1 - j } else { j } * m;
             total += len[j];
         }
         Self {
             buf: vec![0; total].into_boxed_slice(),
             start,
             len,
-            pos: [0; I],
+            pos: [0; MAX_BRANCHES],
+            branches,
             branch: 0,
         }
     }
@@ -57,7 +70,7 @@ impl ConvInterleaver {
     /// Empty every FIFO and start again at branch 0.
     pub fn reset(&mut self) {
         self.buf.fill(0);
-        self.pos = [0; I];
+        self.pos = [0; MAX_BRANCHES];
         self.branch = 0;
     }
 
@@ -65,7 +78,7 @@ impl ConvInterleaver {
     #[inline]
     pub fn push(&mut self, x: u8) -> u8 {
         let j = self.branch;
-        self.branch = if j == I - 1 { 0 } else { j + 1 };
+        self.branch = if j + 1 == self.branches { 0 } else { j + 1 };
         let len = self.len[j];
         if len == 0 {
             return x;
@@ -114,6 +127,19 @@ mod tests {
         }
         // Branch 1 is delayed by 17 visits of 12 bytes.
         assert_eq!(x[1 + 17 * 12], data[1]);
+    }
+
+    #[test]
+    fn atsc_sizes_delay_every_byte_by_10608() {
+        let mut il = ConvInterleaver::with(52, 4, false);
+        let mut dil = ConvInterleaver::with(52, 4, true);
+        let delay = 52 * 51 * 4;
+        let n = delay + 3000;
+        let data: Vec<u8> = (0..n).map(|i| (i * 13 + 5) as u8).collect();
+        let mut x = data.clone();
+        il.process(&mut x);
+        dil.process(&mut x);
+        assert_eq!(&x[delay..], &data[..n - delay]);
     }
 
     #[test]

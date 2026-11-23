@@ -321,6 +321,18 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/dvbt-rx.fox.toml"),
     },
     Example {
+        name: "atsc-loopback",
+        title: "ATSC loopback (8VSB)",
+        description: "A transport stream file → ATSC 8VSB modulator → noise and a 20 kHz offset → ATSC demodulator → the Video instrument (click `demod.ts`, choose Video). No hardware needed; make the TS file (19.39 Mbit/s) with ffmpeg as described at the top of the file. Needs a fast machine (10.76 MS/s).",
+        toml: include_str!("../../../examples/atsc-loopback.fox.toml"),
+    },
+    Example {
+        name: "atsc-rx",
+        title: "ATSC receiver (8VSB)",
+        description: "An SDR on a North American digital TV channel at 12 MS/s (PlutoSDR, HackRF, Airspy; not an RTL-SDR) → ATSC demodulator → TS over UDP for ffplay or VLC. Set the channel's centre frequency. Needs a real receiver.",
+        toml: include_str!("../../../examples/atsc-rx.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",

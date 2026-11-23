@@ -968,6 +968,96 @@ the sample rate differs), and gr-dtv's receiver with offsets or noise.
 Viterbi ≈ 0.32 ms, equalizing and demapping ≈ 0.15 ms, packet sync and RS ≈ 0.09 ms, the
 resampler ≈ 0.05 ms, the FFT 0.01 ms.
 
+## ATSC (M14)
+
+`blocks/src/dvb/atsc/` is ATSC 1.0 (A/53 Part 2), 8VSB: `fec.rs` holds the data path as plain
+structs (tables, encoder, Viterbi, outer decoder), `mod.rs` the two blocks and the transmit
+shaper, `rx.rs` the receiver. The RS code and the convolutional interleaver are DVB's, made
+generic: `rs::Code::new(n, parity)` (DVB is (204, 16), ATSC (207, 20); both GF(256) with
+0x11D, first root α⁰) and `ConvInterleaver::with(branches, m, inverse)` (ATSC: 52 × 4, a delay
+of 10 608 bytes, 51 bytes past a whole number of 207-byte segments).
+
+**Signal.** 10.762238 MSym/s (4.5 MHz × 684/286) of levels ±1, ±3, ±5, ±7 in segments of 832
+symbols (4 sync, +5 −5 −5 +5, then 828 data), 313 segments a field (one field sync, 312 data
+segments of one RS-coded packet each). A pilot (+1.25 on every level) sits 309.44 kHz above
+the lower band edge. The transmitter multiplies symbol k by (−j)^k (the band down by Rs/4) and
+filters with a real RRC (α = 0.1152) for a "symbol" of two symbols: that is the vestigial
+sideband, centred on the channel, with the pilot at −Rs/4. The receiver's matched filter
+sampled at symbol k and multiplied by j^k gives the symbols in the real part, free of ISI (the
+pulse is RC₂T(τ)·cos(πτ/2), zero at every nonzero integer).
+
+**Data path** (checked against gr-dtv, see below): randomizer (16-bit LFSR from 0x018F,
+reset every field, the whole field's XOR table built once), RS(207,187), the byte interleaver,
+then the trellis code: 12 encoders, each 2/3 rate (x2 precoded, x1 into a 4-state code),
+fed in gr-dtv's order (segment s starts with encoder 4s mod 12; a table maps every data
+symbol of a 12-segment block to its encoder, byte and bit shift). The field sync: PN511,
+PN63 three times (the middle one inverted in field 2), 24 VSB mode symbols, 92 reserved (a
+PN63 continuation) and the last 12 symbols of the previous segment.
+
+**Modulator** (`atsc_modulator`): packets → `fec::Encoder` (emits a field sync when a field
+starts) → levels + pilot → a polyphase interpolator (512 phases, ±16 symbols) applying the
+(−j)^k shift and the RRC at any output rate. Output RMS is `gain`, pilot included.
+
+**Demodulator** (`atsc_demodulator`):
+
+1. **DC removal** and, when the pilot search found it at the upper edge, conjugation (an
+   inverted spectrum).
+2. **Pilot search**: 4 averaged FFTs; the strongest line within ±250 kHz of where the pilot
+   belongs, at least 30× the median. An NCO removes the offset.
+3. **Matched filter and resampler in one** (`SymbolFilter`): the receive RRC evaluated at any
+   input position from a 256-phase bank, one output per symbol at the position the timing
+   loop asks for. Any input rate from 6.25 MS/s up works; the step is the nominal ratio, and
+   the loop corrects position and step (the clock offset).
+4. **Carrier**: ×j^k, then a PLL on the pilot low-passed at 1/512 (1 kHz bandwidth while
+   searching, 500 Hz at segment lock, 300 Hz at field lock). AGC to level units (data power
+   21) after removing the pilot's DC.
+5. **Segment sync**: the +5 −5 −5 +5 correlation at every position mod 832, leaky-averaged
+   (1/16); the best is the origin, and slips are followed after 8 segments in a row.
+6. **Timing**: early/late at ±½ symbol at the 4 sync symbols, Σ s·(late − early), scaled by
+   the pulse's slope, into a critically damped second-order loop whose gain steps down
+   (0.1 → 0.05 → 0.03) as it settles. It pulls in ±50 ppm.
+7. **Field sync**: the normalized PN511 correlation in every segment (threshold 0.35, the
+   clock settled first); negative flips the polarity, the two PN63s give the field parity. 3
+   missed field syncs drop the field lock; two strong ones out of place re-lock.
+8. **Equalizer**: a DFE, 64 feed-forward taps (40 ahead of the symbol decided) and 192
+   feedback taps on the decisions (17.8 µs of post-echo), LMS. At each field sync's end its
+   728 known symbols are replayed (32 passes the first time, 8 for the next 3) with the
+   feedback taps fed the known symbols; then the known symbols (segment syncs and field
+   syncs) train it, and decisions in between (every other symbol once trained). MER is
+   measured on the field sync.
+9. **Decoding**: 12 four-state Viterbi decoders, hard decisions in level units, the two
+   parallel transitions of each branch resolved by the nearer level (traceback 40, 24
+   decided at a time), the precoder undone on the output; trellis deinterleaving by the
+   same table; the byte deinterleaver, RS, derandomizer. Decoding starts with a field's first
+   data segment; packets come out with the TEI bit set when RS fails.
+
+Status follows DVB: `event=lock freq_hz=… clock_ppm=… spectrum=normal|inverted field=1|2`,
+`event=unlock`, and once a second `state=search|sync|lock mer_db=… freq_hz=… clock_ppm=…
+rs_corrected=… rs_failed=… packets=… pps=… fields=… pn63_errors=…`.
+
+**Against gr-dtv** (GNU Radio 3.10). `scripts/atsc-fixtures.py` runs gr-dtv's transmit chain
+on the stream `tests/atsc.rs` builds and commits the first 97 segments of symbols plus a hash
+of 626; the tests check our encoder against both and decode gr-dtv's symbols. Through the
+air interface too (IQ at 12 MS/s, an MPEG-2 + AC-3 stream from ffmpeg): gr-dtv's transmitter
+(its symbols, an RRC from `firdes`, an arbitrary resampler, 35 kHz off) into our
+demodulator, 76 916 packets out of 76 916 identical; our modulator into gr-dtv's `atsc_rx`,
+which decodes it once its slow loops converge (as it does gr-dtv's own signal).
+
+**Measured** (`tests/atsc.rs`, release build; C/N = total power over the noise in 6 MHz):
+every packet clean from 16 dB, 5 of 1928 lost at 15.5 dB, 20 % at 15 dB, about A/53's
+15.2 dB threshold (`threshold_sweep`, ignored by default). Bit-exact with a 40 kHz offset, ±50
+ppm, and two echoes (−3 dB 86 symbols late, −11 dB 16 symbols early) at 28 dB.
+
+**Speed** (`cargo bench -p foxygnal-blocks --bench blocks -- atsc`, one core, AVX2): 16.3 MS/s
+at a 12 MS/s input, 1.35× real time. Per input sample about 27 cycles for the matched
+filter, 45 for the DFE output, 40 for its adaptation (half that once trained), 40 for the
+Viterbi decoders and 5 for RS.
+
+**Off air** (a PlutoSDR at 12 MS/s): a strong UHF channel decodes at 23–24 dB MER with no
+errors once the equalizer has converged, apart from a few short bursts; its MPEG-2 video and
+AC-3 play in ffmpeg. Watch the gain: the Pluto clips on strong channels long before the
+picture looks bad.
+
 ## Recording and playback (M6)
 
 **Tags ↔ SigMF.** `blocks/src/sigmf.rs` maps tags to SigMF metadata and back. `SigmfWriter`

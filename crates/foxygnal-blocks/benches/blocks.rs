@@ -444,12 +444,58 @@ fn dvbt_demodulator(c: &mut Criterion) {
     }
 }
 
+/// ATSC 8VSB at 12 MS/s (a Pluto's rate; real time is 12 M elements/s),
+/// 20 fields (0.48 s), with noise at 25 dB and a 3 kHz offset.
+fn atsc_demodulator(c: &mut Criterion) {
+    use foxygnal_blocks::testing::VectorSink;
+    let reg = foxygnal_blocks::registry();
+    let rate = 12e6;
+    let ts: Vec<u8> = (0..20 * 312 + 24u32)
+        .flat_map(|i| {
+            let mut p = vec![0x47, 0x01, 0x00, 0x10 | (i as u8 & 15)];
+            p.extend((4..188u32).map(|k| (i.wrapping_mul(31) ^ k.wrapping_mul(97)) as u8));
+            p
+        })
+        .collect();
+    let mut fg = Flowgraph::new();
+    let src = fg.add("src", VectorSource::instance(ts));
+    let p = json!({ "sample_rate": rate, "gain": 0.25 });
+    let m = fg.add("mod", reg.build("atsc_modulator", &params(p)).unwrap());
+    let (sink, out) = VectorSink::<Complex32>::instance();
+    let sink = fg.add("sink", sink);
+    fg.connect(src, 0, m, 0).unwrap();
+    fg.connect(m, 0, sink, 0).unwrap();
+    fg.start().unwrap().wait().unwrap();
+    let clean = out.lock().unwrap().clone();
+    let power = clean.iter().map(|x| x.norm_sqr()).sum::<f32>() / clean.len() as f32;
+    // 25 dB in the 6 MHz channel.
+    let sigma = (power / 10f32.powf(2.5) * (rate as f32 / 6e6)).sqrt();
+    let nz = cnoise(clean.len(), 13);
+    let data: Vec<Complex32> = clean
+        .iter()
+        .zip(&nz)
+        .enumerate()
+        .map(|(i, (&x, &n))| {
+            let ph = std::f64::consts::TAU * 3_000.0 * i as f64 / rate;
+            x * Complex32::from_polar(1.0, ph as f32) + n * (sigma / 0.2887 / 2f32.sqrt())
+        })
+        .collect();
+    let chain = Chain {
+        data,
+        rate,
+        blocks: vec![("atsc_demodulator", json!({}))],
+        sink_type: "u8",
+    };
+    bench_chain(c, "graph", "atsc_8vsb_12msps", chain);
+}
+
 criterion_group!(
     benches,
     blocks,
     sources,
     fm_receiver,
     dvbs_demodulator,
-    dvbt_demodulator
+    dvbt_demodulator,
+    atsc_demodulator
 );
 criterion_main!(benches);

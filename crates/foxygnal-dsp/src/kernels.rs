@@ -87,6 +87,8 @@ pub struct Kernels {
     pub u8_to_f32: fn(x: &[u8], scale: f32, offset: f32, y: &mut [f32]),
     /// `y = x·scale` from 16-bit integers.
     pub i16_to_f32: fn(x: &[i16], scale: f32, y: &mut [f32]),
+    /// `y += a·x` (an LMS tap update).
+    pub axpy: fn(a: f32, x: &[f32], y: &mut [f32]),
 }
 
 /// `rotate(phasor, steps, step8, x, y) -> next phasor`, see [`Kernels::rotate`].
@@ -144,6 +146,7 @@ impl Kernels {
             fm_discriminate: b::fm_discriminate,
             u8_to_f32: b::u8_to_f32,
             i16_to_f32: b::i16_to_f32,
+            axpy: b::axpy,
         }
     }
 
@@ -168,6 +171,7 @@ impl Kernels {
             fm_discriminate: a::fm_discriminate,
             u8_to_f32: a::u8_to_f32,
             i16_to_f32: a::i16_to_f32,
+            axpy: a::axpy,
         })
     }
 
@@ -234,6 +238,8 @@ macro_rules! kernel_set {
                 => p::u8_to_f32::<FMA>(x, scale, offset, y));
             kernel_set!(@fn $fma $(, $feat)?;
                 i16_to_f32(x: &[i16], scale: f32, y: &mut [f32]) -> () => p::i16_to_f32(x, scale, y));
+            kernel_set!(@fn $fma $(, $feat)?;
+                axpy(a: f32, x: &[f32], y: &mut [f32]) -> () => p::axpy::<FMA>(a, x, y));
         }
     };
     (@fn $fma:expr; $name:ident($($a:ident: $t:ty),*) -> $r:ty => $body:expr) => {
@@ -642,6 +648,13 @@ mod portable {
             *y = x as f32 * scale;
         }
     }
+
+    #[inline(always)]
+    pub fn axpy<const FMA: bool>(a: f32, x: &[f32], y: &mut [f32]) {
+        for (y, &x) in y.iter_mut().zip(x) {
+            *y = fma::<FMA>(a, x, *y);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -860,6 +873,14 @@ mod tests {
                             "{:?} i16",
                             k.level
                         );
+                    }
+                    let xs: Vec<f32> = (0..n + off).map(|i| (i as f32 * 0.37).sin()).collect();
+                    let before: Vec<f32> = (0..n).map(|i| i as f32 * 0.01).collect();
+                    yf.copy_from_slice(&before);
+                    (k.axpy)(-0.5, &xs[off..], &mut yf);
+                    for i in 0..n {
+                        let want = before[i] - 0.5 * xs[off + i];
+                        assert!((yf[i] - want).abs() < 1e-6, "{:?} axpy", k.level);
                     }
                 }
             }
