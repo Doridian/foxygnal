@@ -16,6 +16,7 @@ mod meter;
 mod scope;
 mod source;
 mod spectrum;
+mod text;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -42,6 +43,8 @@ pub enum ProbeConfig {
     Meter {},
     /// Every sample of a real (f32/i16/u8) stream, for playback in the browser.
     Audio {},
+    /// The lines of a `u8` wire carrying UTF-8 text (decoded messages).
+    Text {},
 }
 
 impl ProbeConfig {
@@ -52,6 +55,7 @@ impl ProbeConfig {
             Self::Constellation(_) => 3,
             Self::Meter {} => 4,
             Self::Audio {} => 5,
+            Self::Text {} => 6,
         }
     }
 
@@ -73,6 +77,13 @@ impl ProbeConfig {
                 ));
             }
             Self::Audio {} => Box::new(audio::Audio::default()),
+            Self::Text {} if ty != StreamType::U8 => {
+                return Err(format!(
+                    "Messages need a text (u8) wire, such as a decoder's output; this one \
+                     carries {ty}."
+                ));
+            }
+            Self::Text {} => Box::new(text::Text::new()),
         })
     }
 }

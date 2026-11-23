@@ -4,7 +4,7 @@
 
 import type { EdgeRef, FftWindow, ProbeConfig, ScopeChannel, TriggerMode } from './api';
 
-export type InstrumentKind = 'scope' | 'spectrum' | 'constellation' | 'meter';
+export type InstrumentKind = 'scope' | 'spectrum' | 'constellation' | 'meter' | 'text';
 
 export interface ScopeSettings {
   channels: ScopeChannel[];
@@ -44,6 +44,13 @@ export interface ConstellationSettings {
 
 export type MeterSettings = Record<string, never>;
 
+export interface TextSettings {
+  /** Lines kept on screen; older ones scroll away. */
+  maxLines: number;
+  /** Show only lines containing this (case-insensitive). */
+  filter: string;
+}
+
 interface Base {
   /** Also the probe id and the badge number on the wire. */
   id: number;
@@ -59,6 +66,7 @@ export type Instrument = Base &
     | { kind: 'spectrum'; settings: SpectrumSettings }
     | { kind: 'constellation'; settings: ConstellationSettings }
     | { kind: 'meter'; settings: MeterSettings }
+    | { kind: 'text'; settings: TextSettings }
   );
 
 export const defaults = {
@@ -88,6 +96,7 @@ export const defaults = {
   }),
   constellation: (): ConstellationSettings => ({ points: 1024, persistence: 0.6, scale: 1 }),
   meter: (): MeterSettings => ({}),
+  text: (): TextSettings => ({ maxLines: 2000, filter: '' }),
 };
 
 export const KIND_LABELS: Record<InstrumentKind, string> = {
@@ -95,6 +104,7 @@ export const KIND_LABELS: Record<InstrumentKind, string> = {
   spectrum: 'Spectrum',
   constellation: 'Constellation',
   meter: 'Level meter',
+  text: 'Messages',
 };
 
 export function title(inst: Instrument): string {
@@ -129,6 +139,8 @@ export function probeConfig(inst: Instrument, width: number, rate: number | null
       return { kind: 'constellation', points: inst.settings.points };
     case 'meter':
       return { kind: 'meter' };
+    case 'text':
+      return { kind: 'text' };
   }
 }
 
@@ -234,6 +246,7 @@ class Instruments {
     if (kind === 'spectrum') inst = { ...base, kind, settings: { ...defaults.spectrum(), ...(view ? { view } : {}) } };
     else if (kind === 'scope') inst = { ...base, kind, settings: defaults.scope() };
     else if (kind === 'constellation') inst = { ...base, kind, settings: defaults.constellation() };
+    else if (kind === 'text') inst = { ...base, kind, settings: defaults.text(), fps: 10 };
     else inst = { ...base, kind, settings: defaults.meter(), fps: 15 };
     this.list.push(inst);
     this.save();

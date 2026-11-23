@@ -5,6 +5,7 @@ pub mod browser_audio;
 pub mod convert;
 pub mod demod;
 mod design;
+pub mod digital;
 pub mod file;
 pub mod filters;
 pub mod flow;
@@ -43,4 +44,5 @@ pub fn register_all(r: &mut Registry) {
     audio::register(r);
     browser_audio::register(r);
     sdr::register(r);
+    digital::register(r);
 }

@@ -5,6 +5,7 @@
   let { type, onpick }: { type: StreamType | null; onpick: (kind: InstrumentKind, view?: SpectrumSettings['view']) => void } = $props();
 
   const complex = $derived(type === 'c32');
+  const bytes = $derived(type === 'u8');
 </script>
 
 <div class="watch" role="group" aria-label="Watch this wire">
@@ -13,9 +14,12 @@
   <button type="button" onclick={() => onpick('spectrum', 'waterfall')}>Waterfall</button>
   <button type="button" onclick={() => onpick('meter')}>Level meter</button>
   <button type="button" onclick={() => onpick('constellation')} disabled={!complex}>Constellation</button>
+  <button type="button" onclick={() => onpick('text')} disabled={!bytes} title="Text lines, e.g. a decoder's messages">Messages</button>
 </div>
-{#if !complex}
-  <p class="note">Constellation needs a complex (c32) wire.</p>
+{#if bytes}
+  <p class="note">Messages shows the text a decoder writes on this wire.</p>
+{:else if !complex}
+  <p class="note">Constellation needs a complex (c32) wire; Messages a text (u8) wire.</p>
 {/if}
 
 <style>

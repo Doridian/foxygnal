@@ -325,3 +325,179 @@ fn sigmf_integer_types() {
         assert!(d.norm() < 1e-6, "{i}: {v}");
     }
 }
+
+/// Tags into a SigMF recording and back out: retunes become capture
+/// segments, other tags annotations, all at the right sample.
+#[test]
+fn sigmf_tags_round_trip() {
+    use foxygnal_core::{Tag, TagValue};
+    let base = scratch("tagged");
+    let n = 1000;
+    let data: Vec<Complex32> = (0..n).map(|i| Complex32::new(i as f32, 0.0)).collect();
+    let tags = vec![
+        Tag::new(0, "hw", "Simulated FM band (sim:)"),
+        Tag::new(0, "rx_freq", 100e6),
+        Tag::new(300, "rx_freq", 101.5e6),
+        Tag::new(500, "overflow", 42i64),
+        Tag::new(700, "packet", "hello"),
+        Tag::new(800, "rx_gain", f64::NAN),
+    ];
+    let mut fg = Flowgraph::new().with_buffer_capacity(37);
+    let s = fg.add("src", VectorSource::with_tags(data, tags));
+    let k = fg.add(
+        "sink",
+        build(
+            "sigmf_sink",
+            json!({"type": "c32", "path": path_str(&base)}),
+        ),
+    );
+    fg.connect(s, 0, k, 0).unwrap();
+    fg.start().unwrap().wait().unwrap();
+
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(base.with_extension("sigmf-meta")).unwrap())
+            .unwrap();
+    assert!(!base.with_extension("sigmf-meta.tmp").exists());
+    assert_eq!(meta["global"]["core:hw"], "Simulated FM band (sim:)");
+    let caps = meta["captures"].as_array().unwrap();
+    assert_eq!(caps.len(), 2, "{caps:?}");
+    assert_eq!(caps[0]["core:sample_start"], 0);
+    assert_eq!(caps[0]["core:frequency"], 100e6);
+    assert_eq!(caps[1]["core:sample_start"], 300);
+    assert_eq!(caps[1]["core:frequency"], 101.5e6);
+    let ann = meta["annotations"].as_array().unwrap();
+    assert_eq!(ann.len(), 3, "{ann:?}");
+    assert_eq!(ann[0]["core:sample_start"], 500);
+    assert_eq!(ann[0]["core:label"], "overflow");
+    assert_eq!(ann[0]["foxygnal:overflow"], 42);
+    assert_eq!(ann[1]["core:sample_start"], 700);
+    assert_eq!(ann[1]["foxygnal:packet"], "hello");
+    assert_eq!(ann[2]["core:label"], "rx_gain");
+    assert!(ann[2]["foxygnal:rx_gain"].is_null(), "NaN has no JSON form");
+
+    // Back out as tags at the same items, again on every loop.
+    let mut fg = Flowgraph::new().with_buffer_capacity(37);
+    let s = fg.add(
+        "src",
+        build(
+            "sigmf_source",
+            json!({"type": "c32", "path": path_str(&base), "repeat": true}),
+        ),
+    );
+    let h = fg.add(
+        "head",
+        build("head", json!({"type": "c32", "count": 2 * n})),
+    );
+    let (sink, out, got) = VectorSink::<Complex32>::with_tags();
+    let k = fg.add("sink", sink);
+    fg.connect(s, 0, h, 0).unwrap();
+    fg.connect(h, 0, k, 0).unwrap();
+    let meta = fg.configure().unwrap()[0].meta;
+    assert_eq!(meta.center_freq, Some(100e6));
+    fg.start().unwrap().wait().unwrap();
+    assert_eq!(out.lock().unwrap().len(), 2 * n);
+    let got = got.lock().unwrap().clone();
+    let key = |t: &Tag| (t.offset, t.key.to_string());
+    let mut want = Vec::new();
+    for pass in [0, n as u64] {
+        want.extend([
+            (pass, "hw".to_owned()),
+            (pass, "rx_freq".to_owned()),
+            (pass + 300, "rx_freq".to_owned()),
+            (pass + 500, "overflow".to_owned()),
+            (pass + 700, "packet".to_owned()),
+            (pass + 800, "rx_gain".to_owned()),
+        ]);
+    }
+    assert_eq!(got.iter().map(key).collect::<Vec<_>>(), want);
+    assert_eq!(got[2].value, TagValue::Float(101.5e6));
+    assert_eq!(got[3].value, TagValue::Int(42));
+    assert_eq!(got[4].value, TagValue::Str("hello".into()));
+    assert!(matches!(got[5].value, TagValue::Float(v) if v.is_nan()));
+}
+
+/// Interleaved I/Q (ci16): tags land on sample indices in the metadata and
+/// on item indices again when played back as raw i16.
+#[test]
+fn sigmf_interleaved_tags_use_sample_indices() {
+    use foxygnal_core::Tag;
+    let base = scratch("tagged-ci16");
+    let data: Vec<i16> = (0..400).collect();
+    let mut fg = Flowgraph::new().with_buffer_capacity(37);
+    let s = fg.add(
+        "src",
+        VectorSource::with_tags(data, vec![Tag::new(100, "burst", true)]),
+    );
+    let k = fg.add(
+        "sink",
+        build(
+            "sigmf_sink",
+            json!({"type": "i16", "complex": true, "path": path_str(&base)}),
+        ),
+    );
+    fg.connect(s, 0, k, 0).unwrap();
+    fg.start().unwrap().wait().unwrap();
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(base.with_extension("sigmf-meta")).unwrap())
+            .unwrap();
+    assert_eq!(meta["global"]["core:datatype"], "ci16_le");
+    assert_eq!(meta["annotations"][0]["core:sample_start"], 50);
+    assert_eq!(meta["annotations"][0]["foxygnal:burst"], true);
+
+    let tags_of = |ty: &str| {
+        let mut fg = Flowgraph::new();
+        let s = fg.add(
+            "src",
+            build("sigmf_source", json!({"type": ty, "path": path_str(&base)})),
+        );
+        let (k, got) = if ty == "i16" {
+            let (sink, _, got) = VectorSink::<i16>::with_tags();
+            (fg.add("sink", sink), got)
+        } else {
+            let (sink, _, got) = VectorSink::<Complex32>::with_tags();
+            (fg.add("sink", sink), got)
+        };
+        fg.connect(s, 0, k, 0).unwrap();
+        fg.start().unwrap().wait().unwrap();
+        let got = got.lock().unwrap().clone();
+        got.iter()
+            .map(|t| (t.offset, t.key.to_string()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tags_of("i16"), vec![(100, "burst".to_owned())]);
+    assert_eq!(tags_of("c32"), vec![(50, "burst".to_owned())]);
+}
+
+/// The metadata is usable from the moment a recording starts, and later
+/// annotations reach it at the latest when it finishes.
+#[test]
+fn sigmf_writer_meta_is_usable_before_finish() {
+    use foxygnal_blocks::sigmf::{RecordingInfo, SigmfWriter, parse_meta, parse_tags};
+    use foxygnal_core::{StreamType, TagValue};
+    let base = scratch("crash");
+    let info = RecordingInfo {
+        sample_rate: Some(48_000.0),
+        frequency: Some(7.1e6),
+        description: Some("test".into()),
+        ..RecordingInfo::default()
+    };
+    let mut w = SigmfWriter::create(&base, StreamType::F32, &info).unwrap();
+    w.write(&[0u8; 400]).unwrap();
+    w.tag(10, "squelch", &TagValue::Bool(true));
+    let text = std::fs::read_to_string(base.with_extension("sigmf-meta")).unwrap();
+    let m = parse_meta(&text).unwrap();
+    assert_eq!((m.sample_rate, m.frequency), (Some(48_000.0), Some(7.1e6)));
+    assert!(
+        parse_tags(&text)
+            .unwrap()
+            .iter()
+            .all(|t| &*t.key != "squelch")
+    );
+    w.gap(50, 7);
+    w.finish().unwrap();
+    assert_eq!((w.items(), w.bytes()), (100, 400));
+    let text = std::fs::read_to_string(base.with_extension("sigmf-meta")).unwrap();
+    let tags = parse_tags(&text).unwrap();
+    let keys: Vec<_> = tags.iter().map(|t| (t.offset, &*t.key)).collect();
+    assert_eq!(keys, vec![(0, "rx_freq"), (10, "squelch"), (50, "gap")]);
+}

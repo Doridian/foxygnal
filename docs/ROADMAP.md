@@ -79,9 +79,14 @@ Goal: credible numbers on a Raspberry Pi.
 ## M6: Ecosystem
 
 - [ ] Out-of-tree block plugins (decide: WASM components vs. Rust dylibs vs. compiled-in crates)
-- [ ] Digital modes: FSK/PSK modems, clock recovery, packet framing, a few decoders (ADS-B, POCSAG, …)
-- [ ] Recording and playback workflow (SigMF-annotated captures)
-- [ ] Maybe: GNU Radio `.grc` import for common blocks
+- [x] Digital modes: FSK/PSK modems, clock recovery, packet framing, a few decoders (ADS-B, POCSAG, …)
+      — clock recovery (Gardner / M&M), Costas loop, slicer, PSK demapper, 2-FSK, access
+      code + packet decoder, ADS-B (DF17/18 only, no Mode S phase correction or local CPR);
+      decoded messages are text lines shown by the generic Messages instrument. Not yet:
+      POCSAG, AX.25/HDLC, FEC, GFSK/GMSK, multi-level FSK
+- [x] Recording and playback workflow (SigMF-annotated captures)
+- [x] GNU Radio `.grc` import, common blocks only (`foxygnal import`, or open a `.grc` in the
+  browser; [GRC_IMPORT.md](GRC_IMPORT.md))
 
 ## Open questions
 

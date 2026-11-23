@@ -27,8 +27,11 @@
   $effect(() => {
     dialog?.showModal();
   });
+  // GNU Radio `.grc` files can be opened (imported) but never saved over.
+  // svelte-ignore state_referenced_locally
+  const opening = mode === 'open';
   listFiles()
-    .then((f) => (files = f))
+    .then((f) => (files = opening ? f : f.filter((x) => x.name.endsWith(EXT))))
     .catch((e) => (loadError = String(e.message ?? e)));
 
   const fullName = $derived(name.trim() && !name.trim().endsWith(EXT) ? `${name.trim()}${EXT}` : name.trim());
@@ -42,7 +45,10 @@
 
 <dialog bind:this={dialog} onclose={onclose} aria-labelledby="fd-title">
   <h2 id="fd-title">{mode === 'open' ? 'Open a graph' : 'Save graph as'}</h2>
-  <p class="muted small">Files in the engine's project folder (<code>--project-dir</code>).</p>
+  <p class="muted small">
+    Files in the engine's project folder (<code>--project-dir</code>).{#if mode === 'open'}
+      GNU Radio <code>.grc</code> files are converted when opened; save the result as <code>.fox.toml</code>.{/if}
+  </p>
   {#if loadError}
     <p class="error">{loadError}</p>
   {:else if files === null}

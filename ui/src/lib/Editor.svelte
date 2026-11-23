@@ -15,7 +15,7 @@
   import TxDialog from './TxDialog.svelte';
   import { graphView } from './graphview.svelte';
   import { instruments } from './instruments.svelte';
-  import { GRAPH_KIND, emptyGraph, fetchBlocks, fetchExample, openFile, parseToml, renderToml, saveFile, type BlockDescriptor, type DeviceInfo, type Exports, type GraphSpec, type TxInfo } from './api';
+  import { GRAPH_KIND, emptyGraph, fetchBlocks, fetchExample, importFile, importText, isGrc, openFile, parseToml, renderToml, saveFile, type BlockDescriptor, type DeviceInfo, type Exports, type GraphSpec, type RecordingInfo, type Imported, type TxInfo } from './api';
   import { ID_RE, baseForCopy, baseForKind, convertersFor, edgeId, extrasOf, freshId, fromSpec, rejectReason, toSpec, typeOf, type BlockNode, type GraphExtras, type Wire } from './graph';
   import { renameRef, resolveVars } from './expr';
   import { session } from './session.svelte';
@@ -237,12 +237,26 @@
     dialog = null;
     if (!confirmDiscard()) return;
     try {
+      if (isGrc(name)) return showImport(await importFile(name), name);
       const g = await openFile(name);
       await refreshBlocks();
       replaceGraph(g, name);
     } catch (e) {
       toast(`Couldn't open ${name}: ${(e as Error).message}`, 'error');
     }
+  }
+
+  /** Load a converted GNU Radio flowgraph as a new, unsaved graph (Save offers `imp.name`). */
+  function showImport(imp: Imported, source: string) {
+    replaceGraph(imp.graph, null);
+    suggestedName = imp.name;
+    const n = imp.warnings.length;
+    if (!n) return toast(`Imported ${source}`);
+    const shown = imp.warnings.slice(0, 6).map((w) => `• ${w}`);
+    if (n > shown.length) shown.push(`…and ${n - shown.length} more (Copy lists all)`);
+    toast(`Imported ${source} with ${n} warning${n > 1 ? 's' : ''}:\n${shown.join('\n')}`, 'info', [
+      { label: 'Copy', run: () => navigator.clipboard?.writeText(imp.warnings.join('\n')) },
+    ], 30000);
   }
 
   async function save(as = false) {
@@ -295,6 +309,10 @@
     e.currentTarget.value = '';
     if (!file || !confirmDiscard()) return;
     try {
+      if (isGrc(file.name)) {
+        const imp = await importText(await file.text());
+        return showImport({ ...imp, name: `${file.name.replace(/\.grc$/i, '')}${EXT}` }, file.name);
+      }
       const g = await parseToml(await file.text());
       replaceGraph(g, null);
       suggestedName = file.name.endsWith(EXT) ? file.name : `${file.name.replace(/\.toml$/, '')}${EXT}`;
@@ -532,6 +550,11 @@
     if (desc) addBlock(desc, viewCentre(), { device: d.args });
   }
 
+  function addRecording(r: RecordingInfo) {
+    const desc = catalog.get('sigmf_source');
+    if (desc) addBlock(desc, viewCentre(), { path: r.path, type: r.datatype?.startsWith('r') ? 'f32' : 'c32' });
+  }
+
   function toggleRun() {
     if (running) session.stop();
     else if (nodes.length) run();
@@ -584,7 +607,7 @@
     { label: 'Save', keys: 'Ctrl S', run: () => save() },
     { label: 'Save as…', keys: 'Ctrl ⇧ S', run: () => save(true) },
     { label: 'Download .fox.toml', run: download },
-    { label: 'Upload .fox.toml…', run: upload },
+    { label: 'Upload .fox.toml or .grc…', run: upload },
   ];
 </script>
 
@@ -594,7 +617,7 @@
   <div class="top">
     <TopBar {dirty} blocks={nodes.length} onrun={run} onstop={() => session.stop()} {actions} />
   </div>
-  <Palette catalog={descriptors} {loadError} onadd={(d) => addBlock(d)} ondevice={addDevice} bind:search bind:input={searchInput} />
+  <Palette catalog={descriptors} {loadError} onadd={(d) => addBlock(d)} ondevice={addDevice} onrecording={addRecording} bind:search bind:input={searchInput} />
   <main class="canvas" bind:this={canvas} {ondragover} {ondrop} {ondblclick}>
     <SvelteFlow
       bind:nodes
@@ -641,7 +664,7 @@
   <Dock />
 </div>
 
-<input bind:this={fileInput} type="file" accept=".toml,.fox.toml" hidden onchange={onfile} />
+<input bind:this={fileInput} type="file" accept=".toml,.fox.toml,.grc" hidden onchange={onfile} />
 
 {#if txConfirm}
   <TxDialog blocks={txBlocks} allowTx={session.allowTx} onarm={armAndRun} onclose={() => (txConfirm = false)} />

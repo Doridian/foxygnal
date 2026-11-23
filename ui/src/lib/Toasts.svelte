@@ -49,6 +49,9 @@
   }
   .toast span {
     flex: 1;
+    white-space: pre-line;
+    max-height: 50vh;
+    overflow: auto;
   }
   button.action {
     align-self: center;

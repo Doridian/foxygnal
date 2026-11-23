@@ -82,6 +82,22 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Convert a GNU Radio Companion flowgraph (`.grc`, GNU Radio 3.8+) to a
+    /// `.fox.toml` graph. Common blocks only; warnings name what didn't map.
+    Import {
+        grc: PathBuf,
+        /// Output file (default: the `.grc` with a `.fox.toml` extension;
+        /// `-` prints to stdout).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Overwrite the output file if it exists.
+        #[arg(long)]
+        force: bool,
+        /// Map GNU Radio's `audio_sink` to the sound-card `audio_sink` (needs
+        /// the `audio` feature) instead of `browser_audio`.
+        #[arg(long)]
+        audio_device: bool,
+    },
     /// List available blocks.
     Blocks {
         #[arg(long)]
@@ -257,6 +273,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 print!("{}", bench::render(&report));
             }
         }
+        Cmd::Import {
+            grc,
+            output,
+            force,
+            audio_device,
+        } => import_grc(&grc, output, force, audio_device)?,
         Cmd::Blocks { json } => {
             if json {
                 let all: Vec<_> = registry.catalog().collect();
@@ -268,5 +290,44 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn import_grc(
+    grc: &std::path::Path,
+    output: Option<PathBuf>,
+    force: bool,
+    audio_device: bool,
+) -> anyhow::Result<()> {
+    let text =
+        std::fs::read_to_string(grc).with_context(|| format!("reading {}", grc.display()))?;
+    let opts = foxygnal_grc::Options { audio_device };
+    let imp = foxygnal_grc::import(&text, &opts).with_context(|| grc.display().to_string())?;
+    let source = grc.file_name().map_or_else(
+        || grc.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let toml = foxygnal_grc::to_toml(&imp, &source)?;
+    for w in &imp.warnings {
+        eprintln!("warning: {w}");
+    }
+    let out = output.unwrap_or_else(|| foxygnal_grc::fox_name(grc));
+    if out.as_os_str() == "-" {
+        print!("{toml}");
+        return Ok(());
+    }
+    if out.extension().is_some_and(|e| e == "grc") {
+        bail!("refusing to write over a .grc file ({})", out.display());
+    }
+    if out.exists() && !force {
+        bail!("{} exists; pass --force to overwrite it", out.display());
+    }
+    std::fs::write(&out, toml).with_context(|| format!("writing {}", out.display()))?;
+    eprintln!(
+        "wrote {} ({} blocks, {} warnings)",
+        out.display(),
+        imp.graph.blocks.len(),
+        imp.warnings.len()
+    );
     Ok(())
 }

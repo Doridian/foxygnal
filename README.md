@@ -66,6 +66,15 @@ was started with `foxygnal serve --allow-tx` *and* you confirm "Arm TX and run" 
 (headless: `foxygnal run --arm-tx graph.fox.toml`). TX is disarmed when the run stops.
 Transmitting needs a licence and must be legal where you are.
 
+### Recording and playback
+
+Select any wire while the graph runs and press **Record to SigMF** in the inspector: the engine
+writes every sample (it never drops any; a slow disk slows the graph instead) to
+`recordings/<graph>-<wire>-<UTC time>.sigmf-{meta,data}` in the project directory, with the
+rate, centre frequency, device, and the stream's tags (retunes become capture segments,
+overflows and other events annotations). The **Recordings** list in the palette shows them;
+**Add** puts a SigMF Source for one on the canvas, which plays the tags back too.
+
 UI development with hot reload: run `foxygnal serve` in one terminal and `npm run dev` in
 `ui/` in another, then open the Vite URL (`http://127.0.0.1:5173`). It proxies `/api` to the engine.
 
@@ -76,8 +85,9 @@ crates/
   foxygnal-core     stream types, ring buffers, Block trait, registry, graph spec, scheduler
   foxygnal-blocks   standard block library
   foxygnal-sdr      SDR device API, drivers, discovery, simulator, TX arm switch
+  foxygnal-grc      GNU Radio .grc import
   foxygnal-server   HTTP/WebSocket server (axum) for the UI
-  foxygnal          the CLI binary (serve / run / bench / blocks)
+  foxygnal          the CLI binary (serve / run / bench / import / blocks)
 ui/                 Svelte 5 + Vite + Svelte Flow browser editor
 examples/           *.fox.toml flowgraphs
 bench/              graphs for `foxygnal bench` (docs/PERFORMANCE.md)
@@ -90,6 +100,7 @@ docs/               plans and design notes
 - [Roadmap](docs/ROADMAP.md): milestones M0–M6
 - [Performance](docs/PERFORMANCE.md): `foxygnal bench`, Raspberry Pi builds and targets
 - [Blocks](docs/BLOCKS.md): block catalog, implemented and planned
+- [GRC import](docs/GRC_IMPORT.md): `foxygnal import flowgraph.grc`, the block mapping and its limits
 - [UI](docs/UI.md): UI concept and interaction principles
 
 ## License

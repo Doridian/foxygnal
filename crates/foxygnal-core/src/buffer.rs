@@ -8,6 +8,11 @@
 //! reader: the writer never waits for it, so watching a stream can't slow the
 //! graph down. If a tap falls behind, the data it missed is simply gone.
 //!
+//! For a lossless view of a running stream (recordings), [`Tap::attach`]
+//! claims one of a few spare read cursors every ring has ([`SPARE_READERS`]).
+//! An attached [`TapReader`] holds the writer back like any reader and
+//! receives the stream's tags.
+//!
 //! The storage is normally *double-mapped* ([`crate::vmem`]): the same pages
 //! appear twice in a row in memory, so [`Reader::slice`] and
 //! [`Writer::slice_mut`] always hand out *every* available item as one
@@ -26,6 +31,9 @@ use crate::vmem::{Storage, page_size};
 
 /// Default buffer capacity in items.
 pub const DEFAULT_CAPACITY: usize = 1 << 15;
+
+/// Read cursors per ring that can be attached while running ([`Tap::attach`]).
+pub const SPARE_READERS: usize = 2;
 
 /// How a ring's storage is laid out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -50,6 +58,26 @@ struct ReaderState {
     tags: TagQueue,
 }
 
+impl ReaderState {
+    fn new(done: bool) -> Self {
+        ReaderState {
+            read: AtomicUsize::new(0),
+            done: AtomicBool::new(done),
+            waker: OnceLock::new(),
+            tags: TagQueue::new(TAG_QUEUE),
+        }
+    }
+}
+
+/// A read cursor a [`TapReader`] can claim while the graph runs. Free (and
+/// `done`, so the writer ignores it) until then. Its owner isn't a block and
+/// polls instead of registering a waker (wakers can't be replaced, and the
+/// owner changes from one attach to the next).
+struct Spare {
+    claimed: AtomicBool,
+    state: ReaderState,
+}
+
 struct Ring {
     /// Aligned to at least 8 bytes, enough for every StreamType.
     storage: Storage,
@@ -66,6 +94,7 @@ struct Ring {
     /// Called when a reader frees space or leaves.
     writer_waker: OnceLock<Waker>,
     readers: Box<[ReaderState]>,
+    spare: Box<[Spare]>,
 }
 
 // SAFETY: access to `storage` is coordinated via the atomic cursors; the writer
@@ -104,9 +133,21 @@ impl Ring {
         unsafe { self.base().add(index % self.capacity * self.item_size) }
     }
 
-    fn min_read(&self) -> usize {
+    /// Every read cursor: the connections, then the spare ones.
+    fn cursors(&self) -> impl Iterator<Item = &ReaderState> {
         self.readers
             .iter()
+            .chain(self.spare.iter().map(|s| &s.state))
+    }
+
+    fn wake_writer(&self) {
+        if let Some(w) = self.writer_waker.get() {
+            w.wake_by_ref();
+        }
+    }
+
+    fn min_read(&self) -> usize {
+        self.cursors()
             .filter(|r| !r.done.load(Ordering::Acquire))
             .map(|r| r.read.load(Ordering::Acquire))
             .min()
@@ -150,12 +191,11 @@ pub fn channel_with(
         reserved: AtomicUsize::new(0),
         writer_done: AtomicBool::new(false),
         writer_waker: OnceLock::new(),
-        readers: (0..readers)
-            .map(|_| ReaderState {
-                read: AtomicUsize::new(0),
-                done: AtomicBool::new(false),
-                waker: OnceLock::new(),
-                tags: TagQueue::new(TAG_QUEUE),
+        readers: (0..readers).map(|_| ReaderState::new(false)).collect(),
+        spare: (0..SPARE_READERS)
+            .map(|_| Spare {
+                claimed: AtomicBool::new(false),
+                state: ReaderState::new(true),
             })
             .collect(),
     });
@@ -205,7 +245,9 @@ impl Writer {
         }
         let r = &*self.ring;
         let written = r.written.load(Ordering::Relaxed) + self.staged;
-        let free = r.capacity - (written - r.min_read());
+        // Saturating: a cursor attached while the writer was mid-slice may
+        // briefly sit behind data that was overwritten (see `Tap::attach`).
+        let free = r.capacity.saturating_sub(written - r.min_read());
         // Taps can't trust anything the writer may be writing into, so a
         // mirrored ring (where all free space is contiguous) hands out at most
         // half of itself: probes can always see the newest half.
@@ -240,7 +282,7 @@ impl Writer {
     /// Send a tag to every reader. Push tags before publishing the items
     /// they point at; offsets should not go backwards.
     pub fn push_tag(&mut self, tag: &Tag) {
-        for rd in self.ring.readers.iter() {
+        for rd in self.ring.cursors() {
             if !rd.done.load(Ordering::Relaxed) {
                 rd.tags.push(tag.clone());
             }
@@ -308,9 +350,7 @@ impl Reader {
     }
 
     fn wake_writer(&self) {
-        if let Some(w) = self.ring.writer_waker.get() {
-            w.wake_by_ref();
-        }
+        self.ring.wake_writer();
     }
 
     /// Stream index of the next item to read.
@@ -424,22 +464,55 @@ impl Tap {
             .saturating_sub(rd.read.load(Ordering::Acquire))
     }
 
-    /// Oldest stream index that is still intact.
-    fn oldest(&self, order: Ordering) -> usize {
-        self.ring
-            .reserved
-            .load(order)
-            .saturating_sub(self.ring.capacity)
-    }
-
     /// Copy committed items starting at stream index `from` into `out`, as
     /// many as fit. Items that were already overwritten are skipped, so check
     /// [`TapRead::start`]. Never blocks and never holds the writer back.
     pub fn read(&self, from: usize, out: &mut [u8]) -> TapRead {
+        self.ring.copy(from, out)
+    }
+
+    /// Attach a lossless read cursor at the current end of the stream, or
+    /// `None` if all [`SPARE_READERS`] are taken. From then on the writer
+    /// waits for it like for any downstream block (and is woken when it
+    /// reads), and it gets every tag. Its owner polls ([`TapReader::read`]).
+    ///
+    /// The writer may be in the middle of a `work` call that began before
+    /// it could see the new cursor, so the first items read can still be
+    /// overwritten; [`TapReader::read`] detects that like [`Tap::read`]
+    /// does, by reporting a later start.
+    pub fn attach(&self) -> Option<TapReader> {
         let r = &*self.ring;
+        let idx = r.spare.iter().position(|s| {
+            s.claimed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        })?;
+        let st = &r.spare[idx].state;
+        // Tags left over from an earlier owner.
+        while st.tags.pop().is_some() {}
+        let pos = r.written.load(Ordering::Acquire);
+        st.read.store(pos, Ordering::Release);
+        st.done.store(false, Ordering::SeqCst);
+        Some(TapReader {
+            ring: self.ring.clone(),
+            idx,
+            pos,
+        })
+    }
+}
+
+impl Ring {
+    /// Oldest stream index that is still intact.
+    fn oldest(&self, order: Ordering) -> usize {
+        self.reserved.load(order).saturating_sub(self.capacity)
+    }
+
+    /// See [`Tap::read`].
+    fn copy(&self, from: usize, out: &mut [u8]) -> TapRead {
+        let r = self;
         let size = r.item_size;
         let written = r.written.load(Ordering::Acquire);
-        let mut start = from.max(self.oldest(Ordering::Acquire)).min(written);
+        let mut start = from.max(r.oldest(Ordering::Acquire)).min(written);
         let mut items = (written - start).min(out.len() / size);
         // One copy on a mirrored ring; two (up to and from the wrap) otherwise.
         let first = r.contiguous(start, items);
@@ -457,7 +530,7 @@ impl Tap {
             );
         }
         fence(Ordering::Acquire);
-        let oldest = self.oldest(Ordering::Relaxed);
+        let oldest = r.oldest(Ordering::Relaxed);
         if oldest > start {
             let lost = (oldest - start).min(items);
             out.copy_within(lost * size..items * size, 0);
@@ -465,6 +538,71 @@ impl Tap {
             items -= lost;
         }
         TapRead { start, items }
+    }
+}
+
+/// A lossless read cursor attached to a running stream ([`Tap::attach`]).
+/// Dropping it detaches it.
+pub struct TapReader {
+    ring: Arc<Ring>,
+    idx: usize,
+    /// Stream index of the next item to read.
+    pos: usize,
+}
+
+impl TapReader {
+    fn state(&self) -> &ReaderState {
+        &self.ring.spare[self.idx].state
+    }
+
+    pub fn item_size(&self) -> usize {
+        self.ring.item_size
+    }
+
+    /// Stream index of the next item to read.
+    pub fn position(&self) -> u64 {
+        self.pos as u64
+    }
+
+    /// Copy the next items into `out`, as many as fit, let the writer reuse
+    /// their space and wake it. A [`TapRead::start`] past
+    /// [`Self::position`] means items were lost, which can only happen
+    /// right after attaching. Tags for every item returned are in the queue
+    /// ([`Self::pop_tag`]) when this returns.
+    pub fn read(&mut self, out: &mut [u8]) -> TapRead {
+        let got = self.ring.copy(self.pos, out);
+        let old = std::mem::replace(&mut self.pos, got.start + got.items);
+        if self.pos != old {
+            self.state().read.store(self.pos, Ordering::Release);
+            self.ring.wake_writer();
+        }
+        got
+    }
+
+    /// The next tag sent to this cursor, if any. Tags may point at items
+    /// before the attach point or not read yet; check their offsets.
+    pub fn pop_tag(&mut self) -> Option<Tag> {
+        self.state().tags.pop()
+    }
+
+    /// Tags dropped because the queue was full.
+    pub fn dropped_tags(&self) -> usize {
+        self.state().tags.dropped()
+    }
+
+    /// The writer has finished and everything has been read.
+    pub fn finished(&self) -> bool {
+        let r = &*self.ring;
+        r.writer_done.load(Ordering::Acquire) && r.written.load(Ordering::Acquire) == self.pos
+    }
+}
+
+impl Drop for TapReader {
+    fn drop(&mut self) {
+        let spare = &self.ring.spare[self.idx];
+        spare.state.done.store(true, Ordering::Release);
+        spare.claimed.store(false, Ordering::Release);
+        self.ring.wake_writer();
     }
 }
 
@@ -835,6 +973,117 @@ mod tests {
             for r in readers {
                 r.join().unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn attached_reader_holds_the_writer_and_gets_tags() {
+        let (mut w, mut rs) = channel_with(1, 8, 1, BufferKind::Plain);
+        w.slice_mut()[..3].copy_from_slice(&[1, 2, 3]);
+        w.commit(3);
+        let tap = w.tap();
+        let mut a = tap.attach().expect("a spare cursor");
+        assert_eq!(a.position(), 3, "starts at the current end");
+        w.push_tag(&Tag::new(3, "rx_freq", 1e6));
+        w.slice_mut()[..4].copy_from_slice(&[4, 5, 6, 7]);
+        w.commit(4);
+        rs[0].consume(7);
+        // The attached cursor hasn't read 3..7, so only 4 slots are free.
+        assert_eq!(w.slice_mut().len(), 1, "up to the wrap point");
+        let mut out = [0u8; 16];
+        let got = a.read(&mut out);
+        assert_eq!(got, TapRead { start: 3, items: 4 });
+        assert_eq!(&out[..4], &[4, 5, 6, 7]);
+        let t = a.pop_tag().unwrap();
+        assert_eq!((t.offset, &*t.key), (3, "rx_freq"));
+        assert!(a.pop_tag().is_none());
+
+        // Every spare can be claimed once; dropping one frees it.
+        let b = tap.attach().unwrap();
+        assert!(tap.attach().is_none());
+        drop(a);
+        let c = tap.attach().expect("freed");
+        assert_eq!(c.position(), 7);
+        drop((b, c));
+        // Detached cursors don't hold the writer back.
+        assert_eq!(w.slice_mut().len(), 1);
+        w.commit(1);
+        assert_eq!(w.slice_mut().len(), 7);
+        // Nor do spares count as readers for abandonment.
+        assert!(!w.abandoned());
+        rs[0].finish();
+        assert!(w.abandoned());
+    }
+
+    /// Reading frees space, so it must wake a writer that waits for it.
+    #[test]
+    fn attached_reader_wakes_the_writer() {
+        use std::sync::atomic::AtomicUsize;
+        struct Count(AtomicUsize);
+        impl std::task::Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        let (mut w, mut rs) = channel_with(1, 4, 1, BufferKind::Plain);
+        w.register_waker(Waker::from(count.clone()));
+        let mut a = w.tap().attach().unwrap();
+        w.slice_mut()[..4].copy_from_slice(&[1, 2, 3, 4]);
+        w.commit(4);
+        rs[0].consume(4);
+        assert_eq!(w.slice_mut().len(), 0, "the attached cursor holds it");
+        let before = count.0.load(Ordering::Relaxed);
+        assert_eq!(a.read(&mut [0u8; 8]).items, 4);
+        assert!(count.0.load(Ordering::Relaxed) > before, "writer woken");
+        assert_eq!(w.slice_mut().len(), 4);
+    }
+
+    /// A writer racing an attached reader: after the first item, nothing is
+    /// ever skipped, and the data is exactly what was written.
+    #[test]
+    fn attached_reader_is_lossless() {
+        const TOTAL: u32 = 1_000_000;
+        for kind in BOTH {
+            let (mut w, mut rs) = channel_with(4, 64, 1, kind);
+            let tap = w.tap();
+            let mut r = rs.pop().unwrap();
+            let mut a = tap.attach().unwrap();
+            let writer = std::thread::spawn(move || {
+                let mut next = 0u32;
+                while next < TOTAL {
+                    let buf: &mut [u32] = bytemuck::cast_slice_mut(w.slice_mut());
+                    if buf.is_empty() {
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    let n = buf.len().min((TOTAL - next) as usize);
+                    for (i, v) in buf[..n].iter_mut().enumerate() {
+                        *v = next + i as u32;
+                    }
+                    w.commit(n);
+                    next += n as u32;
+                }
+            });
+            let reader = std::thread::spawn(move || {
+                while !r.exhausted() {
+                    let n = r.slice().len() / 4;
+                    r.consume(n);
+                }
+            });
+            let mut out = vec![0u32; 48];
+            let mut next = 0usize;
+            while !a.finished() {
+                let got = a.read(bytemuck::cast_slice_mut(&mut out));
+                assert_eq!(got.start, next, "nothing skipped ({kind:?})");
+                for (i, v) in out[..got.items].iter().enumerate() {
+                    assert_eq!(*v as usize, got.start + i, "torn read ({kind:?})");
+                }
+                next += got.items;
+            }
+            writer.join().unwrap();
+            reader.join().unwrap();
+            assert_eq!(next, TOTAL as usize);
         }
     }
 }

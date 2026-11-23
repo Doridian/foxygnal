@@ -1,0 +1,51 @@
+# ADS-B: aircraft positions, call signs and speeds from 1090 MHz.
+#
+# Needs a receiver that can tune 1090 MHz at 2 MS/s (an RTL-SDR with a
+# small antenna works; the simulated receiver has no aircraft). Press Run,
+# click the wire into `log` and choose Messages to read the decoded
+# messages, one per line:
+#
+#   t=12.345678 icao=4840D6 df=17 tc=4 type=ident callsign=KLM1023 raw=8D48…
+#
+#   SDR 1090 MHz, 2 MS/s ──|x|──▶ ADS-B decoder ──text──▶ message log
+#
+#   foxygnal run examples/adsb.fox.toml   (prints the messages: stdout = true)
+
+[vars]
+samp_rate = "2M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "1090M", sample_rate = "$samp_rate", gain = 40.0 }
+ui = { x = 40, y = 120 }
+
+[[block]]
+id = "mag"
+kind = "c32_to_f32"
+params = { part = "magnitude" }
+ui = { x = 290, y = 120 }
+
+[[block]]
+id = "adsb"
+kind = "adsb_decoder"
+params = { fix_errors = true }
+ui = { x = 540, y = 120 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 790, y = 120 }
+
+[[connect]]
+from = "sdr.out"
+to = "mag.in"
+
+[[connect]]
+from = "mag.out"
+to = "adsb.in"
+
+[[connect]]
+from = "adsb.out"
+to = "log.in"

@@ -15,7 +15,7 @@ pub mod tag;
 mod vmem;
 
 pub use block::{Block, InputPort, OutputPort, WorkIo, WorkStatus};
-pub use buffer::{BufferKind, Tap, TapRead};
+pub use buffer::{BufferKind, SPARE_READERS, Tap, TapRead, TapReader};
 pub use graph::GraphSpec;
 pub use meta::{Configure, StreamMeta};
 pub use registry::{

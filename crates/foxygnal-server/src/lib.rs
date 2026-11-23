@@ -4,6 +4,7 @@
 mod api;
 pub mod graphs;
 pub mod probe;
+pub mod record;
 mod security;
 pub mod session;
 mod ws;
@@ -75,6 +76,13 @@ pub fn router(cfg: &Config, session: Arc<Session>) -> Router {
         .route("/examples/{name}", get(api::example))
         .route("/files", get(api::list_files))
         .route("/files/{name}", get(api::get_file).put(api::put_file))
+        .route("/import", post(api::import_upload))
+        .route("/import/{name}", get(api::import_file))
+        .route("/recordings", get(record::list))
+        .route(
+            "/recordings/{name}",
+            get(record::get).delete(record::delete),
+        )
         .route("/ws", get(ws::upgrade))
         .with_state(state);
     let app = Router::new().nest("/api", api);

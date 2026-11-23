@@ -182,10 +182,14 @@
       >Persistence
       <input type="range" min="0" max="0.95" step="0.05" value={s.persistence} oninput={(e) => set({ persistence: Number(e.currentTarget.value) })} />
     </label>
+  {:else if inst.kind === 'text'}
+    {@const s = inst.settings}
+    <NumberInput label="Lines kept" value={s.maxLines} onchange={(v) => v && v >= 10 && onchange({ settings: { maxLines: Math.round(v) } })} />
+    <p class="hint">Text lines from the wire, such as a decoder's messages. Lines before the instrument opened are shown if the wire's buffer still holds them.</p>
   {:else}
     <p class="hint">RMS, peak and DC over everything since the last update, in dB relative to full scale (±1).</p>
   {/if}
-  {#if inst.kind !== 'meter'}
+  {#if inst.kind !== 'meter' && inst.kind !== 'text'}
     <fieldset>
       <legend>Sample rate</legend>
       <NumberInput

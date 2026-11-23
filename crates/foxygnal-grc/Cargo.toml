@@ -1,0 +1,19 @@
+[package]
+name = "foxygnal-grc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Import GNU Radio Companion (.grc) flowgraphs as foxygnal graphs"
+
+[dependencies]
+foxygnal-core = { version = "0.1.0", path = "../foxygnal-core" }
+serde_json = "1.0.154"
+yaml-rust2 = { version = "0.13.2", default-features = false }
+
+[dev-dependencies]
+foxygnal-blocks = { path = "../foxygnal-blocks" }
+
+[lints]
+workspace = true

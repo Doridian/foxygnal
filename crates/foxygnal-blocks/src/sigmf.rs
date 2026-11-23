@@ -1,15 +1,25 @@
 //! SigMF recordings: `name.sigmf-meta` (JSON) next to `name.sigmf-data` (raw
 //! samples). See <https://github.com/sigmf/SigMF>.
+//!
+//! Stream tags and metadata map both ways ([`SigmfWriter`], [`parse_tags`]):
+//! - `rx_freq` (a retune) ↔ a `captures` segment with `core:frequency`;
+//! - `hw` (the device, tagged by `sdr_source`) ↔ `global` `core:hw`;
+//! - `overflow` (samples the device dropped) ↔ an annotation labelled
+//!   `overflow` with `foxygnal:overflow` = the count;
+//! - any other tag `key` ↔ an annotation labelled `key` with
+//!   `foxygnal:key` = the value. Annotations from other tools without
+//!   `foxygnal:` fields become a `label` tag holding `core:label` (or
+//!   `core:comment`).
 
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use foxygnal_core::{
     Block, BlockDescriptor, Complex32, Configure, Error, Instance, ParamKind, ParamReader,
-    ParamSpec, PortSpec, Registry, StreamType, WorkIo, WorkStatus,
+    ParamSpec, PortSpec, Registry, StreamType, Tag, TagValue, WorkIo, WorkStatus,
 };
 use serde_json::{Value, json};
 
@@ -24,7 +34,9 @@ pub fn register(r: &mut Registry) {
             help: "Reads a SigMF recording. Sample rate and centre frequency come from the \
                    metadata. c32 converts any complex format (cf32, ci16, ci8, cu8, …) to \
                    ±1 floats, f32 any real one. i16 and u8 pass ci16 / cu8 (or ri16 / ru8) \
-                   samples through unconverted; complex ones arrive as interleaved I/Q pairs.",
+                   samples through unconverted; complex ones arrive as interleaved I/Q pairs. \
+                   Capture segments become `rx_freq` tags and annotations become tags at \
+                   their sample (again on every loop).",
             inputs: vec![],
             outputs: vec![PortSpec {
                 name: "out",
@@ -59,7 +71,10 @@ pub fn register(r: &mut Registry) {
             label: "SigMF Sink",
             category: "Sinks",
             help: "Records to name.sigmf-data plus name.sigmf-meta, with the sample rate and \
-                   centre frequency from stream metadata.",
+                   centre frequency from stream metadata. Tags are kept: `rx_freq` starts a \
+                   new capture segment, `hw` names the device, and others (`overflow`, \
+                   packets, …) become annotations. The metadata is written at the start, \
+                   about once a second while tags arrive, and at the end.",
             inputs: vec![PortSpec {
                 name: "in",
                 ty: None,
@@ -174,7 +189,7 @@ impl DataType {
     }
 
     /// Bytes per sample (both components for complex).
-    fn sample_size(self) -> usize {
+    pub fn sample_size(self) -> usize {
         self.comp.size() * if self.complex { 2 } else { 1 }
     }
 
@@ -208,8 +223,13 @@ impl DataType {
         }
     }
 
+    /// Complex (I/Q) samples.
+    pub fn is_complex(self) -> bool {
+        self.complex
+    }
+
     /// The SigMF name of the type a stream of `ty` is recorded as.
-    fn name_for(ty: StreamType, complex: bool) -> String {
+    pub fn name_for(ty: StreamType, complex: bool) -> String {
         let endian = if cfg!(target_endian = "big") {
             "_be"
         } else {
@@ -261,10 +281,70 @@ pub fn parse_meta(text: &str) -> Result<Meta, String> {
     })
 }
 
-fn read_meta(path: &Path) -> Result<Meta, Error> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| Error::Other(format!("cannot open {}: {e}", path.display())))?;
-    parse_meta(&text).map_err(|e| Error::Other(format!("{}: {e}", path.display())))
+fn json_to_tag_value(v: &Value) -> Option<TagValue> {
+    Some(match v {
+        Value::Bool(b) => TagValue::Bool(*b),
+        Value::Number(n) => match n.as_i64() {
+            Some(i) => TagValue::Int(i),
+            None => TagValue::Float(n.as_f64()?),
+        },
+        Value::String(s) => TagValue::Str(s.as_str().into()),
+        // JSON has no NaN; a NaN tag value (automatic gain) is written as null.
+        Value::Null => TagValue::Float(f64::NAN),
+        _ => return None,
+    })
+}
+
+fn tag_value_to_json(v: &TagValue) -> Value {
+    match v {
+        TagValue::Bool(b) => json!(b),
+        TagValue::Int(i) => json!(i),
+        TagValue::Float(f) => json!(f),
+        TagValue::Str(s) => json!(&**s),
+    }
+}
+
+const NS: &str = "foxygnal:";
+
+/// The tags a recording's metadata describes, sorted by offset, where
+/// [`Tag::offset`] is a *sample* index (see the module docs for the mapping).
+pub fn parse_tags(text: &str) -> Result<Vec<Tag>, String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
+    let start = |o: &Value| o.get("core:sample_start").and_then(Value::as_u64);
+    let mut tags = Vec::new();
+    if let Some(hw) = v["global"].get("core:hw").and_then(Value::as_str) {
+        tags.push(Tag::new(0, "hw", hw));
+    }
+    for c in v["captures"].as_array().into_iter().flatten() {
+        if let (Some(at), Some(f)) = (start(c), c.get("core:frequency").and_then(Value::as_f64)) {
+            tags.push(Tag::new(at, "rx_freq", f));
+        }
+    }
+    for a in v["annotations"].as_array().into_iter().flatten() {
+        let (Some(at), Some(fields)) = (start(a), a.as_object()) else {
+            continue;
+        };
+        let before = tags.len();
+        for (k, val) in fields {
+            if let (Some(key), Some(val)) = (k.strip_prefix(NS), json_to_tag_value(val)) {
+                tags.push(Tag::new(at, key, val));
+            }
+        }
+        if tags.len() == before {
+            let label = a.get("core:label").or_else(|| a.get("core:comment"));
+            if let Some(l) = label.and_then(Value::as_str) {
+                tags.push(Tag::new(at, "label", l));
+            }
+        }
+    }
+    // Stable: captures before annotations at the same sample.
+    tags.sort_by_key(|t| t.offset);
+    Ok(tags)
+}
+
+fn read_text(path: &Path) -> Result<String, Error> {
+    std::fs::read_to_string(path)
+        .map_err(|e| Error::Other(format!("cannot open {}: {e}", path.display())))
 }
 
 /// How samples are turned into output items.
@@ -293,6 +373,11 @@ pub struct SigmfSource {
     /// Raw bytes read but not yet converted. Allocated in `start`.
     scratch: Vec<u8>,
     fill: usize,
+    /// From the metadata, with offsets in output items, sorted.
+    tags: Vec<Tag>,
+    next_tag: usize,
+    /// Items produced since the start of the file (this pass).
+    pos: u64,
 }
 
 impl SigmfSource {
@@ -332,8 +417,14 @@ impl SigmfSource {
 impl Block for SigmfSource {
     fn configure(&mut self, cx: &mut Configure<'_>) -> Result<(), Error> {
         // Reads the (small) metadata file only; nothing is kept open.
-        let meta = read_meta(&self.meta_path)?;
+        let text = read_text(&self.meta_path)?;
+        let bad = |e: String| Error::Other(format!("{}: {e}", self.meta_path.display()));
+        let meta = parse_meta(&text).map_err(bad)?;
         let (conv, per) = self.plan(meta.datatype)?;
+        self.tags = parse_tags(&text).map_err(bad)?;
+        for t in &mut self.tags {
+            t.offset *= per as u64;
+        }
         for o in cx.outputs.iter_mut() {
             // Interleaved output counts items, two per complex sample.
             o.sample_rate = meta.sample_rate.map(|r| r * per as f64);
@@ -349,6 +440,8 @@ impl Block for SigmfSource {
         self.file = Some(file);
         self.scratch = vec![0; 1 << 16];
         self.fill = 0;
+        self.pos = 0;
+        self.next_tag = 0;
         Ok(())
     }
 
@@ -406,11 +499,22 @@ impl Block for SigmfSource {
         }
         self.scratch.copy_within(n * in_size..self.fill, 0);
         self.fill -= n * in_size;
+        let end = self.pos + n as u64;
+        while let Some(t) = self.tags.get(self.next_tag) {
+            if t.offset >= end {
+                break;
+            }
+            out.forward_tag((t.offset - self.pos) as usize, t);
+            self.next_tag += 1;
+        }
+        self.pos = end;
         out.produce(n);
         if n == 0 && eof {
             if self.repeat && file.metadata()?.len() >= dt.sample_size() as u64 {
                 file.seek(SeekFrom::Start(0))?;
                 self.fill = 0;
+                self.pos = 0;
+                self.next_tag = 0;
                 return Ok(WorkStatus::Ok);
             }
             return Ok(WorkStatus::Done);
@@ -440,110 +544,325 @@ fn build_source(p: &ParamReader<'_>) -> Result<Instance, Error> {
             file: None,
             scratch: Vec::new(),
             fill: 0,
+            tags: Vec::new(),
+            next_tag: 0,
+            pos: 0,
         }),
         inputs: vec![],
         outputs: vec![("out".into(), ty)],
     })
 }
 
-pub struct SigmfSink {
-    meta_path: PathBuf,
-    data_path: PathBuf,
-    ty: StreamType,
-    complex: bool,
-    /// From stream metadata, in `configure`.
-    sample_rate: Option<f64>,
-    frequency: Option<f64>,
-    file: Option<BufWriter<File>>,
+/// What a new recording's metadata starts with.
+#[derive(Debug, Clone, Default)]
+pub struct RecordingInfo {
+    /// For i16 / u8 streams: items are interleaved I/Q pairs.
+    pub complex: bool,
+    /// Samples per second (I/Q pairs for interleaved streams).
+    pub sample_rate: Option<f64>,
+    /// Centre frequency of the first capture segment.
+    pub frequency: Option<f64>,
+    /// `core:hw`; an `hw` tag sets it too.
+    pub hw: Option<String>,
+    /// `core:description`.
+    pub description: Option<String>,
 }
 
-impl SigmfSink {
-    /// The metadata document for this recording.
-    fn meta_json(&self, datetime: &str) -> Value {
-        let complex = self.complex || self.ty == StreamType::C32;
-        let mut global = json!({
-            "core:datatype": DataType::name_for(self.ty, complex),
-            "core:version": "1.2.0",
-            "core:recorder": "foxygnal",
-        });
-        if let Some(r) = self.sample_rate {
-            global["core:sample_rate"] = json!(r);
+/// Writes a SigMF recording: raw items into `.sigmf-data`, and metadata
+/// built from [`RecordingInfo`] and stream tags into `.sigmf-meta`.
+///
+/// The metadata file is written when the recording is created, rewritten
+/// by [`Self::checkpoint`] (at most once a second, when tags changed it)
+/// and by [`Self::finish`], each time to a temporary file renamed over the
+/// old one, so a crash leaves a usable recording behind.
+pub struct SigmfWriter {
+    meta_path: PathBuf,
+    data_path: PathBuf,
+    global: serde_json::Map<String, Value>,
+    captures: Vec<Value>,
+    annotations: Vec<Value>,
+    data: BufWriter<File>,
+    item_size: usize,
+    /// Stream items per sample: 2 for interleaved I/Q in i16 / u8.
+    per: u64,
+    sample_rate: Option<f64>,
+    started: Duration,
+    items: u64,
+    dirty: bool,
+    saved: Instant,
+}
+
+/// How often [`SigmfWriter::checkpoint`] flushes and rewrites metadata.
+const CHECKPOINT: Duration = Duration::from_secs(1);
+
+impl SigmfWriter {
+    /// Create (or replace) `base.sigmf-meta` and `base.sigmf-data` for a
+    /// stream of `ty`. `base` may also name either file.
+    pub fn create(base: &Path, ty: StreamType, info: &RecordingInfo) -> Result<Self, Error> {
+        let (meta_path, data_path) = file_pair(base);
+        let interleaved = info.complex && matches!(ty, StreamType::I16 | StreamType::U8);
+        let complex = interleaved || ty == StreamType::C32;
+        let started = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let mut global = serde_json::Map::new();
+        global.insert(
+            "core:datatype".into(),
+            json!(DataType::name_for(ty, complex)),
+        );
+        global.insert("core:version".into(), json!("1.2.0"));
+        global.insert("core:recorder".into(), json!("foxygnal"));
+        global.insert("core:num_channels".into(), json!(1));
+        if let Some(r) = info.sample_rate {
+            global.insert("core:sample_rate".into(), json!(r));
         }
+        if let Some(hw) = &info.hw {
+            global.insert("core:hw".into(), json!(hw));
+        }
+        if let Some(d) = &info.description {
+            global.insert("core:description".into(), json!(d));
+        }
+        global.insert(
+            "core:extensions".into(),
+            json!([{"name": "foxygnal", "version": "0.1.0", "optional": true}]),
+        );
         let mut capture = json!({
             "core:sample_start": 0,
-            "core:datetime": datetime,
+            "core:datetime": iso8601(started.as_secs() as i64, started.subsec_millis()),
         });
-        if let Some(f) = self.frequency {
+        if let Some(f) = info.frequency {
             capture["core:frequency"] = json!(f);
         }
+        let create = |p: &Path| {
+            File::create(p).map_err(|e| Error::Other(format!("cannot create {}: {e}", p.display())))
+        };
+        let data = BufWriter::with_capacity(1 << 16, create(&data_path)?);
+        let mut w = Self {
+            meta_path,
+            data_path,
+            global,
+            captures: vec![capture],
+            annotations: Vec::new(),
+            data,
+            item_size: ty.item_size(),
+            per: if interleaved { 2 } else { 1 },
+            sample_rate: info.sample_rate,
+            started,
+            items: 0,
+            dirty: false,
+            saved: Instant::now(),
+        };
+        w.save_meta()?;
+        Ok(w)
+    }
+
+    pub fn meta_path(&self) -> &Path {
+        &self.meta_path
+    }
+
+    pub fn data_path(&self) -> &Path {
+        &self.data_path
+    }
+
+    /// Append raw stream items (native endian, as they are in the stream).
+    pub fn write(&mut self, items: &[u8]) -> Result<(), Error> {
+        self.data
+            .write_all(items)
+            .map_err(|e| Error::Other(format!("{}: {e}", self.data_path.display())))?;
+        self.items += (items.len() / self.item_size) as u64;
+        Ok(())
+    }
+
+    /// Stream items written so far.
+    pub fn items(&self) -> u64 {
+        self.items
+    }
+
+    /// Bytes in the data file so far.
+    pub fn bytes(&self) -> u64 {
+        self.items * self.item_size as u64
+    }
+
+    /// Samples written so far (I/Q pairs for interleaved streams).
+    pub fn samples(&self) -> u64 {
+        self.items / self.per
+    }
+
+    /// The datetime of a sample, if the rate is known.
+    fn datetime_at(&self, sample: u64) -> Option<String> {
+        let rate = self.sample_rate.filter(|r| *r > 0.0)?;
+        let t = self.started + Duration::try_from_secs_f64(sample as f64 / rate).ok()?;
+        Some(iso8601(t.as_secs() as i64, t.subsec_millis()))
+    }
+
+    /// Record a tag on stream item `item` (counted from the start of the
+    /// recording); see the module docs for what each tag becomes.
+    pub fn tag(&mut self, item: u64, key: &str, value: &TagValue) {
+        let sample = item / self.per;
+        self.dirty = true;
+        match (key, value) {
+            ("rx_freq", TagValue::Float(_) | TagValue::Int(_)) => {
+                let f = tag_value_to_json(value);
+                let last = self.captures.last_mut().expect("captures[0] always exists");
+                if last["core:sample_start"].as_u64() == Some(sample) {
+                    last["core:frequency"] = f;
+                } else {
+                    let mut c = json!({"core:sample_start": sample, "core:frequency": f});
+                    if let Some(d) = self.datetime_at(sample) {
+                        c["core:datetime"] = json!(d);
+                    }
+                    self.captures.push(c);
+                }
+            }
+            ("hw", TagValue::Str(s)) => {
+                self.global.insert("core:hw".into(), json!(&**s));
+            }
+            ("overflow", _) => {
+                let mut a = json!({
+                    "core:sample_start": sample,
+                    "core:label": "overflow",
+                    "foxygnal:overflow": tag_value_to_json(value),
+                });
+                if let TagValue::Int(n) = value {
+                    a["core:comment"] = json!(format!("{n} samples dropped before this one"));
+                }
+                self.annotations.push(a);
+            }
+            _ => {
+                let mut a = serde_json::Map::new();
+                a.insert("core:sample_start".into(), json!(sample));
+                a.insert("core:label".into(), json!(key));
+                a.insert(format!("{NS}{key}"), tag_value_to_json(value));
+                self.annotations.push(Value::Object(a));
+            }
+        }
+    }
+
+    /// Note that `lost` stream items are missing just before item `item`.
+    pub fn gap(&mut self, item: u64, lost: u64) {
+        self.dirty = true;
+        self.annotations.push(json!({
+            "core:sample_start": item / self.per,
+            "core:label": "gap",
+            "core:comment": format!("{} samples lost before this one", lost / self.per),
+            "foxygnal:gap": lost / self.per,
+        }));
+    }
+
+    /// Flush the data and, if tags changed it, rewrite the metadata, at
+    /// most once per second. Cheap to call often.
+    pub fn checkpoint(&mut self) -> Result<(), Error> {
+        if self.saved.elapsed() < CHECKPOINT {
+            return Ok(());
+        }
+        self.data.flush()?;
+        if self.dirty {
+            self.save_meta()?;
+        }
+        self.saved = Instant::now();
+        Ok(())
+    }
+
+    /// Flush everything and write the final metadata.
+    pub fn finish(&mut self) -> Result<(), Error> {
+        self.data
+            .flush()
+            .map_err(|e| Error::Other(format!("{}: {e}", self.data_path.display())))?;
+        self.save_meta()
+    }
+
+    fn meta_json(&self) -> Value {
+        let by_start = |v: &Value| v["core:sample_start"].as_u64().unwrap_or(0);
+        let mut annotations = self.annotations.clone();
+        annotations.sort_by_key(by_start);
+        let mut captures = self.captures.clone();
+        captures.sort_by_key(by_start);
         json!({
-            "global": global,
-            "captures": [capture],
-            "annotations": [],
+            "global": self.global,
+            "captures": captures,
+            "annotations": annotations,
         })
     }
+
+    fn save_meta(&mut self) -> Result<(), Error> {
+        let mut text = serde_json::to_string_pretty(&self.meta_json())
+            .map_err(|e| Error::Other(e.to_string()))?;
+        text.push('\n');
+        let mut tmp = self.meta_path.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        let err = |e: std::io::Error| Error::Other(format!("{}: {e}", self.meta_path.display()));
+        std::fs::write(&tmp, text).map_err(err)?;
+        std::fs::rename(&tmp, &self.meta_path).map_err(err)?;
+        self.dirty = false;
+        Ok(())
+    }
+}
+
+pub struct SigmfSink {
+    path: PathBuf,
+    ty: StreamType,
+    info: RecordingInfo,
+    writer: Option<SigmfWriter>,
 }
 
 impl Block for SigmfSink {
     fn configure(&mut self, cx: &mut Configure<'_>) -> Result<(), Error> {
-        let interleaved = self.complex && self.ty != StreamType::C32 && self.ty != StreamType::F32;
-        self.sample_rate = cx.inputs[0]
+        let interleaved = self.info.complex && matches!(self.ty, StreamType::I16 | StreamType::U8);
+        self.info.sample_rate = cx.inputs[0]
             .sample_rate
             .map(|r| if interleaved { r / 2.0 } else { r });
-        self.frequency = cx.inputs[0].center_freq;
+        self.info.frequency = cx.inputs[0].center_freq;
         Ok(())
     }
 
     fn start(&mut self) -> Result<(), Error> {
-        let create = |p: &Path| {
-            File::create(p).map_err(|e| Error::Other(format!("cannot create {}: {e}", p.display())))
-        };
-        let meta = serde_json::to_string_pretty(&self.meta_json(&iso8601_now()))
-            .map_err(|e| Error::Other(e.to_string()))?;
-        let mut mf = create(&self.meta_path)?;
-        mf.write_all(meta.as_bytes())?;
-        mf.write_all(b"\n")?;
-        self.file = Some(BufWriter::with_capacity(1 << 16, create(&self.data_path)?));
+        self.writer = Some(SigmfWriter::create(&self.path, self.ty, &self.info)?);
         Ok(())
     }
 
     fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
-        let file = self
-            .file
+        let w = self
+            .writer
             .as_mut()
             .ok_or_else(|| Error::Other("the file isn't open (start() not called)".into()))?;
-        let item = io.inputs[0].stream_type().item_size();
-        let inp = io.inputs[0].bytes();
+        let input = &io.inputs[0];
+        let item = input.stream_type().item_size();
+        let inp = input.bytes();
         let n = inp.len() / item;
         if n == 0 {
             return Ok(WorkStatus::Blocked);
         }
+        let first = w.items();
+        for (i, t) in input.tags_in(n) {
+            w.tag(first + i as u64, &t.key, &t.value);
+        }
         // Stream items are native-endian, which the datatype name records.
-        file.write_all(&inp[..n * item])?;
+        w.write(&inp[..n * item])?;
         io.consume(0, n);
+        w.checkpoint()?;
         Ok(WorkStatus::Ok)
     }
 
     fn stop(&mut self) -> Result<(), Error> {
-        if let Some(f) = &mut self.file {
-            f.flush()?;
+        match &mut self.writer {
+            Some(w) => w.finish(),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
 fn build_sink(p: &ParamReader<'_>) -> Result<Instance, Error> {
     let ty = p.stream_type("type")?;
-    let (meta_path, data_path) = file_pair(&path_from(p)?);
     Ok(Instance {
         block: Box::new(SigmfSink {
-            meta_path,
-            data_path,
+            path: path_from(p)?,
             ty,
-            complex: p.bool("complex")?,
-            sample_rate: None,
-            frequency: None,
-            file: None,
+            info: RecordingInfo {
+                complex: p.bool("complex")?,
+                ..RecordingInfo::default()
+            },
+            writer: None,
         }),
         inputs: vec![("in".into(), ty)],
         outputs: vec![],
@@ -551,14 +870,15 @@ fn build_sink(p: &ParamReader<'_>) -> Result<Instance, Error> {
 }
 
 /// The current UTC time as ISO 8601 (`2026-11-22T13:45:00.123Z`).
-fn iso8601_now() -> String {
+pub fn iso8601_now() -> String {
     let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     iso8601(d.as_secs() as i64, d.subsec_millis())
 }
 
-fn iso8601(secs: i64, millis: u32) -> String {
+/// `secs` since the Unix epoch, UTC, as ISO 8601.
+pub fn iso8601(secs: i64, millis: u32) -> String {
     let days = secs.div_euclid(86_400);
     let tod = secs.rem_euclid(86_400);
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).

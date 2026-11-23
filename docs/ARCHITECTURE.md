@@ -25,7 +25,8 @@ frames of a few KB each.
 | `foxygnal-blocks` | standard blocks + `registry()` | core, dsp, sdr |
 | `foxygnal-dsp` | DSP math shared by blocks and probes: windows, FFT power spectra, FIR design and responses, polyphase resampler, rotator, SIMD kernels | — |
 | `foxygnal-sdr` | SDR device API, device strings, drivers and discovery, the TX arm switch | — |
-| `foxygnal-server` | REST + WebSocket API, probes and instruments, static UI | core, dsp, sdr |
+| `foxygnal-grc` | GNU Radio `.grc` import (see [GRC_IMPORT.md](GRC_IMPORT.md)) | core |
+| `foxygnal-server` | REST + WebSocket API, probes and instruments, static UI | core, dsp, sdr, grc |
 | `foxygnal` | CLI | all |
 
 `foxygnal-sdr` holds the device trait, discovery and the drivers. Drivers that need a C library
@@ -133,6 +134,16 @@ at run time to one plain allocation whose slices stop at the wrap point
 (`BufferKind::Plain`; `Flowgraph::with_buffer_kind` forces it, which tests use to keep both
 paths covered). Note that RSS counts a double-mapped page twice although it uses one page of
 memory.
+
+Every ring also has two **spare read cursors** (`SPARE_READERS`) that are idle (marked done, so
+the writer ignores them) until `Tap::attach` claims one while the graph runs. The resulting
+`TapReader` is lossless: the writer waits for it like for any downstream block, it gets the
+stream's tags, and each `read` that frees space wakes the writer through its registered waker
+(like `Reader::consume`). Its owner isn't a block: it polls instead of registering a waker of
+its own (wakers are set once per cursor, and a spare changes owner). It is used by recordings
+(see "Recording and playback"). The writer may be in the middle of a `work` call that began
+before it could see the new cursor, so the first items can still be overwritten;
+`TapReader::read` copies with the same seqlock check as a tap and reports a later start if so.
 
 ## Scheduler
 
@@ -250,11 +261,79 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
     the same frames: the UI adds one row per frame.
   - **Constellation**: the latest N points (c32 wires only). Persistence is drawn in the UI.
   - **Meter**: RMS, peak and DC over everything since the last frame.
+  - **Messages** (`text` probe, u8 wires only): every complete text line since the last
+    frame, starting with what the ring still holds when it opens. See "Decoded messages".
 - **Stats** are broadcast twice a second while running: items/s and buffer fill per wire,
   and the share of a core each block spends in `work`. The UI shows them in the wire popover
   and as the *Load* overlay (heat colours on blocks and wires).
 - The sample rate (and centre frequency, for absolute spectrum axes) comes from stream
   metadata, or can be set per instrument.
+
+## Decoded messages (M6)
+
+Decoders (`adsb_decoder`, `packet_decoder` in hex mode, …) need a way to show a person what
+they found, without per-block UI code. The convention: **a decoded message is one line of
+UTF-8 text, `\n`-terminated, on a `u8` output.** Lines are `key=value` fields where that
+makes sense (`t=1.234567 icao=4840D6 df=17 tc=4 type=ident callsign=KLM1023 raw=…`), so
+they read well and grep well. Everything downstream is generic:
+
+- The **Messages** instrument (`text` probe, frame kind 6) shows the lines of any `u8` wire,
+  with a filter, follow/scroll-back and a "lines were lost" marker; it is offered in the
+  wire popover and the dock for u8 wires. The probe reads a tap like every probe (never
+  back-pressures the decoder), sends only whole lines, and starts with whatever history the
+  ring still holds, so opening it late still shows recent messages.
+- `message_log` (Sinks) is the natural end of a decoder's output; with `stdout = true` it
+  prints whole lines on the engine's standard output, for `foxygnal run`.
+- `file_sink` on the same wire writes a log file.
+
+Why not tags or a new port kind: taps (and so probes) don't see tags, and the planned
+untyped message port would touch the runtime, the editor and the file format. A text stream
+needs neither, works headless, and can later be carried by message ports unchanged.
+
+Decoders queue one message at a time (`digital::MsgQueue`, preallocated) and take input only
+once it has gone out, so a stalled consumer back-pressures the decoder and formatting does
+not allocate on the hot path. If the input ends while a message waits for room downstream,
+the decoder waits (`WorkStatus::Wait`) instead of finishing, unless every reader has left
+(`OutputPort::abandoned`).
+
+## Recording and playback (M6)
+
+**Tags ↔ SigMF.** `blocks/src/sigmf.rs` maps tags to SigMF metadata and back. `SigmfWriter`
+(used by `sigmf_sink` and by server recordings) writes the data file and builds the metadata:
+`rx_freq` starts a new `captures` segment (`core:sample_start`, `core:frequency`, and
+`core:datetime` when the rate is known); `hw` sets `global` `core:hw`; `overflow` becomes an
+annotation labelled `overflow` with `foxygnal:overflow` (the count) and a comment; any other tag
+`key` becomes an annotation labelled `key` with `foxygnal:key` = the value (NaN, which JSON
+lacks, is `null`). Recordings also get `core:recorder` "foxygnal", `core:num_channels`, and a
+`foxygnal` entry in `core:extensions`. The metadata file is written when the recording starts,
+rewritten at most once a second while tags change it, and at stop, each time to a `.tmp` file
+renamed over the old one, so a crash leaves a usable recording. `parse_tags` is the reverse:
+`sigmf_source` emits `rx_freq` at every capture's start, `hw` at 0, and each annotation's
+`foxygnal:*` fields as tags (an annotation without any becomes a `label` tag from
+`core:label` / `core:comment`), again on each loop. Interleaved i16 / u8 streams count two
+items per sample.
+
+**One-click recording** (`server/src/record.rs`). Any wire of the running graph can be recorded
+without editing the graph. A recording is not a probe: it attaches a lossless `TapReader` to the
+wire's output, so a slow disk slows the graph (a hardware source then reports `overflow`, which
+lands in the file as an annotation) rather than dropping samples silently. Each recording has its
+own thread that copies whatever is readable, handles the tags, writes raw items (any stream
+type, recorded as `cf32` / `rf32` / `ri16` / `ru8`), and sleeps 2 ms when there is nothing new.
+Items lost right after attaching (see "Buffers") shift the start; a later loss, which shouldn't
+happen, would be a `gap` annotation. Rate and centre frequency come from the wire's metadata,
+`core:hw` from the nearest upstream block with a device parameter (or an `hw` tag). Recordings
+belong to the session, not the tab, so a reload doesn't stop them; they end on `record_stop`,
+when the run ends, or on an error, and shutting the server down finishes them first.
+
+Files go to `recordings/` in `--project-dir`, named
+`<graph>-<wire>-<UTC time>` (e.g. `fm-live-sdr_out-20261122T134500Z`), with `-2`, `-3`… if taken.
+A client-chosen `name` must be a plain name (letters, digits, `-`, `_`, `.`, starting with a
+letter or digit, no `..`), as must `{name}` in the REST endpoints, so nothing is written or
+read outside that folder.
+
+**Playback.** The palette's *Recordings* panel lists `GET /api/recordings`; *Add* puts a
+`sigmf_source` with `path = "recordings/<name>.sigmf-meta"` (relative paths resolve against the
+project directory) on the canvas, `c32` for complex recordings and `f32` for real ones.
 
 ## Hardware (M4)
 
@@ -344,9 +423,18 @@ REST:
 - `GET/PUT /api/graph`: current graph as `GraphSpec` JSON; `GET /api/graph.toml`
 - `POST /api/toml/parse`, `POST /api/toml/render`: convert for upload/download
 - `GET /api/examples`, `GET /api/examples/{name}`: bundled example graphs
+- `GET /api/recordings`: SigMF recordings in `recordings/` under `--project-dir`, newest first:
+  `[{name, path, modified, datatype, sample_rate, frequency, samples, bytes, captures,
+  annotations, datetime, hw, description, recording, error?}]`. `GET /api/recordings/{name}`
+  returns the metadata document, `DELETE /api/recordings/{name}` removes both files (409 while
+  it is being recorded). Invalid names are a 400
 - `GET /api/files`, `GET/PUT /api/files/{name}`: `.fox.toml` files in `--project-dir`
   (plain file names only). Relative `path` parameters and `graph:` blocks also resolve
-  against that directory. `GET` falls back to the bundled sub-graph library.
+  against that directory. `GET` falls back to the bundled sub-graph library. The list also
+  has the directory's `.grc` files.
+- `GET /api/import/{name}` (a `.grc` in `--project-dir`), `POST /api/import` (`.grc` text):
+  convert a GNU Radio flowgraph → `{graph, warnings, title, name}`, `name` being the
+  `.fox.toml` to save it as. Nothing is written; see [GRC_IMPORT.md](GRC_IMPORT.md).
 
 WebSocket `/api/ws`, one per browser tab:
 
@@ -354,9 +442,14 @@ WebSocket `/api/ws`, one per browser tab:
   (the whole graph; the server diffs it, pushes changed live params and marks other changes
   stale), `run {arm_tx?}` (`arm_tx: true` arms TX for this run, see "TX arming"), `stop`,
   `probe_set {id, edge {from, to}, probe {kind, …options}, fps}` (the
-  client picks `id`; sending it again changes the probe) and `probe_remove {id}`. Server:
-  `hello` (full snapshot on connect or after lag, including `meta`, and `allow_tx`: the
-  server was started with `--allow-tx`),
+  client picks `id`; sending it again changes the probe), `probe_remove {id}`,
+  `record_start {edge {from, to}, name?}` and `record_stop {edge}` (see "Recording and
+  playback"). Server:
+  `hello` (full snapshot on connect or after lag, including `meta`, `allow_tx`: the
+  server was started with `--allow-tx`, and `recordings`: those in progress),
+  `record {edge, name, path, started_at, elapsed_ms, samples, bytes, gaps, done, error?}` to
+  every tab, about twice a second per recording and once with `done: true` when it ends (a
+  start that failed has no `name` and an `error`),
   `graph {graph, name, version, from}`, `meta {edges [{from, to, sample_rate?, center_freq?}],
   error?, tx?}` after every graph change (`tx`: blocks that would transmit, `[{block, kind,
   device?, frequency?, sample_rate?, gain?}]`),
@@ -378,6 +471,9 @@ WebSocket `/api/ws`, one per browser tab:
   - audio (5): `u32 n, u8 flags (1 gap: samples were lost before this frame), u8[3]`, then
     `f32[n]`: every sample since the previous frame (real wires only). The UI plays these for
     `browser_audio` blocks (see "Browser audio").
+  - text (6): `u32 n, u8 flags (1 gap: lines were lost before this frame), u8[3]`, then
+    `n` bytes of UTF-8, whole lines only (each ends in `\n`), padded to 4 bytes. Lossless
+    while the probe keeps up, like audio (u8 wires only; see "Decoded messages").
 
   A tab that can't keep up drops frames (bounded queue) rather than piling them up.
 
@@ -493,8 +589,8 @@ it is served from `ui/dist` (or `--ui-dir`).
 ## Prior art and positioning
 
 - **GNU Radio / GRC**: the reference. Huge block library, but heavy installs, Python/C++
-  friction and a dated desktop UI. foxygnal reads its raw file formats, and GRC import is an
-  M6 maybe.
+  friction and a dated desktop UI. foxygnal reads its raw file formats and imports `.grc`
+  flowgraphs built from common blocks ([GRC_IMPORT.md](GRC_IMPORT.md)).
 - **FutureSDR**: a Rust SDR runtime (async, WASM, GPU). Strong engine work. foxygnal focuses
   on the end-user editing and instrument experience. Worth tracking and borrowing ideas from.
 - **SDR++ / SDRangel / GQRX**: receiver apps with good UX but fixed pipelines.

@@ -1,12 +1,14 @@
 <script lang="ts">
-  import type { BlockDescriptor, DeviceInfo } from './api';
+  import type { BlockDescriptor, DeviceInfo, RecordingInfo } from './api';
   import { devices } from './devices.svelte';
+  import RecordingsPanel from './RecordingsPanel.svelte';
 
   let {
     catalog,
     loadError,
     onadd,
     ondevice,
+    onrecording,
     search = $bindable(''),
     input = $bindable(),
   }: {
@@ -15,6 +17,8 @@
     onadd: (d: BlockDescriptor) => void;
     /** Add a receiver for a discovered device. */
     ondevice: (d: DeviceInfo) => void;
+    /** Add a SigMF Source playing a recording. */
+    onrecording: (r: RecordingInfo) => void;
     search?: string;
     input?: HTMLInputElement;
   } = $props();
@@ -102,6 +106,7 @@
       {/if}
     {/if}
   </section>
+  <RecordingsPanel onadd={onrecording} />
   {#each categories as [cat, items] (cat)}
     <h3>{cat}</h3>
     {#each items as d (d.kind)}

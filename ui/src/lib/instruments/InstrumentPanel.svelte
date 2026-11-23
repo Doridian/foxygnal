@@ -10,6 +10,7 @@
   import MeterView from './MeterView.svelte';
   import ScopeView from './ScopeView.svelte';
   import SpectrumView from './SpectrumView.svelte';
+  import TextView from './TextView.svelte';
 
   let { inst, popout = false }: { inst: Instrument; popout?: boolean } = $props();
 
@@ -19,6 +20,17 @@
   let width = $state(0);
   let settingsOpen = $state(false);
   let panel = $state<HTMLElement>();
+  /** Messages instrument: every line received (null = some were lost). */
+  let lines = $state.raw<(string | null)[]>([]);
+
+  function addText(gap: boolean, text: string) {
+    const fresh: (string | null)[] = text ? text.replace(/\n$/, '').split('\n') : [];
+    if (gap && lines.length) fresh.unshift(null);
+    if (!fresh.length) return;
+    const max = inst.kind === 'text' ? inst.settings.maxLines : 2000;
+    const all = lines.concat(fresh);
+    lines = all.length > max ? all.slice(all.length - max) : all;
+  }
 
   const type = $derived(graphView.outputType(inst.edge.from));
   const colour = $derived(typeColour(type));
@@ -50,6 +62,7 @@
       { from: inst.edge.from, to: inst.edge.to },
       cfg,
       (f) => {
+        if (f.kind === 'text') addText(f.gap, f.text);
         frame = f;
         lastFrame = performance.now();
       },
@@ -78,9 +91,10 @@
     if (!session.connected) return 'Engine disconnected';
     if (!onGraph) return 'This wire is no longer in the graph.';
     if (error) return error;
-    if (!running) return frame ? null : 'Not running. Press Run to see the signal.';
+    if (!running) return frame || lines.length ? null : 'Not running. Press Run to see the signal.';
     if (!quiet || captured) return null;
     if (inst.kind === 'scope' && inst.settings.trigger !== 'off' && inst.settings.trigger !== 'auto') return 'Waiting for a trigger…';
+    if (inst.kind === 'text') return frame || lines.length ? null : 'Waiting for messages…';
     return frame ? null : 'Waiting for samples…';
   });
 
@@ -103,6 +117,7 @@
       case 'constellation':
         return [`${inst.settings.points} pts`];
       case 'meter':
+      case 'text':
         return [];
     }
   });
@@ -183,6 +198,8 @@
       <SpectrumView settings={inst.settings} frame={frame?.kind === 'spectrum' ? frame : null} {rate} {center} {colour} {onwidth} />
     {:else if inst.kind === 'constellation'}
       <ConstellationView settings={inst.settings} frame={frame?.kind === 'constellation' ? frame : null} {colour} />
+    {:else if inst.kind === 'text'}
+      <TextView settings={inst.settings} {lines} onclear={() => (lines = [])} onchange={(p) => change({ settings: p })} />
     {:else}
       <MeterView frame={frame?.kind === 'meter' ? frame : null} {colour} />
     {/if}

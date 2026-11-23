@@ -241,6 +241,12 @@ impl OutputPort {
         self.writer.position()
     }
 
+    /// Every reader has left: nothing written here will ever be read.
+    /// (An output that was never connected is not abandoned.)
+    pub fn abandoned(&self) -> bool {
+        self.writer.abandoned()
+    }
+
     /// Tag item `index` of [`Self::slice_mut`] (0 = the first writable item).
     pub fn add_tag(&mut self, index: usize, key: &str, value: impl Into<TagValue>) {
         let tag = Tag::new(self.position() + index as u64, key, value);

@@ -11,6 +11,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6.9", features = ["derive"] }
 foxygnal-blocks = { version = "0.1.0", path = "../foxygnal-blocks" }
 foxygnal-core = { version = "0.1.0", path = "../foxygnal-core" }
+foxygnal-grc = { version = "0.1.0", path = "../foxygnal-grc" }
 foxygnal-sdr = { version = "0.1.0", path = "../foxygnal-sdr" }
 foxygnal-server = { version = "0.1.0", path = "../foxygnal-server" }
 serde = { version = "1.0.229", features = ["derive"] }

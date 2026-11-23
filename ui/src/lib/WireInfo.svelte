@@ -7,6 +7,7 @@
   import { fmtHz, fmtRate } from './plot';
   import { session } from './session.svelte';
   import WatchButtons from './instruments/WatchButtons.svelte';
+  import RecordButton from './RecordButton.svelte';
 
   let { edge, onwatch }: { edge: EdgeRef; onwatch?: (id: number) => void } = $props();
 
@@ -37,6 +38,8 @@
 </div>
 <div class="label">Watch this wire</div>
 <WatchButtons {type} onpick={pick} />
+<div class="label">Record</div>
+<RecordButton {edge} />
 
 <style>
   .facts {

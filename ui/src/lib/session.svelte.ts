@@ -1,7 +1,8 @@
 // The engine session over `/api/ws`: graph sync, run control, status, stats
 // and probe frames (binary messages).
 
-import type { ClientCommand, EdgeRef, ErrorInfo, GraphSpec, Meta, ProbeConfig, ServerEvent, Stats, Status, TxInfo } from './api';
+import type { ClientCommand, EdgeRef, ErrorInfo, GraphSpec, Meta, ProbeConfig, RecordStatus, ServerEvent, Stats, Status, TxInfo } from './api';
+import { toast } from './toast.svelte';
 import { graphView } from './graphview.svelte';
 import { decodeFrame, type Frame } from './frames';
 
@@ -36,12 +37,18 @@ export class Session {
   txBlocks = $state<TxInfo[]>([]);
   /** Why a probe can't show anything (by probe id), as the engine reports it. */
   probeErrors = $state<Record<number, string>>({});
+  /** Recordings in progress, by edge (`from->to`). */
+  recordings = $state<Record<string, RecordStatus>>({});
+  /** Counts finished recordings, so lists of them know to refresh. */
+  recordingsChanged = $state(0);
 
   #client = 0;
   #ws: WebSocket | null = null;
   #retry = 500;
   #onGraph: GraphHandler = () => {};
   #probes = new Map<number, ProbeEntry>();
+  /** Recordings this tab started: it reports how they end. */
+  #myRecordings = new Set<string>();
 
   /** Connect and deliver graphs from the server to `onGraph`. */
   start(onGraph: GraphHandler) {
@@ -80,6 +87,7 @@ export class Session {
         this.status = ev.status;
         this.allowTx = ev.allow_tx;
         this.#meta(ev.meta);
+        this.recordings = Object.fromEntries((ev.recordings ?? []).map((r) => [recordKey(r.edge), r]));
         this.#onGraph(ev.graph, ev.name, 'hello');
         break;
       case 'graph':
@@ -106,7 +114,40 @@ export class Session {
         this.probeErrors = ev.error ? { ...rest, [ev.id]: ev.error } : rest;
         break;
       }
+      case 'record': {
+        const { op: _, ...r } = ev;
+        this.#record(r);
+        break;
+      }
     }
+  }
+
+  #record(r: RecordStatus) {
+    const key = recordKey(r.edge);
+    if (!r.done) {
+      this.recordings = { ...this.recordings, [key]: r };
+      return;
+    }
+    // A failed start has no name; it doesn't end the recording in progress.
+    if (r.name || !r.error) {
+      const { [key]: _, ...rest } = this.recordings;
+      this.recordings = rest;
+      this.recordingsChanged++;
+    }
+    if (!this.#myRecordings.has(key)) return;
+    if (r.name) this.#myRecordings.delete(key);
+    if (r.error) toast(r.name ? `Recording ${r.name} failed: ${r.error}` : `Can't record: ${r.error}`, 'error');
+    else toast(`Saved ${r.path} (${fmtBytes(r.bytes)})`);
+  }
+
+  /** Record a wire of the running graph to SigMF in the project directory. */
+  startRecording(edge: EdgeRef) {
+    this.#myRecordings.add(recordKey(edge));
+    this.send({ op: 'record_start', edge });
+  }
+
+  stopRecording(edge: EdgeRef) {
+    this.send({ op: 'record_stop', edge });
   }
 
   #meta(m: Meta) {
@@ -151,6 +192,19 @@ export class Session {
   stop() {
     this.send({ op: 'stop' });
   }
+}
+
+export const recordKey = (e: EdgeRef) => `${e.from}->${e.to}`;
+
+/** `1.2 MB`. */
+export function fmtBytes(n: number): string {
+  const units = ['B', 'kB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1000 && i < units.length - 1) {
+    n /= 1000;
+    i++;
+  }
+  return `${i ? n.toPrecision(3) : n} ${units[i]}`;
 }
 
 export const session = new Session();

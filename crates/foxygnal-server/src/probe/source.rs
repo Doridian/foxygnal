@@ -23,6 +23,29 @@ impl Source {
         }
     }
 
+    /// Start from the oldest item the ring still holds instead of the end,
+    /// so a probe opened late shows recent history. True if that is the
+    /// very start of the stream.
+    pub fn rewind(&mut self) -> bool {
+        self.cursor = self.tap.written().saturating_sub(self.tap.capacity());
+        self.cursor == 0
+    }
+
+    /// The raw bytes of the items written since the last call, at most `max`
+    /// items (the newest), and whether they follow on from the last call
+    /// without a gap.
+    pub fn fresh_bytes(&mut self, max: usize) -> (bool, &[u8]) {
+        let written = self.tap.written();
+        let from = self.cursor.max(written.saturating_sub(max));
+        let size = self.tap.item_size();
+        self.bytes
+            .resize((written - from).min(self.tap.capacity()) * size, 0);
+        let got = self.tap.read(from, &mut self.bytes);
+        let contiguous = from == self.cursor && got.start == from;
+        self.cursor = got.start + got.items;
+        (contiguous, &self.bytes[..got.items * size])
+    }
+
     /// Append the items written since the last call to `out`, at most `max`
     /// of them (the newest). Returns false if items were skipped since the
     /// last call: the probe fell behind, or the writer overwrote them.

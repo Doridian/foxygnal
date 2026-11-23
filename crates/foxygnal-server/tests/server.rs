@@ -455,3 +455,107 @@ to = "speaker.in"
         assert!((w[2] + w[0] - k * w[1]).abs() < 1e-3, "discontinuity");
     }
 }
+
+/// A `text` probe on a `u8` wire delivers whole lines of text (what decoders
+/// emit), and refuses a wire that doesn't carry bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn text_probe_streams_whole_lines() {
+    use foxygnal_server::probe::Outgoing;
+    use foxygnal_server::session::Command;
+
+    let path = std::env::temp_dir().join(format!("foxygnal-text-{}.txt", std::process::id()));
+    std::fs::write(&path, "alpha 1\nbravo 22\ncharlie 333\n").unwrap();
+    let s = session();
+    s.set_graph(
+        1,
+        graph(&format!(
+            r#"
+[[block]]
+id = "src"
+kind = "file_source"
+params = {{ type = "u8", path = {path:?}, repeat = true }}
+[[block]]
+id = "pace"
+kind = "throttle"
+params = {{ type = "u8", sample_rate = 20000.0 }}
+[[block]]
+id = "log"
+kind = "message_log"
+[[block]]
+id = "tone"
+kind = "signal_source"
+params = {{ type = "f32" }}
+[[block]]
+id = "null"
+kind = "null_sink"
+params = {{ type = "f32" }}
+[[connect]]
+from = "src.out"
+to = "pace.in"
+[[connect]]
+from = "pace.out"
+to = "log.in"
+[[connect]]
+from = "tone.out"
+to = "null.in"
+"#,
+            path = path.to_str().unwrap()
+        )),
+        None,
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    s.hub().add_client(5, tx);
+    let cmd = |json: serde_json::Value| serde_json::from_value::<Command>(json).unwrap();
+    s.handle(
+        5,
+        cmd(serde_json::json!({
+            "op": "probe_set", "id": 1, "fps": 30,
+            "edge": {"from": "pace.out", "to": "log.in"},
+            "probe": {"kind": "text"},
+        })),
+    );
+    s.handle(
+        5,
+        cmd(serde_json::json!({
+            "op": "probe_set", "id": 2,
+            "edge": {"from": "tone.out", "to": "null.in"},
+            "probe": {"kind": "text"},
+        })),
+    );
+    s.run();
+    let t0 = tokio::time::Instant::now();
+    let mut text = String::new();
+    let mut refused = false;
+    while t0.elapsed() < Duration::from_millis(800) {
+        let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await else {
+            panic!("text frames in time");
+        };
+        match msg {
+            Outgoing::Binary(b) => {
+                assert_eq!(b[8], 6, "text frame");
+                let n = u32::from_le_bytes(b[12..16].try_into().unwrap()) as usize;
+                assert_eq!(b.len(), 20 + n.div_ceil(4) * 4);
+                let chunk = std::str::from_utf8(&b[20..20 + n]).unwrap();
+                assert!(chunk.is_empty() || chunk.ends_with('\n'), "{chunk:?}");
+                text.push_str(chunk);
+            }
+            Outgoing::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                if v["op"] == "probe" && v["id"] == 2 && !v["error"].is_null() {
+                    assert!(v["error"].as_str().unwrap().contains("u8"), "{v}");
+                    refused = true;
+                }
+            }
+        }
+    }
+    s.stop();
+    let _ = std::fs::remove_file(&path);
+    assert!(refused, "a text probe on an f32 wire reports an error");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines.len() > 20, "{} lines", lines.len());
+    let cycle = ["alpha 1", "bravo 22", "charlie 333"];
+    let first = cycle.iter().position(|c| *c == lines[0]).unwrap();
+    for (i, l) in lines.iter().enumerate() {
+        assert_eq!(*l, cycle[(first + i) % 3], "line {i}");
+    }
+}

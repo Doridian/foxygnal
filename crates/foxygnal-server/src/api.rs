@@ -220,6 +220,12 @@ const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/fm-live.fox.toml"),
     },
     Example {
+        name: "adsb",
+        title: "ADS-B aircraft decoder",
+        description: "An SDR at 1090 MHz, 2 MS/s → ADS-B decoder. Needs a real receiver. Click the wire into the log and choose Messages to read call signs, altitudes and positions.",
+        toml: include_str!("../../../examples/adsb.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",
@@ -274,10 +280,16 @@ pub async fn example(UrlPath(name): UrlPath<String>) -> Result<Json<GraphSpec>, 
 // ---- Project directory ----------------------------------------------------
 
 const EXT: &str = ".fox.toml";
+const GRC_EXT: &str = ".grc";
 
 /// A file name in the project dir: no paths, no hidden files, `.fox.toml`.
 fn project_file(dir: &Path, name: &str) -> Result<PathBuf, ApiError> {
-    let stem = name.strip_suffix(EXT).unwrap_or_default();
+    project_file_ext(dir, name, EXT)
+}
+
+/// A file name in the project dir ending with `ext`.
+fn project_file_ext(dir: &Path, name: &str, ext: &str) -> Result<PathBuf, ApiError> {
+    let stem = name.strip_suffix(ext).unwrap_or_default();
     let ok = !stem.is_empty()
         && !stem.starts_with('.')
         && stem
@@ -285,7 +297,7 @@ fn project_file(dir: &Path, name: &str) -> Result<PathBuf, ApiError> {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '));
     if !ok {
         return Err(bad_request(format!(
-            "`{name}` is not a valid file name: use letters, digits, `-`, `_`, `.` and end with {EXT}"
+            "`{name}` is not a valid file name: use letters, digits, `-`, `_`, `.` and end with {ext}"
         )));
     }
     Ok(dir.join(name))
@@ -307,7 +319,9 @@ pub async fn list_files(State(s): State<Arc<AppState>>) -> Result<Json<Vec<FileI
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            if !name.ends_with(EXT) || !entry.file_type()?.is_file() {
+            // GNU Radio flowgraphs are listed too: opening one imports it.
+            let listed = name.ends_with(EXT) || name.ends_with(GRC_EXT);
+            if !listed || !entry.file_type()?.is_file() {
                 continue;
             }
             let modified = entry
@@ -357,6 +371,48 @@ pub async fn put_file(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ---- GNU Radio import ---------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct Imported {
+    graph: GraphSpec,
+    /// What didn't convert exactly, one message each.
+    warnings: Vec<String>,
+    title: Option<String>,
+    /// The `.fox.toml` name to save it as (next to the `.grc`, which is
+    /// never written).
+    name: String,
+}
+
+fn import_grc(text: &str, grc_name: &str) -> Result<Imported, ApiError> {
+    let imp = foxygnal_grc::import(text, &foxygnal_grc::Options::default())
+        .map_err(|e| bad_request(format!("{grc_name}: {e}")))?;
+    let stem = grc_name.strip_suffix(GRC_EXT).unwrap_or(grc_name);
+    Ok(Imported {
+        graph: imp.graph,
+        warnings: imp.warnings,
+        title: imp.title,
+        name: format!("{stem}{EXT}"),
+    })
+}
+
+/// Convert a `.grc` in the project dir (same name rules as `.fox.toml`).
+pub async fn import_file(
+    State(s): State<Arc<AppState>>,
+    UrlPath(name): UrlPath<String>,
+) -> Result<Json<Imported>, ApiError> {
+    let path = project_file_ext(&s.project_dir, &name, GRC_EXT)?;
+    let text = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| ApiError(StatusCode::NOT_FOUND, format!("{name}: {e}")))?;
+    import_grc(&text, &name).map(Json)
+}
+
+/// Convert an uploaded `.grc` (the body) without touching the session.
+pub async fn import_upload(body: String) -> Result<Json<Imported>, ApiError> {
+    import_grc(&body, "upload.grc").map(Json)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +431,10 @@ mod tests {
             "C:\\x.fox.toml",
         ] {
             assert!(project_file(d, bad).is_err(), "{bad}");
+        }
+        assert!(project_file_ext(d, "fm rx.grc", GRC_EXT).is_ok());
+        for bad in ["../fm.grc", "fm.fox.toml", ".grc", "a/b.grc", ".x.grc"] {
+            assert!(project_file_ext(d, bad, GRC_EXT).is_err(), "{bad}");
         }
     }
 

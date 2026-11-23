@@ -6,6 +6,7 @@
 //! `work()` only copies what is there and returns `Blocked` otherwise.
 //!
 //! Tags on `sdr_source`'s output, on the first item after the change:
+//! - `hw` (string) the device's label and device string, on the first item
 //! - `rx_freq` (float, Hz) after a live retune
 //! - `rx_gain` (float, dB; NaN for automatic gain) after a live gain change
 //! - `overflow` (int) the number of samples the device dropped just before
@@ -32,7 +33,8 @@ pub fn register(r: &mut Registry) {
             category: CATEGORY,
             help: "Receive I/Q from an SDR (RTL-SDR, rtl_tcp, SoapySDR devices, or the \
                    built-in simulator). Retunes and gain changes apply live and tag the \
-                   stream (`rx_freq`, `rx_gain`); dropped samples are tagged `overflow`.",
+                   stream (`rx_freq`, `rx_gain`); dropped samples are tagged `overflow`, and \
+                   the first item `hw` (the device).",
             inputs: vec![],
             outputs: vec![PortSpec {
                 name: "out",
@@ -304,6 +306,7 @@ pub struct SdrSource {
     stream: Option<Box<dyn RxStream>>,
     opened: Option<Opened>,
     overflows: u64,
+    tag_hw: bool,
     tag_freq: bool,
     tag_gain: bool,
 }
@@ -371,6 +374,7 @@ impl Block for SdrSource {
         rx.set_waker(std::thread::current());
         self.overflows = rx.overflows();
         self.stream = Some(rx);
+        self.tag_hw = true;
         Ok(())
     }
 
@@ -394,6 +398,11 @@ impl Block for SdrSource {
         }
         let overflows = rx.overflows();
         let port = &mut io.outputs[0];
+        if self.tag_hw {
+            let name = self.opened.as_ref().map_or("", |o| o.name.as_str());
+            port.add_tag(0, "hw", name);
+            self.tag_hw = false;
+        }
         if self.tag_freq {
             port.add_tag(0, "rx_freq", self.frequency);
             self.tag_freq = false;
@@ -477,6 +486,7 @@ fn build_source(p: &ParamReader<'_>) -> Result<Instance, Error> {
             stream: None,
             opened: None,
             overflows: 0,
+            tag_hw: false,
             tag_freq: false,
             tag_gain: false,
         }),
@@ -728,6 +738,9 @@ to = "sink.in"
                         .any(|t| &*t.key == "rx_gain" && t.value == TagValue::Float(20.0)),
                     "{got:?}"
                 );
+                let hw = got.iter().find(|t| &*t.key == "hw").expect("an hw tag");
+                assert_eq!(hw.offset, 0);
+                assert!(matches!(&hw.value, TagValue::Str(s) if s.contains("sim:")));
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));

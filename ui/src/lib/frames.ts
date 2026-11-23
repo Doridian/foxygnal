@@ -51,7 +51,17 @@ export interface AudioFrame {
   samples: Float32Array;
 }
 
-export type Frame = ScopeFrame | SpectrumFrame | ConstellationFrame | MeterFrame | AudioFrame;
+export interface TextFrame {
+  kind: 'text';
+  /** Lines were lost before this frame. */
+  gap: boolean;
+  /** Whole lines, each ending in `\n` (may be empty with `gap`). */
+  text: string;
+}
+
+export type Frame = ScopeFrame | SpectrumFrame | ConstellationFrame | MeterFrame | AudioFrame | TextFrame;
+
+const utf8 = new TextDecoder();
 
 export function decodeFrame(buf: ArrayBuffer): { id: number; seq: number; frame: Frame } | null {
   const v = new DataView(buf);
@@ -102,6 +112,10 @@ export function decodeFrame(buf: ArrayBuffer): { id: number; seq: number; frame:
     case 5: {
       const n = v.getUint32(12, true);
       return { id, seq, frame: { kind: 'audio', gap: (v.getUint8(16) & 1) !== 0, samples: f32(20, n) } };
+    }
+    case 6: {
+      const n = v.getUint32(12, true);
+      return { id, seq, frame: { kind: 'text', gap: (v.getUint8(16) & 1) !== 0, text: utf8.decode(new Uint8Array(buf, 20, n)) } };
     }
   }
   return null;

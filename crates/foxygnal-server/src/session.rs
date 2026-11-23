@@ -17,6 +17,7 @@ use tokio::sync::broadcast;
 
 use crate::graphs::{EdgeMap, ProjectGraphs};
 use crate::probe::{self, Hub, ProbeConfig, Stats};
+use crate::record::{self, RecordStatus, Recorders};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +105,8 @@ pub struct TxInfo {
 /// Server → client messages (JSON text frames).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+// Short-lived (serialized right away), so the size of `Hello` doesn't matter.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// The full session state; sent on connect and after lag.
     Hello {
@@ -115,6 +118,8 @@ pub enum Event {
         meta: Meta,
         /// The server was started with `--allow-tx`.
         allow_tx: bool,
+        /// Recordings in progress.
+        recordings: Vec<RecordStatus>,
     },
     Graph {
         graph: GraphSpec,
@@ -128,6 +133,9 @@ pub enum Event {
     Stats(Stats),
     /// Stream metadata of every wire, worked out after each graph change.
     Meta(Meta),
+    /// A recording's progress, about twice a second, and once more when it
+    /// ends (`done`, with `error` if it failed or couldn't start).
+    Record(RecordStatus),
 }
 
 /// Sample rate and centre frequency on every wire. Computed by building and
@@ -173,6 +181,16 @@ pub enum Command {
     },
     ProbeRemove {
         id: u32,
+    },
+    /// Record a wire of the running graph to SigMF in the project's
+    /// `recordings/` (named by the server unless `name` is given).
+    RecordStart {
+        edge: EdgeRef,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    RecordStop {
+        edge: EdgeRef,
     },
 }
 
@@ -229,6 +247,7 @@ pub struct Session {
     inner: Mutex<Inner>,
     events: broadcast::Sender<Arc<str>>,
     hub: Hub,
+    recorders: Recorders,
 }
 
 fn now_ms() -> u64 {
@@ -266,6 +285,7 @@ impl Session {
             }),
             events: broadcast::channel(256).0,
             hub: Hub::default(),
+            recorders: Recorders::default(),
         });
         probe::spawn(Arc::downgrade(&session));
         session
@@ -287,6 +307,63 @@ impl Session {
 
     pub(crate) fn emit_stats(&self, stats: Stats) {
         self.emit(&Event::Stats(stats));
+    }
+
+    /// Recordings in progress.
+    pub fn recorders(&self) -> &Recorders {
+        &self.recorders
+    }
+
+    pub(crate) fn emit_record(&self, status: RecordStatus) {
+        self.emit(&Event::Record(status));
+    }
+
+    /// Start recording a wire of the running graph (see [`crate::record`]).
+    /// Progress and errors arrive as `record` events.
+    pub fn record_start(self: &Arc<Self>, edge: EdgeRef, name: Option<String>) {
+        let src = {
+            let inner = self.lock();
+            let missing = || {
+                format!(
+                    "`{} → {}` isn't in the running graph. Restart to record it.",
+                    edge.from, edge.to
+                )
+            };
+            inner
+                .run
+                .as_ref()
+                .ok_or_else(|| "Run the graph to record a wire.".to_owned())
+                .and_then(|run| {
+                    let (block, port) =
+                        run.map.source(&edge).rsplit_once('.').ok_or_else(missing)?;
+                    let (ty, tap) = run.monitor.tap(block, port).ok_or_else(missing)?;
+                    let reader = tap.attach().ok_or_else(|| {
+                        "this output is already being recorded as many times as it can be"
+                            .to_owned()
+                    })?;
+                    let meta = inner
+                        .meta
+                        .edges
+                        .iter()
+                        .find(|e| e.from == edge.from && e.to == edge.to)
+                        .map(|e| e.meta)
+                        .unwrap_or_default();
+                    Ok(record::Source {
+                        reader,
+                        ty,
+                        capacity: tap.capacity(),
+                        sample_rate: meta.sample_rate,
+                        frequency: meta.center_freq,
+                        hw: record::upstream_device(&run.applied, &self.registry, block),
+                        graph: inner.name.clone(),
+                    })
+                })
+        };
+        let started =
+            src.and_then(|src| record::start(self, &self.base_dir, edge.clone(), name, src));
+        if let Err(e) = started {
+            self.emit_record(RecordStatus::failed(edge, e));
+        }
     }
 
     pub fn registry(&self) -> &Registry {
@@ -340,6 +417,7 @@ impl Session {
             status: Self::status(inner),
             meta: inner.meta.clone(),
             allow_tx: self.allow_tx,
+            recordings: self.recorders.statuses(),
         }
     }
 
@@ -435,6 +513,8 @@ impl Session {
                 fps,
             } => self.hub.set(client, id, edge, probe, fps),
             Command::ProbeRemove { id } => self.hub.remove(client, id),
+            Command::RecordStart { edge, name } => self.record_start(edge, name),
+            Command::RecordStop { edge } => self.recorders.stop(&edge),
         }
     }
 
@@ -616,10 +696,18 @@ impl Session {
         }
     }
 
-    /// Stop and wait for the run to end (used on shutdown and in tests).
+    /// Stop and wait for the run to end, and recordings to be finished
+    /// (used on shutdown and in tests).
     pub async fn stop_and_wait(&self) {
         self.stop();
         while self.lock().run.is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        self.recorders.stop_all();
+        for _ in 0..500 {
+            if self.recorders.is_empty() {
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }

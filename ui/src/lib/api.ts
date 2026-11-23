@@ -152,22 +152,64 @@ export type ProbeConfig =
   | { kind: 'spectrum'; fft_size: number; window: FftWindow; average: number; peak_hold: boolean; bins: number; reset: number }
   | { kind: 'constellation'; points: number }
   | { kind: 'meter' }
-  | { kind: 'audio' };
+  | { kind: 'audio' }
+  | { kind: 'text' };
+
+/** A recording of a wire in progress, or just ended (`record` event). */
+export interface RecordStatus {
+  edge: EdgeRef;
+  /** File names without `.sigmf-meta` / `.sigmf-data`. */
+  name: string;
+  /** The metadata file relative to the project directory. */
+  path: string;
+  started_at: number;
+  elapsed_ms: number;
+  samples: number;
+  bytes: number;
+  /** Stretches of samples lost (only possible right after starting). */
+  gaps: number;
+  done: boolean;
+  error?: string;
+}
+
+/** A recording in the project's `recordings/` (`GET /api/recordings`). */
+export interface RecordingInfo {
+  name: string;
+  /** Relative to the project directory: a SigMF Source's `path`. */
+  path: string;
+  modified: number;
+  datatype: string | null;
+  sample_rate: number | null;
+  frequency: number | null;
+  samples: number;
+  bytes: number;
+  captures: number;
+  annotations: number;
+  datetime: string | null;
+  hw: string | null;
+  description: string | null;
+  /** Being written right now. */
+  recording: boolean;
+  error?: string;
+}
 
 export type ServerEvent =
-  | { op: 'hello'; client: number; graph: GraphSpec; name: string | null; version: number; status: Status; meta: Meta; allow_tx: boolean }
+  | { op: 'hello'; client: number; graph: GraphSpec; name: string | null; version: number; status: Status; meta: Meta; allow_tx: boolean; recordings?: RecordStatus[] }
   | { op: 'graph'; graph: GraphSpec; name: string | null; version: number; from: number }
   | ({ op: 'status' } & Status)
   | ({ op: 'stats' } & Stats)
   | ({ op: 'meta' } & Meta)
-  | { op: 'probe'; id: number; error: string | null };
+  | { op: 'probe'; id: number; error: string | null }
+  | ({ op: 'record' } & RecordStatus);
 
 export type ClientCommand =
   | { op: 'set_graph'; graph: GraphSpec; name?: string | null }
   | { op: 'run'; arm_tx?: boolean }
   | { op: 'stop' }
   | { op: 'probe_set'; id: number; edge: EdgeRef; probe: ProbeConfig; fps?: number }
-  | { op: 'probe_remove'; id: number };
+  | { op: 'probe_remove'; id: number }
+  | { op: 'record_start'; edge: EdgeRef; name?: string }
+  | { op: 'record_stop'; edge: EdgeRef };
 
 export interface ExampleInfo {
   name: string;
@@ -219,7 +261,23 @@ export const openFile = (name: string) => call<GraphSpec>('GET', `/api/files/${e
 export const saveFile = (name: string, g: GraphSpec) =>
   call<string>('PUT', `/api/files/${encodeURIComponent(name)}`, json(g), 'application/json');
 export const parseToml = (text: string) => call<GraphSpec>('POST', '/api/toml/parse', text, 'text/plain');
+
+/** A GNU Radio `.grc` converted by the engine. Save it as `name` (the `.grc` itself is never written). */
+export interface Imported {
+  graph: GraphSpec;
+  /** What didn't convert exactly, one message each. */
+  warnings: string[];
+  title: string | null;
+  name: string;
+}
+export const isGrc = (name: string) => name.toLowerCase().endsWith('.grc');
+/** Convert a `.grc` in the project folder. */
+export const importFile = (name: string) => call<Imported>('GET', `/api/import/${encodeURIComponent(name)}`);
+/** Convert uploaded `.grc` text. */
+export const importText = (text: string) => call<Imported>('POST', '/api/import', text, 'text/plain');
 export const renderToml = (g: GraphSpec) => call<string>('POST', '/api/toml/render', json(g), 'application/json');
+export const listRecordings = () => call<RecordingInfo[]>('GET', '/api/recordings');
+export const deleteRecording = (name: string) => call<string>('DELETE', `/api/recordings/${encodeURIComponent(name)}`);
 /** The frequency response a block would have with `params` at input rate `sample_rate`. */
 export const fetchResponse = (kind: string, params: Record<string, unknown>, sample_rate: number) =>
   call<FrequencyResponse>('POST', `/api/blocks/${encodeURIComponent(kind)}/response`, json({ params, sample_rate }), 'application/json');
