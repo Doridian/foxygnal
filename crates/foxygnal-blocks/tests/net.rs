@@ -81,6 +81,29 @@ fn wait_for<T>(data: &Collected<T>, n: usize, within: Duration) {
     }
 }
 
+/// Wait until a `udp_source` listens on `port` (blocks start on their own
+/// thread, after `Flowgraph::start` returns). Probes with empty datagrams,
+/// which carry no items under any header: an unbound port answers with an
+/// ICMP error, seen as `ConnectionRefused` on a connected socket.
+fn wait_listening(port: u16) {
+    let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+    s.connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+    let t0 = Instant::now();
+    let mut quiet = 0;
+    while quiet < 3 {
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "udp_source never listened on {port}"
+        );
+        let _ = s.send(&[]);
+        match s.recv(&mut [0u8; 1]) {
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => quiet = 0,
+            _ => quiet += 1,
+        }
+    }
+}
+
 fn tags_named<'a>(tags: &'a [Tag], key: &str) -> Vec<&'a Tag> {
     tags.iter().filter(|t| &*t.key == key).collect()
 }
@@ -107,11 +130,14 @@ fn udp_round_trip<T: Sample + PartialEq + std::fmt::Debug>(ty: &str, data: Vec<T
         ),
         sink,
     ]);
-    std::thread::sleep(Duration::from_millis(150)); // let it bind
+    wait_listening(port);
     let tx = chain(vec![
         VectorSource::instance(data.clone()),
-        // Paced, so the receiver's socket buffer can't overflow on a busy machine.
-        build("throttle", json!({"type": ty, "sample_rate": 1e6})),
+        // Paced, but the throttle passes 10 ms batches and catches up in one
+        // burst after a late wakeup: the data as a whole must fit the
+        // receiver's socket buffer (Linux's default, 208 KiB of datagram
+        // memory, holds about 90 of these) or a busy machine drops some.
+        build("throttle", json!({"type": ty, "sample_rate": 1e5})),
         build(
             "udp_sink",
             json!({"type": ty, "port": port, "header": "seq64", "payload": 1001}),
@@ -126,12 +152,12 @@ fn udp_round_trip<T: Sample + PartialEq + std::fmt::Debug>(ty: &str, data: Vec<T
 
 #[test]
 fn udp_round_trip_f32() {
-    udp_round_trip("f32", ramp_f32(30_000));
+    udp_round_trip("f32", ramp_f32(12_000));
 }
 
 #[test]
 fn udp_round_trip_c32() {
-    udp_round_trip("c32", ramp_c32(30_000));
+    udp_round_trip("c32", ramp_c32(6_000));
 }
 
 fn f32_bytes(v: &[f32]) -> Vec<u8> {
@@ -149,7 +175,7 @@ fn udp_sequence_gap_is_tagged() {
         ),
         sink,
     ]);
-    std::thread::sleep(Duration::from_millis(150));
+    wait_listening(port);
     let s = UdpSocket::bind("127.0.0.1:0").unwrap();
     // Datagram k carries 4 items k*10 .. k*10+3. Datagram 2 goes missing,
     // datagram 1 arrives twice (a duplicate is dropped).
@@ -183,7 +209,7 @@ fn udp_items_split_across_datagrams() {
         build("udp_source", json!({"type": "f32", "port": port})),
         sink,
     ]);
-    std::thread::sleep(Duration::from_millis(150));
+    wait_listening(port);
     let data = ramp_f32(100);
     let bytes = f32_bytes(&data);
     let s = UdpSocket::bind("127.0.0.1:0").unwrap();

@@ -863,6 +863,7 @@ dependencies = [
  "png",
  "rustfft",
  "serde_json",
+ "socket2",
 ]
 
 [[package]]
