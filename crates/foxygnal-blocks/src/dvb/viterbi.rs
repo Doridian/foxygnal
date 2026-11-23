@@ -7,26 +7,25 @@
 //!   within ±127.
 //! - **Metrics**: `i16` correlations, maximized, renormalized every step so
 //!   they never overflow. The 32 butterflies are plain array code that LLVM
-//!   vectorizes; decisions are stored as one byte per state and step.
-//! - **Traceback**: from the best state, every 128 steps, over the last
-//!   256 steps; the oldest 128 decisions are released. So a bit comes out 128
-//!   to 256 steps after it went in.
+//!   vectorizes (compiled a second time for AVX2, picked at run time);
+//!   decisions are stored as one byte per state and step.
+//! - **Traceback**: from the best state, every 256 steps, over the last
+//!   384 steps; the oldest 256 decisions are released. So a bit comes out 128
+//!   to 384 steps after it went in.
 //! - **BER estimate**: released bits are re-encoded and compared with the hard
 //!   decisions of the code bits that were actually received, which measures
 //!   the channel's bit error rate before decoding (what the decoder fixed).
 //!
 //! Nothing allocates after [`Viterbi::new`].
 
-use super::conv::outputs;
-
 const STATES: usize = 64;
 const HALF: usize = STATES / 2;
 /// Steps before a decision is final.
 const TRACEBACK: usize = 128;
 /// Bits released per traceback.
-const CHUNK: usize = 128;
+const CHUNK: usize = 256;
 /// Decision history in steps (a power of two, at least TRACEBACK + CHUNK).
-const HIST: usize = 256;
+const HIST: usize = 512;
 
 /// Expected-output signs per butterfly: the transition from state j with
 /// input 0 sends (X, Y); +1 for a 0 bit, −1 for a 1.
@@ -48,6 +47,19 @@ const SIGNS: Signs = {
         j += 1;
     }
     Signs { x, y }
+};
+
+/// The encoder's (X, Y) outputs (bits 0, 1) for each 7-bit register.
+const ENCODED: [u8; 128] = {
+    let mut t = [0u8; 128];
+    let mut r = 0;
+    while r < 128 {
+        let x = (r as u8 & super::conv::POLY_X).count_ones() as u8 & 1;
+        let y = (r as u8 & super::conv::POLY_Y).count_ones() as u8 & 1;
+        t[r] = x | (y << 1);
+        r += 1;
+    }
+    t
 };
 
 pub struct Viterbi {
@@ -110,7 +122,7 @@ impl Viterbi {
     }
 
     /// One trellis step for the soft (X, Y) pair of one input bit.
-    #[inline]
+    #[inline(always)]
     fn step(&mut self, pair: [i8; 2]) {
         let (sx, sy) = (i16::from(pair[0]), i16::from(pair[1]));
         let mut bm = [0i16; HALF];
@@ -151,7 +163,26 @@ impl Viterbi {
 
     /// Decode pairs; `out` gets the released bits (one per byte, 0 or 1), in
     /// order, in chunks.
-    pub fn decode(&mut self, pairs: &[[i8; 2]], mut out: impl FnMut(&[u8])) {
+    pub fn decode(&mut self, pairs: &[[i8; 2]], out: impl FnMut(&[u8])) {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU has AVX2 (checked just above).
+            unsafe { self.decode_avx2(pairs, out) };
+            return;
+        }
+        self.decode_portable(pairs, out);
+    }
+
+    /// [`Self::decode`] compiled for AVX2: the butterflies take half the
+    /// instructions with 256-bit vectors.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn decode_avx2(&mut self, pairs: &[[i8; 2]], out: impl FnMut(&[u8])) {
+        self.decode_portable(pairs, out);
+    }
+
+    #[inline(always)]
+    fn decode_portable(&mut self, pairs: &[[i8; 2]], mut out: impl FnMut(&[u8])) {
         for &p in pairs {
             self.step(p);
             if self.pending == TRACEBACK + CHUNK {
@@ -193,17 +224,17 @@ impl Viterbi {
         // Re-encode and compare with what was received.
         let first = self.t - depth;
         let (mut cmp, mut err) = (0u32, 0u32);
+        let mut reenc = usize::from(self.reenc);
         for i in 0..n {
-            let reg = (self.reenc << 1) | self.bits[i];
-            self.reenc = reg & 0x3F;
-            let (x, y) = outputs(reg);
+            reenc = ((reenc << 1) | usize::from(self.bits[i])) & 0x7F;
             let r = self.rx[(first + i) % HIST];
-            let rx_present = u32::from((r >> 2) & 1);
-            let ry_present = u32::from((r >> 3) & 1);
-            cmp += rx_present + ry_present;
-            err +=
-                rx_present * u32::from(x != (r & 1)) + ry_present * u32::from(y != ((r >> 1) & 1));
+            // Bits 2–3: X and Y received; bits 0–1 their hard decisions.
+            let present = (r >> 2) & 3;
+            cmp += u32::from((present & 1) + (present >> 1));
+            let wrong = (ENCODED[reenc] ^ r) & present;
+            err += u32::from((wrong & 1) + (wrong >> 1));
         }
+        self.reenc = (reenc & 0x3F) as u8;
         self.compared += u64::from(cmp);
         self.errors += u64::from(err);
         self.pending -= n;

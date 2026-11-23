@@ -1,0 +1,70 @@
+# DVB-T receiver: a terrestrial digital TV multiplex from an SDR, to an MPEG
+# transport stream.
+#
+#   SDR ──▶ DVB-T demod ──ts──▶ UDP 127.0.0.1:1234 (ffplay / VLC)
+#                       └─status──▶ message log
+#
+# Set `freq` to the multiplex's centre frequency (UHF channels 21–69 in
+# Europe: 474 MHz + 8 MHz × (channel − 21)). For a 7 MHz channel (Australia,
+# European VHF) set the demodulator's bandwidth to 7 and `rate` to 8M; for
+# 6 MHz, 6 and 48M / 7.
+#
+# The demodulator wants at least the DVB-T elementary rate, 64/7 MHz ×
+# bandwidth / 8 = 9.142857 MS/s for an 8 MHz channel; any higher rate is
+# resampled inside it. That rules out an RTL-SDR (3.2 MS/s at most). A
+# PlutoSDR (`soapy:driver=plutosdr,uri=ip:192.168.2.1`) or HackRF can run at
+# exactly the elementary rate (the cheapest); an Airspy R2 at 10M. Leave
+# `device` empty to use the first device found. It finds the mode, guard, timing and a
+# tuning error up to the band edges by itself, and the constellation, code
+# rate and cell id from the TPS.
+#
+# Watch `demod.status` (Messages): `state=lock`, the mode, MER and error
+# counts. The TS goes to UDP port 1234 on this machine, one datagram per 7
+# packets:
+#
+#   ffplay -fflags nobuffer udp://127.0.0.1:1234    (or VLC: udp://@:1234)
+#
+# or click the wire out of `demod.ts` and choose Video. A multiplex carries
+# several programmes; the Video instrument and ffplay pick one.
+#
+#   foxygnal run examples/dvbt-rx.fox.toml
+
+[vars]
+freq = "538M"
+rate = "64M / 7"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$freq", sample_rate = "$rate", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "demod"
+kind = "dvbt_demodulator"
+params = { mode = "auto", guard = "auto", bandwidth = "8" }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "ts_out"
+kind = "udp_sink"
+params = { type = "u8", host = "127.0.0.1", port = 1234, header = "none", payload = 1316 }
+ui = { x = 700, y = 60 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 700, y = 200 }
+
+[[connect]]
+from = "sdr.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.ts"
+to = "ts_out.in"
+
+[[connect]]
+from = "demod.status"
+to = "log.in"

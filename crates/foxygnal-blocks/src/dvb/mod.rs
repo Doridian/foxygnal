@@ -19,6 +19,7 @@
 
 pub mod conv;
 mod dvbs;
+pub mod dvbt;
 pub mod interleave;
 pub mod outer;
 pub mod rs;
@@ -28,6 +29,7 @@ pub mod viterbi;
 use foxygnal_core::Registry;
 
 pub use dvbs::{DvbsDemodulator, DvbsModulator};
+pub use dvbt::{DvbtDemodulator, DvbtModulator};
 
 /// MPEG-TS packet length.
 pub const TS_LEN: usize = 188;
@@ -40,4 +42,52 @@ pub const SYNC_INV: u8 = 0xB8;
 
 pub fn register(r: &mut Registry) {
     dvbs::register(r);
+    dvbt::register(r);
+}
+
+/// A preallocated byte FIFO for the TS output.
+pub(crate) struct ByteFifo {
+    buf: Box<[u8]>,
+    head: usize,
+    len: usize,
+}
+
+impl ByteFifo {
+    pub(crate) fn new(cap: usize) -> Self {
+        Self {
+            buf: vec![0; cap].into_boxed_slice(),
+            head: 0,
+            len: 0,
+        }
+    }
+
+    pub(crate) fn free(&self) -> usize {
+        self.buf.len() - self.len
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Append (whatever doesn't fit is dropped; callers keep room).
+    pub(crate) fn write(&mut self, data: &[u8]) {
+        let cap = self.buf.len();
+        for &b in data.iter().take(self.free()) {
+            self.buf[(self.head + self.len) % cap] = b;
+            self.len += 1;
+        }
+    }
+
+    pub(crate) fn read_into(&mut self, out: &mut [u8]) -> usize {
+        let cap = self.buf.len();
+        let mut done = 0;
+        while done < out.len() && self.len > 0 {
+            let run = (cap - self.head).min(self.len).min(out.len() - done);
+            out[done..done + run].copy_from_slice(&self.buf[self.head..self.head + run]);
+            self.head = (self.head + run) % cap;
+            self.len -= run;
+            done += run;
+        }
+        done
+    }
 }

@@ -622,7 +622,7 @@ timing. The demodulator's `ts` output and the modulator's input are such wires.
 | RS(204,188), t = 8 | `rs` | shortened RS(255,239) over GF(2⁸) (`0x11D`), g(x) = Π(x + αⁱ), i = 0…15. Decoder: 16 syndromes by table lookup (one per byte and syndrome, the only cost for a clean packet), then Berlekamp-Massey, a Chien search over the 204 positions that exist, and Forney |
 | interleaver | `interleave` | Forney, I = 12, M = 17: branch j a FIFO of 17j bytes (deinterleaver 17(11 − j)); 2244 bytes (11 packets) end to end. Sync bytes ride branch 0, undelayed |
 | inner code | `conv` | K = 7, G1 = 171₈ (X), G2 = 133₈ (Y), punctured 1/2 … 7/8 per EN 300 421 table 2; the kept bits go alternately to I and Q |
-| decoder | `viterbi` | soft `i8` input (0 = erasure, which is how punctured bits come back), `i16` path metrics renormalized every step, 32 butterflies written as plain array code LLVM vectorizes, decisions one byte per state; traceback over 256 steps every 128 |
+| decoder | `viterbi` | soft `i8` input (0 = erasure, which is how punctured bits come back), `i16` path metrics renormalized every step, 32 butterflies written as plain array code LLVM vectorizes (compiled twice, the AVX2 copy picked at run time), decisions one byte per state; traceback over 384 steps every 256; the re-encoding for the BER estimate by table |
 
 The receive side adds `outer::TsSync`, which finds the 204-byte grid in the decoded bits
 (three sync bytes 1632 bits apart, at any bit offset) and `outer::OuterDecoder`
@@ -692,9 +692,109 @@ stalls, so a stuck log can't stall the video.
 (The last column is the standard's required Eb/N0 for quasi-error-free reception, minus its
 0.8 dB implementation margin, as Es/N0. QEF means about one error an hour, a stricter test
 than 400 clean packets.) Speed on a Ryzen 9 7940HS laptop: the Viterbi decoder alone
-decodes about 54 Mbit/s on one core (SSE2 build), the whole demodulator about 21 MS/s of
+decodes about 110 Mbit/s on one core (AVX2), the whole demodulator about 21 MS/s of
 input, i.e. 10 MBd at 2 samples per symbol and rate 3/4 (`cargo bench -p foxygnal-blocks
 --bench blocks -- dvbs`), acquisition included.
+
+## DVB-T (M14)
+
+`blocks/src/dvb/dvbt/` is the DVB-T modem (EN 300 744), non-hierarchical: 2k and 8k, QPSK,
+16-QAM and 64-QAM, code rates 1/2–7/8, guards 1/4–1/32, 5–8 MHz channels. Both ends use the
+FEC chain above unchanged; what's new is the OFDM layer.
+
+**Tables** (`frame.rs`, built once per mode into a `OnceLock`): continual pilots (45 / 177,
+the 8k ones are the 2k set repeated every 1704 carriers, as are the 17 / 68 TPS carriers),
+the pilot PRBS (x¹¹ + x² + 1 from all ones, one bit per carrier, `1 − 2w`), the data carriers
+of each of the 4 scattered-pilot phases (1512 / 6048 each), and the symbol interleaver H(q).
+The inner interleaver (bit demultiplexer, six 126-bit interleavers, symbol interleaver) is one
+gather table per constellation and symbol parity: coded bit i of a symbol is bit e of data
+carrier c. The transmitter scatters with it, the receiver gathers with it. The TPS is
+68 bits per frame; BCH(67,53) (x¹⁴ + x⁹ + x⁸ + x⁶ + x⁵ + x⁴ + x² + x + 1, t = 2) is decoded
+by a syndrome table of all 2278 one- and two-error patterns.
+
+**Modulator** (`dvbt_modulator`): TS packets → outer encoder → convolutional encoder into a
+bit buffer; each symbol takes 1512·v / 6048·v bits, scatters them through the interleaver,
+maps them (Gray, `y0` the sign of I, `y1` of Q, then the amplitude bits, 0 = outer), adds
+the pilots (±4/3) and the TPS (DBPSK, the reference from the PRBS in symbol 0), and an
+inverse FFT with the cyclic prefix. The output, at 64/7 MHz × bandwidth / 8, has RMS `gain`.
+Like DVB-S it doesn't pace itself.
+
+**Demodulator** (`dvbt_demodulator`):
+
+1. **Resampler.** An arbitrary-ratio polyphase resampler (Kaiser sinc, 256 phases, about
+   18 taps per output sample, cut off at half the output rate) takes any input rate ≥ the
+   elementary rate down to it. Its step is the nominal ratio × (1 + clock offset), and the
+   timing loops move its position: the sampling clock is corrected in the time domain. (At
+   50 ppm the outer carriers of the 8k mode are 0.17 carrier spacings off, far too much
+   inter-carrier interference for 64-QAM to correct afterwards.)
+2. **Detection** over 69 632 samples: the cyclic prefix correlation r(n)·r*(n+N), summed over
+   G samples and folded at the period N + G, for every (mode, guard) allowed. The candidate
+   with the highest normalized peak wins (a guard too long correlates only partly, a wrong
+   period smears the fold); the peak gives the symbol start, its angle the fractional
+   frequency offset. The FFT window is placed half a guard into the prefix, so echoes up to
+   G/2 early or late stay inside it.
+3. **Integer frequency offset**: over 4 symbol pairs, |Σ Y_l·Y*_(l−1)| at the continual pilot
+   positions shifted by every m within the band edges (±171 / ±687 carriers); the pilots
+   repeat, data doesn't, so the peak (4× the mean at least) is the offset. The NCO then
+   removes the whole offset.
+4. **Per symbol**: NCO, FFT of the useful part only (the guard interval isn't even
+   resampled), then from the continual pilots against the previous symbol: the common phase
+   step (→ frequency loop, gain 0.3, and the derotation that keeps the pilots coherent across
+   the time interpolation) and the phase slope across the band = the timing drift per symbol
+   (→ clock loop, gain 0.3, minus any deliberate window moves).
+5. **TPS**: one differential bit per symbol, Re Σ Y·Y*_(l−1) over the TPS carriers after
+   removing the common phase and the slope. The sync word (or its inverse) gives the
+   frame position; at the end of the frame BCH decodes s1…s53: constellation, code rate,
+   guard and mode (checked against detection), the cell id (high byte in odd frames, low in
+   even). Three bad frames in a row, a TPS that disagrees with the detected mode, or 24
+   symbols in a row of incoherent pilots start over at detection.
+6. **Channel estimate**: each symbol's scattered pilots (every 12th carrier, offset 3·(l mod
+   4)) update a grid of every third carrier. The symbol 3 back is equalized: the grid
+   interpolated linearly in time between its pilots 4 symbols apart, rotated by
+   e^{+j2πk'(G/2)/N} (so the delays sit around 0), padded at the band edges by odd
+   reflection, and interpolated in frequency by two 16-tap fractional-delay filters (1/3 and
+   2/3), cut off at (G/2)/(N/6) + 0.25 of the grid's Nyquist: the grid resolves delays of
+   ±N/6, the guard needs ±G/2. The grid's mean phase step is the channel's mean delay, which
+   moves the window by at most 0.02 samples a symbol to keep it centred.
+7. **Demapping**: z = Y·H*/|H|² on the odd-integer grid, max-log soft bits (`r`,
+   `|r| − 2` for 16-QAM, `|r| − 4` and `||r| − 4| − 2` for 64-QAM) × 20 × |H|²/mean|H|²
+   (CSI: faded carriers become near-erasures), as `i8`; then the inner deinterleaver (one
+   gather), depuncturing (a slice at a time) and the chain: Viterbi, `TsSync`,
+   `OuterDecoder`. The puncturing phase isn't signalled, but every symbol holds whole
+   periods: after 12 096 soft bits every phase is Viterbi-decoded and the lowest re-encoded
+   BER wins.
+
+Status lines follow DVB-S: one per second (`t=… state=search|sync|lock mode=8k guard=1/32
+constellation=64qam rate=2/3 hierarchy=0 cell_id=… mer_db=… ber=… rs_corrected=… rs_failed=…
+packets=… pps=… freq_hz=… clock_ppm=… tps_corrected=…`), plus `event=tps …` when the TPS
+(or the cell id) changes and `event=lock … freq_hz=… clock_ppm=…` / `event=unlock`.
+Hierarchical TPS are reported (`hierarchy=α`) but not decoded.
+
+**Measured** (`tests/dvbt.rs`, release build, 1 kHz and 10 ppm off; "decodes" = every packet
+of 370–2000 clean; the last column is EN 300 744 table A.1, Gaussian channel, which assumes
+perfect channel knowledge and a QEF criterion):
+
+| mode | decodes | some lost | EN 300 744 |
+|---|---|---|---|
+| 2k QPSK 1/2, 1/4 | C/N 4.0 dB | 3.5 dB | 3.1 dB |
+| 2k 16-QAM 1/2, 1/32 | 9.0 dB | 8.5 dB | 8.8 dB |
+| 8k 16-QAM 2/3, 1/8 | 11.5 dB | 11.0 dB | 11.1 dB |
+| 8k 64-QAM 2/3, 1/32 | 16.0 dB | 15.5 dB | 16.5 dB |
+| 2k 64-QAM 7/8, 1/8 | 20.0 dB | 19.5 dB | 20.1 dB |
+
+C/N counts the noise in the occupied band (K/N of the sample rate). The MER the status shows
+is about 2 dB below the C/N: the boosted pilots take some of the power, and the linear time
+interpolation passes the pilots' noise into the estimate unfiltered.
+The tests also run every one of the 120 combinations clean (ignored test `full_matrix`), an
+offset of 3.4 carriers with the clock 50 ppm fast (8k 64-QAM), −7.6 carriers and −50 ppm
+(2k), an echo at −3 dB 0.3 guard intervals late, and a 7 MHz channel received at 10 MS/s,
+all bit-exact.
+
+**Speed** (`cargo bench -p foxygnal-blocks --bench blocks -- dvbt`, Ryzen 9 7940HS, one core):
+8k 64-QAM guard 1/32 at 9.14 MS/s, acquisition included: 15.9 MS/s at rate 2/3, 13.8 MS/s at
+7/8 (1.7× and 1.5× real time). Locked, a 7/8 symbol costs about 0.7 ms of its 0.92 ms:
+Viterbi ≈ 0.32 ms, equalizing and demapping ≈ 0.15 ms, packet sync and RS ≈ 0.09 ms, the
+resampler ≈ 0.05 ms, the FFT 0.01 ms.
 
 ## Recording and playback (M6)
 

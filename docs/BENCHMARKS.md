@@ -65,7 +65,10 @@ it goes. Its throughput divided by 2.4 M is "times faster than real time".
 `graph/dvbs_demodulator_3_4_2sps` is the DVB-S demodulator on a 1 MBd, rate 3/4 signal from
 `dvbs_modulator` at 2 samples/symbol, Es/N0 10 dB, 1.5 kHz off (≈ 1.3 M samples, the
 acquisition included): input samples/s, so symbols/s is half. About 21 MS/s (10.5 MBd) on a
-Ryzen 9 7940HS.
+Ryzen 9 7940HS. `graph/dvbt_8k_64qam_2_3` and `graph/dvbt_8k_64qam_7_8` are the DVB-T
+demodulator on 1000 symbols (0.92 s) of 8k, 64-QAM, guard 1/32 at 9.14 MS/s from
+`dvbt_modulator`, C/N 25 dB, 2 kHz off, acquisition (about 140 symbols) included; real time
+is 9.14 MS/s. About 15.9 and 13.8 MS/s on the same laptop.
 
 ## CI
 

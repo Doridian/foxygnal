@@ -91,6 +91,8 @@ struct Slot {
     which: u8,
     /// The last sent bit of its input bit.
     ends_step: bool,
+    /// Which input bit of the period it belongs to.
+    step: u8,
 }
 
 /// The sent bits of one period, in order.
@@ -114,6 +116,7 @@ impl Puncture {
                 slots[n] = Slot {
                     which: 0,
                     ends_step: py[i] == 0,
+                    step: i as u8,
                 };
                 n += 1;
             }
@@ -121,6 +124,7 @@ impl Puncture {
                 slots[n] = Slot {
                     which: 1,
                     ends_step: true,
+                    step: i as u8,
                 };
                 n += 1;
             }
@@ -249,11 +253,55 @@ impl Depuncturer {
             None
         }
     }
+
+    /// [`Self::push`] for a slice, appending the pairs to `out`; whole
+    /// periods go through without a branch per bit.
+    pub fn push_slice(&mut self, soft: &[i8], out: &mut Vec<[i8; 2]>) {
+        let mut rest = soft;
+        while self.pos != 0 && !rest.is_empty() {
+            if let Some(p) = self.push(rest[0]) {
+                out.push(p);
+            }
+            rest = &rest[1..];
+        }
+        let (n, k) = (self.punct.n, self.punct.k);
+        let slots = &self.punct.slots[..n];
+        let mut chunks = rest.chunks_exact(n);
+        for c in &mut chunks {
+            let mut pairs = [[0i8; 2]; 8];
+            for (&v, sl) in c.iter().zip(slots) {
+                pairs[usize::from(sl.step)][usize::from(sl.which)] = v;
+            }
+            out.extend_from_slice(&pairs[..k]);
+        }
+        for &v in chunks.remainder() {
+            if let Some(p) = self.push(v) {
+                out.push(p);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_slice_matches_push() {
+        for rate in CodeRate::ALL {
+            for phase in 0..Puncture::new(rate).period() {
+                let soft: Vec<i8> = (0..101).map(|i| (i * 7 % 255 - 127) as i8).collect();
+                let mut a = Depuncturer::new(rate, phase);
+                let want: Vec<[i8; 2]> = soft.iter().filter_map(|&v| a.push(v)).collect();
+                let mut b = Depuncturer::new(rate, phase);
+                let mut got = Vec::new();
+                for part in soft.chunks(13) {
+                    b.push_slice(part, &mut got);
+                }
+                assert_eq!(got, want, "{rate:?} phase {phase}");
+            }
+        }
+    }
 
     /// Octal generator → bit sequence in time order (current input first).
     fn taps(octal: u32) -> Vec<u8> {

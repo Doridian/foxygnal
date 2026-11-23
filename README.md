@@ -57,6 +57,15 @@ automatically, at several MBd on one core. Templates: "DATV loopback (DVB-S)" (a
 through a noisy channel, no hardware, `examples/datv-loopback.fox.toml`) and "DATV receiver
 (DVB-S)" (an SDR to a TS over UDP for ffplay or VLC, `examples/datv-rx.fox.toml`).
 
+**Digital TV (DVB-T).** A DVB-T modulator and demodulator (EN 300 744, terrestrial TV in
+Europe, Australia and much of the world): 2k and 8k OFDM, QPSK to 64-QAM, every code rate and
+guard interval, with pilots and the TPS. The demodulator finds the mode, guard, timing,
+carrier and sample clock offsets by itself, reads the constellation, code rate and cell id
+from the TPS, estimates the channel from the scattered pilots and decodes an 8 MHz multiplex
+in real time on one core. Templates: "DVB-T loopback" (`examples/dvbt-loopback.fox.toml`)
+and "DVB-T receiver" (an SDR at 9.14 MS/s, e.g. a PlutoSDR or HackRF, to a TS over UDP,
+`examples/dvbt-rx.fox.toml`).
+
 **Watching digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
 demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
 you pick with its sound, and shows codecs, resolution, frame rate, bit rates and errors.

@@ -390,5 +390,66 @@ fn dvbs_demodulator(c: &mut Criterion) {
     bench_chain(c, "graph", "dvbs_demodulator_3_4_2sps", chain);
 }
 
-criterion_group!(benches, blocks, sources, fm_receiver, dvbs_demodulator);
+/// DVB-T 8k, 64-QAM, guard 1/32, C/N 25 dB, 2 kHz off, at the 8 MHz
+/// elementary rate (9.14 MS/s): rate 2/3 (24.1 Mbit/s, the common UK/EU
+/// mode) and 7/8 (31.7 Mbit/s, the most Viterbi work). 1000 symbols (0.92 s
+/// of signal), of which the first ~140 are acquisition (TPS lock). Real time
+/// is 9.14 M input samples/s.
+fn dvbt_demodulator(c: &mut Criterion) {
+    use foxygnal_blocks::testing::VectorSink;
+    let reg = foxygnal_blocks::registry();
+    let rate = 64e6 / 7.0;
+    for (code, name) in [("2/3", "dvbt_8k_64qam_2_3"), ("7/8", "dvbt_8k_64qam_7_8")] {
+        let packets = if code == "2/3" { 14_800 } else { 19_400 };
+        let ts: Vec<u8> = (0..packets as u32)
+            .flat_map(|i| {
+                let mut p = vec![0x47, 0x01, 0x00, 0x10 | (i as u8 & 15)];
+                p.extend((4..188u32).map(|k| (i.wrapping_mul(31) ^ k.wrapping_mul(97)) as u8));
+                p
+            })
+            .collect();
+        let mut fg = Flowgraph::new();
+        let src = fg.add("src", VectorSource::instance(ts));
+        let p = json!({ "mode": "8k", "constellation": "64qam", "rate": code, "guard": "1/32",
+                        "bandwidth": "8", "cell_id": 1, "gain": 0.25 });
+        let m = fg.add("mod", reg.build("dvbt_modulator", &params(p)).unwrap());
+        let (sink, out) = VectorSink::<Complex32>::instance();
+        let sink = fg.add("sink", sink);
+        fg.connect(src, 0, m, 0).unwrap();
+        fg.connect(m, 0, sink, 0).unwrap();
+        fg.start().unwrap().wait().unwrap();
+        let clean = out.lock().unwrap().clone();
+        // Noise for C/N 25 dB in the occupied 6817/8192 of the band.
+        let sigma = (0.0625 / (6817.0 / 8192.0) / 10f32.powf(2.5) / 2.0).sqrt();
+        let nz = cnoise(clean.len(), 11);
+        let data: Vec<Complex32> = clean
+            .iter()
+            .zip(&nz)
+            .enumerate()
+            .map(|(i, (&x, &n))| {
+                let ph = std::f64::consts::TAU * 2_000.0 * i as f64 / rate;
+                x * Complex32::from_polar(1.0, ph as f32) + n * (sigma / 0.2887)
+            })
+            .collect();
+        let chain = Chain {
+            data,
+            rate,
+            blocks: vec![(
+                "dvbt_demodulator",
+                json!({ "mode": "auto", "guard": "auto", "bandwidth": "8" }),
+            )],
+            sink_type: "u8",
+        };
+        bench_chain(c, "graph", name, chain);
+    }
+}
+
+criterion_group!(
+    benches,
+    blocks,
+    sources,
+    fm_receiver,
+    dvbs_demodulator,
+    dvbt_demodulator
+);
 criterion_main!(benches);

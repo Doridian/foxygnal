@@ -1,0 +1,132 @@
+# DVB-T loopback: an MPEG transport stream file through a DVB-T modulator, a
+# noisy channel 15 kHz off frequency, and the DVB-T demodulator, with no
+# radio.
+#
+#   TS file ──throttle──▶ DVB-T mod ──×tone──+noise──▶ DVB-T demod ──▶ TS
+#                    8k, 16-QAM, 1/2, 1/4, 9.14 MS/s                └─▶ status log
+#
+# Needs a TS file whose rate matches the channel: 8k, 16-QAM, rate 1/2, guard
+# 1/4 in an 8 MHz channel carries 9 952 941 bit/s of TS. Make one with ffmpeg
+# (a test picture and tone, H.264 + AAC, padded to exactly that rate):
+#
+#   ffmpeg -f lavfi -i testsrc=size=1280x720:rate=25 -f lavfi -i sine=frequency=1000 \
+#     -t 60 -c:v libx264 -pix_fmt yuv420p -b:v 6M -maxrate 6M -bufsize 6M -g 25 \
+#     -c:a aac -b:a 128k -f mpegts -muxrate 9952941 dvbt-test.ts
+#
+# and put it in the project directory (or next to this file for `foxygnal run`).
+# The file loops. Watch `demod.status` (Messages) for the mode, constellation,
+# code rate and cell id the demodulator found in the TPS, MER and error counts,
+# and the spectrum on the wire into `demod`. Click the wire out of `demod.ts`
+# and choose Video to watch the picture. The demodulator finds the mode, guard
+# and offset by itself: change the modulator's settings (and `ts_rate`, the
+# TS bit rate of the new mode / 8) and it follows.
+# Raise `noise` to find the threshold (C/N = 10·log10(0.0625 / (0.832 ·
+# noise²)) dB; 0.03 is about 19 dB, 16-QAM 1/2 decodes down to about 9 dB,
+# noise ≈ 0.095).
+#
+# This runs the whole channel at 9.14 MS/s: it needs a fast machine (the
+# demodulator alone takes most of one core).
+#
+#   foxygnal run examples/dvbt-loopback.fox.toml
+
+[vars]
+fs = "64M / 7"
+ts_rate = "$fs * 6048 * 4 * 0.5 * 188 / 204 / 10240 / 8"
+offset = "15k"
+noise = 0.03
+
+[[block]]
+id = "ts_file"
+kind = "file_source"
+params = { type = "u8", path = "dvbt-test.ts", repeat = true, sample_rate = "$ts_rate" }
+ui = { x = 50, y = 60 }
+
+[[block]]
+id = "realtime"
+kind = "throttle"
+params = { type = "u8", sample_rate = 0 }
+ui = { x = 300, y = 60 }
+
+[[block]]
+id = "mod"
+kind = "dvbt_modulator"
+params = { mode = "8k", constellation = "16qam", rate = "1/2", guard = "1/4", bandwidth = "8", cell_id = 4660, gain = 0.25 }
+ui = { x = 550, y = 60 }
+
+[[block]]
+id = "carrier"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = "$offset", amplitude = 1.0, sample_rate = "$fs" }
+ui = { x = 550, y = 220 }
+
+[[block]]
+id = "shift"
+kind = "multiply"
+params = { type = "c32" }
+ui = { x = 830, y = 120 }
+
+[[block]]
+id = "noise"
+kind = "noise_source"
+params = { type = "c32", amplitude = "$noise", seed = 0 }
+ui = { x = 830, y = 280 }
+
+[[block]]
+id = "channel"
+kind = "add"
+params = { type = "c32" }
+ui = { x = 1080, y = 160 }
+
+[[block]]
+id = "demod"
+kind = "dvbt_demodulator"
+params = { mode = "auto", guard = "auto", bandwidth = "8" }
+ui = { x = 1330, y = 160 }
+
+[[block]]
+id = "ts_out"
+kind = "null_sink"
+params = { type = "u8" }
+ui = { x = 1630, y = 100 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true }
+ui = { x = 1630, y = 240 }
+
+[[connect]]
+from = "ts_file.out"
+to = "realtime.in"
+
+[[connect]]
+from = "realtime.out"
+to = "mod.in"
+
+[[connect]]
+from = "mod.out"
+to = "shift.a"
+
+[[connect]]
+from = "carrier.out"
+to = "shift.b"
+
+[[connect]]
+from = "shift.out"
+to = "channel.a"
+
+[[connect]]
+from = "noise.out"
+to = "channel.b"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.ts"
+to = "ts_out.in"
+
+[[connect]]
+from = "demod.status"
+to = "log.in"

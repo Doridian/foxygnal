@@ -291,6 +291,18 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/datv-rx.fox.toml"),
     },
     Example {
+        name: "dvbt-loopback",
+        title: "DVB-T loopback",
+        description: "A transport stream file → DVB-T modulator (8k, 16-QAM) → noise and a 15 kHz offset → DVB-T demodulator → the Video instrument (click `demod.ts`, choose Video). No hardware needed; make the TS file with ffmpeg as described at the top of the file. Needs a fast machine (9.14 MS/s).",
+        toml: include_str!("../../../examples/dvbt-loopback.fox.toml"),
+    },
+    Example {
+        name: "dvbt-rx",
+        title: "DVB-T receiver",
+        description: "An SDR on a terrestrial digital TV multiplex at 9.14 MS/s (PlutoSDR, HackRF, Airspy; not an RTL-SDR) → DVB-T demodulator → TS over UDP for ffplay or VLC. Set the frequency. Needs a real receiver.",
+        toml: include_str!("../../../examples/dvbt-rx.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",
