@@ -43,7 +43,7 @@ use rustfft::{Fft, FftPlanner};
 use super::conv::{CodeRate, ConvEncoder, Depuncturer, Puncture};
 use super::outer::{OuterDecoder, OuterEncoder, PACKET_BITS, TsSync, is_sync};
 use super::viterbi::Viterbi;
-use super::{RS_LEN, SYNC, TS_LEN};
+use super::{ByteFifo, RS_LEN, SYNC, TS_LEN};
 use crate::design::{self, fmt_rate};
 use crate::digital::{MsgQueue, loop_gains, text_meta};
 use crate::filters::not_configured;
@@ -651,53 +651,6 @@ fn transform(s: [i8; 2], sym: u8) -> [i8; 2] {
     let [i, q] = s;
     let q = if sym & 2 != 0 { -q } else { q };
     if sym & 1 != 0 { [q, -i] } else { [i, q] }
-}
-
-/// A preallocated byte FIFO for the TS output.
-struct ByteFifo {
-    buf: Box<[u8]>,
-    head: usize,
-    len: usize,
-}
-
-impl ByteFifo {
-    fn new(cap: usize) -> Self {
-        Self {
-            buf: vec![0; cap].into_boxed_slice(),
-            head: 0,
-            len: 0,
-        }
-    }
-
-    fn free(&self) -> usize {
-        self.buf.len() - self.len
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Append (whatever doesn't fit is dropped; callers keep room).
-    fn write(&mut self, data: &[u8]) {
-        let cap = self.buf.len();
-        for &b in data.iter().take(self.free()) {
-            self.buf[(self.head + self.len) % cap] = b;
-            self.len += 1;
-        }
-    }
-
-    fn read_into(&mut self, out: &mut [u8]) -> usize {
-        let cap = self.buf.len();
-        let mut done = 0;
-        while done < out.len() && self.len > 0 {
-            let run = (cap - self.head).min(self.len).min(out.len() - done);
-            out[done..done + run].copy_from_slice(&self.buf[self.head..self.head + run]);
-            self.head = (self.head + run) % cap;
-            self.len -= run;
-            done += run;
-        }
-        done
-    }
 }
 
 /// TS FIFO size, and the room kept free before taking more input (one chunk

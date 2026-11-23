@@ -243,10 +243,15 @@ Goal: what the RTL-SDR's chip was made for, and the analog TV that came before.
 - [ ] AC-3 / E-AC-3 and AAC-LATM sound; a choice of sound track when a program has several
 - [ ] Analog TV pictures: a frame-level probe that drops whole frames when behind (see open
       questions)
-- [ ] DVB-T: OFDM 2k/8k, channel estimation from pilots, QPSK/16/64-QAM, inner
-      deinterleaving, then the DVB-S FEC chain (Viterbi, outer deinterleaving, Reed-Solomon
-      (204,188), done) → MPEG transport stream. Needs 9.14 MS/s (HackRF, Airspy, Pluto): in SDR mode an RTL-SDR tops out near
-      3.2 MS/s and its DVB-T demodulator isn't reachable through librtlsdr
+- [x] DVB-T (EN 300 744), non-hierarchical: `dvbt_modulator` and `dvbt_demodulator`, 2k/8k,
+      QPSK/16/64-QAM, every code rate and guard; mode, guard, timing and carrier offset found
+      by the receiver, sample clock tracking, TPS (constellation, rate, cell id), channel
+      estimation from the scattered pilots, inner deinterleaving, then the DVB FEC chain →
+      MPEG transport stream, in real time on one core. Needs 9.14 MS/s (HackRF, Pluto,
+      Airspy at 10 MS/s): in SDR mode an RTL-SDR tops out near 3.2 MS/s and its DVB-T
+      demodulator isn't reachable through librtlsdr. "DVB-T loopback" and "DVB-T receiver"
+      templates
+- [ ] DVB-T hierarchical modes (α = 1, 2, 4: HP and LP streams), 4k (DVB-H)
 - [x] MPEG-TS handling in the browser: PAT/PMT/SDT (channel names), PES extraction,
       continuity and TEI counts, H.264 video via WebCodecs
 - [ ] EIT (programme guide). A TS output over UDP for VLC / ffplay works today with
