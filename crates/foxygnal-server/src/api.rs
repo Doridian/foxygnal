@@ -369,6 +369,18 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/ccsds-loopback.fox.toml"),
     },
     Example {
+        name: "goes-hrit",
+        title: "GOES HRIT (weather satellite pictures and EMWIN)",
+        description: "An SDR at 2.4 MS/s on 1694.1 MHz (a dish and LNA pointed at GOES-East or -West) → RRC, clock recovery, Costas loop → CCSDS deframer → xRIT decoder → full-disk and mesoscale pictures (and a false-colour one) to the Image instrument and PNG files, NWS bulletins and warnings to the log, charts and other files under goes/. Needs a real receiver.",
+        toml: include_str!("../../../examples/goes-hrit.fox.toml"),
+    },
+    Example {
+        name: "goes-hrit-loopback",
+        title: "GOES HRIT loopback",
+        description: "A made-up GOES-19 HRIT broadcast (Rice-coded full disk in two channels, a mesoscale picture, an EMWIN tornado warning) → CCSDS frames, BPSK 927 kBd → noise and a 5 kHz offset → the GOES HRIT receiver → pictures, bulletins and files. No hardware needed.",
+        toml: include_str!("../../../examples/goes-hrit-loopback.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",

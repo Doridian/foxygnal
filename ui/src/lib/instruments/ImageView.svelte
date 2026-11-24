@@ -2,7 +2,7 @@
   // Image: the pictures a decoder draws (SSTV, …), row by row as they
   // arrive. The newest picture is shown big; earlier ones wait in a strip
   // below, click one to look at it again. Save writes the shown one as PNG.
-  import type { ImageRow } from '../frames';
+  import type { ImageName, ImageRow } from '../frames';
   import type { ImageSettings } from '../instruments.svelte';
 
   let {
@@ -21,6 +21,8 @@
     key: number;
     /** The engine's picture number. */
     number: number;
+    /** The decoder's name for it (a satellite product, …), if any. */
+    name: string | null;
     width: number;
     /** Rows promised, or grown to the highest row seen. */
     height: number;
@@ -39,12 +41,16 @@
   let version = $state(0);
   let canvas = $state<HTMLCanvasElement>();
   let nextKey = 1;
+  /** Names of pictures whose rows haven't started yet, by picture number. */
+  const names = new Map<number, string>();
 
   const shown = $derived(pictures.find((p) => p.key === picked) ?? pictures[pictures.length - 1] ?? null);
 
   function start(r: ImageRow): Picture {
     const height = Math.max(r.height, r.row + 1, 1);
-    const p: Picture = { key: nextKey++, number: r.picture, width: r.width, height, rgba: blank(r.width, height), rows: 0, lastRow: -1, done: false, thumb: null };
+    const name = names.get(r.picture) ?? null;
+    names.delete(r.picture);
+    const p: Picture = { key: nextKey++, number: r.picture, name, width: r.width, height, rgba: blank(r.width, height), rows: 0, lastRow: -1, done: false, thumb: null };
     const keep = Math.max(1, settings.keep);
     const list = pictures.concat(p);
     pictures = list.length > keep ? list.slice(list.length - keep) : list;
@@ -58,8 +64,12 @@
     return a;
   }
 
-  /** Take a frame's rows (called by the panel for every frame). */
-  export function add(rows: ImageRow[]) {
+  /** Take a frame's rows and picture names (called by the panel for every frame). */
+  export function add(rows: ImageRow[], named: ImageName[] = []) {
+    for (const n of named) {
+      names.set(n.picture, n.name);
+      if (names.size > 16) names.delete(names.keys().next().value as number);
+    }
     if (!rows.length) return;
     let cur = pictures[pictures.length - 1];
     for (const r of rows) {
@@ -145,7 +155,7 @@
       if (!blob) return;
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `picture-${p.key}.png`;
+      a.download = p.name ? `${p.name.split('/').pop()}.png` : `picture-${p.key}.png`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     }, 'image/png');
@@ -156,7 +166,8 @@
     const p = shown;
     if (!p) return '';
     const of = p.done ? '' : ` · row ${p.lastRow + 1} of ${p.height}`;
-    return `${p.width}×${p.height}${of}${p.done ? ' · done' : ''}`;
+    const name = p.name ? `${p.name.split('/').pop()} · ` : '';
+    return `${name}${p.width}×${p.height}${of}${p.done ? ' · done' : ''}`;
   });
 </script>
 

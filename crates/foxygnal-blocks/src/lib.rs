@@ -27,6 +27,7 @@ pub mod sigmf;
 pub mod sources;
 pub mod testing;
 pub mod wav;
+pub mod xrit;
 
 use foxygnal_core::Registry;
 
@@ -62,4 +63,5 @@ pub fn register_all(r: &mut Registry) {
     dvb::register(r);
     sat::register(r);
     ccsds::register(r);
+    xrit::register(r);
 }

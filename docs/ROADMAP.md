@@ -317,10 +317,14 @@ arrive; with a rotator or a steady hand, the polar orbiters too.
       `ccsds_deframer` (symbols → CADUs), `ccsds_packets`, and `ccsds_framer` /
       `ccsds_modulator` for the transmit side; RS and the code checked against libfec and
       GNU Radio; "CCSDS loopback" template
-- [ ] GOES-R HRIT / LRIT (GOES-18/19, 1694.1 MHz, BPSK 927 kSym/s): HRIT file layer, Rice
+- [x] GOES-R HRIT / LRIT (GOES-18/19, 1694.1 MHz, BPSK 927 kSym/s): HRIT file layer, Rice
       (CCSDS 121) decompression, full disk, CONUS, mesoscale and the false-colour products
       as pictures; EMWIN (NWS text, warnings, charts) as messages and files. "GOES HRIT"
       template. GK-2A (1692.14 MHz) and Elektro-L LRIT/HRIT where the format allows
+      (`blocks/src/xrit/`, `xrit_decoder` / `xrit_source`; Rice checked against libaec, JPEG
+      against libjpeg, headers against NOAA's sample files; "GOES HRIT" and "GOES HRIT
+      loopback" templates. GOES-R HRIT has no CONUS sector. GK-2A's encrypted files and
+      JPEG 2000, and Elektro-L's wavelet files, are saved undecoded; see ARCHITECTURE.md)
 - [ ] Meteor-M LRPT (Meteor-M N2-3 / N2-4, 137 MHz): QPSK / OQPSK 72 kBd, Viterbi r=1/2,
       CCSDS frames, Reed-Solomon, the JPEG-like MSU-MR codec; three channels in colour
 - [ ] Meteor-M HRPT (1700 MHz, BPSK, Manchester 665.4 kbit/s): MSU-MR, all six channels

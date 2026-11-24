@@ -253,6 +253,7 @@ fn decode(audio: Vec<f32>, rate: f64, params: serde_json::Value, small: bool) ->
                 ));
                 at += len;
             }
+            Next::Name(_, len) => at += len,
             other => panic!("not a record at {at}: {other:?}"),
         }
     }

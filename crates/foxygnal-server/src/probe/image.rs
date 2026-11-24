@@ -5,6 +5,7 @@
 //! it starts with whatever the ring still holds, so opening the instrument
 //! late still shows the picture so far. Bytes that aren't records are
 //! skipped; after a gap the reader finds the next record by its header.
+//! Picture name records are passed on like rows (and counted with them).
 
 use foxygnal_core::raster::{self, Next};
 
@@ -41,7 +42,7 @@ impl Image {
         let mut at = 0;
         loop {
             match raster::next(&self.buf[at..]) {
-                Next::Row(_, len) => {
+                Next::Row(_, len) | Next::Name(_, len) => {
                     self.pending.extend_from_slice(&self.buf[at..at + len]);
                     while !self.pending.len().is_multiple_of(4) {
                         self.pending.push(0);
@@ -63,7 +64,7 @@ impl Image {
     fn drop_oldest(&mut self) {
         let mut at = 0;
         while self.pending.len() - at > MAX_PENDING / 2 {
-            let Next::Row(_, len) = raster::next(&self.pending[at..]) else {
+            let (Next::Row(_, len) | Next::Name(_, len)) = raster::next(&self.pending[at..]) else {
                 break;
             };
             at += len.next_multiple_of(4);

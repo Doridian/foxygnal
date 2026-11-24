@@ -19,6 +19,21 @@
 //! | 15 | 1 | flags (bit 0: the picture's last row) |
 //! | 16 | width × channels | pixels, 8 bits per channel, left to right |
 //!
+//! A picture may also have a name (a satellite product, say
+//! `G18/FD/CH13/G18_FD_CH13_20261123T120020Z`), sent as a name record before
+//! its first row:
+//!
+//! | offset | size | field |
+//! |---|---|---|
+//! | 0 | 4 | magic `FXNM` |
+//! | 4 | 4 | picture number |
+//! | 8 | 2 | length of the name in bytes (1…[`MAX_NAME`]) |
+//! | 10 | 6 | zero |
+//! | 16 | length | the name, UTF-8: `/`-separated parts, each of letters, digits, `.`, `_`, `-` (see [`valid_name`]) |
+//!
+//! `image_sink` saves a named picture under its name (the parts before the
+//! last are folders), the *Image* instrument shows it.
+//!
 //! A reader that joins mid-stream, or loses bytes, finds the next record by
 //! its magic and a header that makes sense ([`next`]).
 
@@ -30,6 +45,47 @@ pub const HEADER: usize = 16;
 pub const MAX_WIDTH: u16 = 8192;
 /// Flag: this is the picture's last row.
 pub const LAST: u8 = 1;
+/// The first four bytes of a name record.
+pub const NAME_MAGIC: [u8; 4] = *b"FXNM";
+/// The longest picture name, in bytes.
+pub const MAX_NAME: usize = 200;
+
+/// True if `name` may be a picture name: `/`-separated parts, none empty,
+/// `.` or `..`, each made of ASCII letters, digits, `.`, `_` and `-`. Safe to
+/// use as a relative path.
+pub fn valid_name(name: &str) -> bool {
+    (1..=MAX_NAME).contains(&name.len())
+        && name.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+        })
+}
+
+/// A name record for picture `picture`. `name` must be [`valid_name`].
+pub fn name_record(picture: u32, name: &str) -> Vec<u8> {
+    debug_assert!(valid_name(name), "{name}");
+    let mut v = Vec::with_capacity(HEADER + name.len());
+    v.extend_from_slice(&NAME_MAGIC);
+    v.extend_from_slice(&picture.to_le_bytes());
+    v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    v.extend_from_slice(&[0; 6]);
+    v.extend_from_slice(name.as_bytes());
+    v
+}
+
+/// The picture number and name of a whole name record.
+pub fn parse_name(b: &[u8]) -> Option<(u32, &str)> {
+    if b.len() < HEADER || b[..4] != NAME_MAGIC || b[10..16] != [0; 6] {
+        return None;
+    }
+    let len = usize::from(u16::from_le_bytes([b[8], b[9]]));
+    let name = std::str::from_utf8(b.get(HEADER..HEADER + len)?).ok()?;
+    valid_name(name).then(|| (u32::from_le_bytes([b[4], b[5], b[6], b[7]]), name))
+}
 
 /// One row's header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +155,8 @@ impl Row {
 pub enum Next {
     /// A whole record: its header, and its length in bytes.
     Row(Row, usize),
+    /// A whole name record (read it with [`parse_name`]), and its length.
+    Name(u32, usize),
     /// Skip this many bytes (not a record), then look again.
     Skip(usize),
     /// The buffer ends inside what may be a record: wait for more bytes.
@@ -111,7 +169,7 @@ pub fn next(b: &[u8]) -> Next {
     let start = (0..b.len())
         .find(|&i| {
             let tail = &b[i..b.len().min(i + 4)];
-            tail == &MAGIC[..tail.len()]
+            tail == &MAGIC[..tail.len()] || tail == &NAME_MAGIC[..tail.len()]
         })
         .unwrap_or(b.len());
     if start > 0 {
@@ -119,6 +177,19 @@ pub fn next(b: &[u8]) -> Next {
     }
     if b.len() < HEADER {
         return Next::More;
+    }
+    if b[..4] == NAME_MAGIC {
+        let len = usize::from(u16::from_le_bytes([b[8], b[9]]));
+        if b[10..16] != [0; 6] || !(1..=MAX_NAME).contains(&len) {
+            return Next::Skip(1);
+        }
+        if b.len() < HEADER + len {
+            return Next::More;
+        }
+        return match parse_name(b) {
+            Some((picture, _)) => Next::Name(picture, HEADER + len),
+            None => Next::Skip(1),
+        };
     }
     match Row::parse(b) {
         None => Next::Skip(1),
@@ -168,6 +239,26 @@ mod tests {
         assert!(r.is_last());
         assert_eq!(next(&b[n..n + 20]), Next::More, "cut inside the pixels");
         assert_eq!(next(&b[..3]), Next::More, "cut inside the magic");
+    }
+
+    #[test]
+    fn names() {
+        assert!(valid_name("G18/FD/CH13/G18_FD_CH13_20261123T120020Z"));
+        for bad in ["", "a//b", "../x", "/abs", "a/./b", "sp ace", "a\\b", "ü"] {
+            assert!(!valid_name(bad), "{bad}");
+        }
+        let mut b = b"xx".to_vec();
+        b.extend(name_record(9, "G18/FD/x"));
+        b.extend(record(0, true));
+        assert_eq!(next(&b), Next::Skip(2));
+        let b = &b[2..];
+        let Next::Name(9, n) = next(b) else { panic!() };
+        assert_eq!(parse_name(&b[..n]), Some((9, "G18/FD/x")));
+        assert_eq!(next(&b[..n - 1]), Next::More);
+        assert!(matches!(next(&b[n..]), Next::Row(..)));
+        let mut bad = name_record(1, "ok");
+        bad[16] = b'/';
+        assert_eq!(next(&bad), Next::Skip(1));
     }
 
     #[test]

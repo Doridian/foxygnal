@@ -202,11 +202,15 @@ impl Collected {
                 }
                 let mut at = 8;
                 while at < b.len() {
-                    let Next::Row(row, len) = raster::next(&b[at..]) else {
-                        break;
-                    };
-                    self.take_row(row, &b[at + raster::HEADER..at + len]);
-                    at += len.next_multiple_of(4);
+                    match raster::next(&b[at..]) {
+                        Next::Row(row, len) => {
+                            self.take_row(row, &b[at + raster::HEADER..at + len]);
+                            at += len.next_multiple_of(4);
+                        }
+                        // Picture names aren't part of the summary.
+                        Next::Name(_, len) => at += len.next_multiple_of(4),
+                        _ => break,
+                    }
                 }
             }
             _ => {}

@@ -107,6 +107,14 @@ packets per virtual channel. Frames come out as `.cadu` data, so recordings from
 play straight into it. The satellites' own decoders build on it. Template: "CCSDS loopback"
 (`examples/ccsds-loopback.fox.toml`).
 
+**GOES HRIT.** With a small dish pointed at GOES-East or -West on 1694.1 MHz, the "GOES HRIT"
+template (`examples/goes-hrit.fox.toml`) demodulates the 927 kBd BPSK downlink, decodes the
+xRIT files (Rice-compressed full-disk and mesoscale pictures, put together from their
+segments, and a false-colour picture from two bands) onto the Image instrument and into PNG
+files, and shows NWS bulletins and warnings from EMWIN in the Messages instrument. Charts and
+other files are saved. "GOES HRIT loopback" sends a made-up broadcast through a noisy channel
+into the same receiver, no radio needed.
+
 **Watching digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
 demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
 you pick with its sound (choosing between sound tracks by language), and shows codecs,

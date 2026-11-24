@@ -1,0 +1,192 @@
+# GOES HRIT loopback: a made-up GOES-19 broadcast through a noisy channel and
+# the "GOES HRIT" receiver, with no radio.
+#
+#   test broadcast ─▶ modulator ─▶ real time ─▶ RRC ×2 ─×offset─+noise─┐
+#   (files, packets,  (RS, randomizer,                                  │
+#    CADUs)            NRZ-M, r=1/2 code, BPSK 927 kBd)                 │
+#   ┌──────────────────────────────────────────────────────────────────┘
+#   └▶ AGC ▶ RRC ▶ clock recovery ▶ Costas loop ▶ deframer ▶ xRIT decoder
+#                                                   │          ├─pictures─▶ PNG files
+#                                               status─▶ log ◀─┴─messages
+#
+# `broadcast` sends, round after round (each a new scan time 10 minutes
+# later), a synthetic full disk in channels 13 and 2 (512 × 512, 4 segments,
+# Rice-coded line by line as GOES does), a mesoscale picture in channel 7, an
+# EMWIN tornado warning (zipped) and forecast discussion, and an admin
+# message. The receive side is the "GOES HRIT" template's chain from the AGC
+# on. Click the wire out of `xrit.image` and choose Image to watch pictures
+# arrive (and the false-colour picture made from channels 2 and 13); `log`
+# shows the bulletins and the deframer's status; files land in
+# `goes-loopback/`.
+#
+# Raise `noise` to find the threshold: at 2 samples a symbol with unit power,
+# Eb/N0 = 10·log10(4 / noise²) dB: 1.0 is 6 dB, 1.4 about 3 dB. `offset` is
+# the tuning error the Costas loop has to pull in.
+#
+#   foxygnal run examples/goes-hrit-loopback.fox.toml
+
+[vars]
+symbol_rate = "927k"
+sps = 2
+offset = 5000
+noise = 1.0
+
+[[block]]
+id = "broadcast"
+kind = "xrit_source"
+params = { width = 512, segments = 4, rounds = 0 }
+ui = { x = 50, y = 60 }
+
+[[block]]
+id = "mod"
+kind = "ccsds_modulator"
+params = { modulation = "bpsk", code = "conv_noninverted", nrzm = true, randomizer = true, rs_interleave = 4, dual_basis = true, frame_len = 1020, symbol_rate = "$symbol_rate" }
+ui = { x = 300, y = 60 }
+
+[[block]]
+id = "realtime"
+kind = "throttle"
+params = { type = "c32", sample_rate = 0 }
+ui = { x = 560, y = 60 }
+
+[[block]]
+id = "shape"
+kind = "rrc_filter"
+params = { type = "c32", mode = "interpolate", sps = "$sps", rolloff = 0.3, span = 15 }
+ui = { x = 780, y = 60 }
+
+[[block]]
+id = "carrier_offset"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = "$offset", amplitude = 1.0, sample_rate = "$symbol_rate * $sps" }
+ui = { x = 780, y = 220 }
+
+[[block]]
+id = "shift"
+kind = "multiply"
+params = { type = "c32" }
+ui = { x = 1030, y = 120 }
+
+[[block]]
+id = "noise"
+kind = "noise_source"
+params = { type = "c32", amplitude = "$noise", seed = 0 }
+ui = { x = 1030, y = 280 }
+
+[[block]]
+id = "channel"
+kind = "add"
+params = { type = "c32" }
+ui = { x = 1260, y = 160 }
+
+[[block]]
+id = "level"
+kind = "agc"
+params = { type = "c32" }
+ui = { x = 50, y = 440 }
+
+[[block]]
+id = "matched"
+kind = "rrc_filter"
+params = { type = "c32", mode = "filter", sps = "$sps", rolloff = 0.3, span = 31 }
+ui = { x = 270, y = 440 }
+
+[[block]]
+id = "clock"
+kind = "clock_recovery"
+params = { type = "c32", sps = "$sps", loop_bw = 0.005, ted = "gardner" }
+ui = { x = 520, y = 440 }
+
+[[block]]
+id = "carrier"
+kind = "costas_loop"
+params = { order = "2", loop_bw = 0.01 }
+ui = { x = 770, y = 440 }
+
+[[block]]
+id = "deframer"
+kind = "ccsds_deframer"
+params = { modulation = "bpsk", code = "conv_noninverted", nrzm = true, randomizer = true, rs_interleave = 4, dual_basis = true, frame_len = 1020, bad_frames = "drop" }
+ui = { x = 1010, y = 440 }
+
+[[block]]
+id = "xrit"
+kind = "xrit_decoder"
+params = { frame_len = 1020, rs_interleave = 4, dir = "goes-loopback", false_colour = true }
+ui = { x = 1270, y = 440 }
+
+[[block]]
+id = "pictures"
+kind = "image_sink"
+params = { dir = "goes-loopback/pictures", prefix = "goes", min_rows = 16 }
+ui = { x = 1540, y = 380 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true, inputs = 2 }
+ui = { x = 1540, y = 520 }
+
+[[connect]]
+from = "broadcast.out"
+to = "mod.in"
+
+[[connect]]
+from = "mod.out"
+to = "realtime.in"
+
+[[connect]]
+from = "realtime.out"
+to = "shape.in"
+
+[[connect]]
+from = "shape.out"
+to = "shift.a"
+
+[[connect]]
+from = "carrier_offset.out"
+to = "shift.b"
+
+[[connect]]
+from = "shift.out"
+to = "channel.a"
+
+[[connect]]
+from = "noise.out"
+to = "channel.b"
+
+[[connect]]
+from = "channel.out"
+to = "level.in"
+
+[[connect]]
+from = "level.out"
+to = "matched.in"
+
+[[connect]]
+from = "matched.out"
+to = "clock.in"
+
+[[connect]]
+from = "clock.out"
+to = "carrier.in"
+
+[[connect]]
+from = "carrier.out"
+to = "deframer.in"
+
+[[connect]]
+from = "deframer.frames"
+to = "xrit.in"
+
+[[connect]]
+from = "xrit.image"
+to = "pictures.in"
+
+[[connect]]
+from = "xrit.out"
+to = "log.in"
+
+[[connect]]
+from = "deframer.status"
+to = "log.in1"

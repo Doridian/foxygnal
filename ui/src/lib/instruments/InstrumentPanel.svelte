@@ -84,8 +84,8 @@
             }
           } else addText(f.gap, f.text);
         }
-        if (f.kind === 'image' && f.rows.length) {
-          imageView?.add(f.rows);
+        if (f.kind === 'image' && (f.rows.length || f.names.length)) {
+          imageView?.add(f.rows, f.names);
           gotRows = true;
         }
         if (f.kind === 'ts') {

@@ -33,9 +33,11 @@ pub fn register(r: &mut Registry) {
             category: "Sinks",
             help: "Saves the pictures on a picture wire (the `image` output of an SSTV \
                    decoder, …) as PNG files, one per picture, named \
-                   `<prefix>-<UTC date and time>-<number>.png`. A picture is saved when its \
-                   last row arrives, when the next picture starts, or when the run ends; \
-                   rows that never arrived are black.",
+                   `<prefix>-<UTC date and time>-<number>.png`, or under its own name when \
+                   the decoder gives it one (weather satellite products: \
+                   `G18/FD/CH13/G18_FD_CH13_20261123T120020Z.png`, in subfolders). A picture \
+                   is saved when its last row arrives, when the next picture starts, or when \
+                   the run ends; rows that never arrived are black.",
             inputs: vec![PortSpec {
                 name: "in",
                 ty: Some(StreamType::U8),
@@ -75,6 +77,14 @@ pub fn register(r: &mut Registry) {
     );
 }
 
+/// Queue a picture's name (before its first row) on a decoder's picture
+/// output. Names that aren't [`raster::valid_name`] are left out.
+pub(crate) fn push_name(q: &mut crate::digital::MsgQueue, picture: u32, name: &str) {
+    if raster::valid_name(name) {
+        q.bytes(&raster::name_record(picture, name));
+    }
+}
+
 /// Queue one row record (header and pixels) on a decoder's picture output.
 pub(crate) fn push_row(q: &mut crate::digital::MsgQueue, row: Row, pixels: &[u8]) {
     debug_assert_eq!(pixels.len(), row.pixel_bytes());
@@ -90,6 +100,8 @@ struct Picture {
     /// Rows promised by the header (0 = not known).
     height: u16,
     pixels: Vec<u8>,
+    /// The decoder's name for it, if any.
+    name: Option<String>,
     /// Rows received, and the highest row index seen + 1.
     rows: usize,
     extent: usize,
@@ -102,6 +114,8 @@ pub struct ImageSink {
     /// Bytes not parsed yet (the start of a record that hasn't fully arrived).
     buf: Vec<u8>,
     picture: Option<Picture>,
+    /// The last name record: (picture number, name).
+    name: Option<(u32, String)>,
     saved: u32,
 }
 
@@ -113,7 +127,12 @@ impl ImageSink {
         if !same {
             self.save()?;
             let height = usize::from(row.height.max(row.row + 1));
+            let name = self
+                .name
+                .take_if(|(n, _)| *n == row.picture)
+                .map(|(_, name)| name);
             self.picture = Some(Picture {
+                name,
                 number: row.picture,
                 width: row.width,
                 channels: row.channels,
@@ -154,13 +173,35 @@ impl ImageSink {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| Error::Other(format!("cannot create {}: {e}", self.dir.display())))?;
         self.saved += 1;
-        let name = format!(
-            "{}-{}-{}.png",
-            self.prefix,
-            utc_stamp(SystemTime::now()),
-            self.saved
-        );
-        let path = self.dir.join(name);
+        let path = match &p.name {
+            Some(name) => {
+                // A named picture goes in its folders; never over another.
+                let base = self.dir.join(name);
+                if let Some(parent) = base.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        Error::Other(format!("cannot create {}: {e}", parent.display()))
+                    })?;
+                }
+                let with = |suffix: &str| {
+                    let mut s = base.clone().into_os_string();
+                    s.push(suffix);
+                    PathBuf::from(s)
+                };
+                let mut path = with(".png");
+                let mut n = 1;
+                while path.exists() {
+                    n += 1;
+                    path = with(&format!("-{n}.png"));
+                }
+                path
+            }
+            None => self.dir.join(format!(
+                "{}-{}-{}.png",
+                self.prefix,
+                utc_stamp(SystemTime::now()),
+                self.saved
+            )),
+        };
         let stride = usize::from(p.width) * usize::from(p.channels);
         write_png(
             &path,
@@ -220,7 +261,7 @@ fn utc_stamp(t: SystemTime) -> String {
 
 /// Days since 1970-01-01 to (year, month, day), proleptic Gregorian
 /// (Howard Hinnant's algorithm).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -253,6 +294,12 @@ impl Block for ImageSink {
                 Next::Row(row, len) => {
                     if let Err(e) = self.take_row(row, &buf[at + raster::HEADER..at + len]) {
                         break Err(e);
+                    }
+                    at += len;
+                }
+                Next::Name(picture, len) => {
+                    if let Some((_, name)) = raster::parse_name(&buf[at..at + len]) {
+                        self.name = Some((picture, name.to_owned()));
                     }
                     at += len;
                 }
@@ -295,6 +342,7 @@ fn build_sink(p: &ParamReader<'_>) -> Result<Instance, Error> {
             min_rows: p.u64("min_rows")?.max(1) as usize,
             buf: Vec::with_capacity(1 << 16),
             picture: None,
+            name: None,
             saved: 0,
         }),
         inputs: vec![("in".into(), StreamType::U8)],

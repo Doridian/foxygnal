@@ -76,11 +76,19 @@ export interface ImageRow {
   pixels: Uint8Array;
 }
 
+/** A picture's name (a name record: sent before the picture's first row). */
+export interface ImageName {
+  picture: number;
+  /** `/`-separated parts, e.g. `G18/FD/CH13/G18_FD_CH13_20261123T120020Z`. */
+  name: string;
+}
+
 export interface ImageFrame {
   kind: 'image';
   /** Rows were lost before this frame. */
   gap: boolean;
   rows: ImageRow[];
+  names: ImageName[];
 }
 
 export interface TsFrame {
@@ -154,11 +162,21 @@ export function decodeFrame(buf: ArrayBuffer): { id: number; seq: number; frame:
       return { id, seq, frame: { kind: 'text', gap: (v.getUint8(16) & 1) !== 0, text: utf8.decode(new Uint8Array(buf, 20, n)) } };
     }
     case 7: {
-      // n records ("FXIM", u32 picture, u16 row, height, width, u8 channels, flags, pixels), each padded to 4.
+      // n records ("FXIM", u32 picture, u16 row, height, width, u8 channels, flags, pixels), each padded to 4;
+      // name records ("FXNM", u32 picture, u16 length, 6 zero bytes, the name) among them.
       const n = v.getUint32(12, true);
       const rows: ImageRow[] = [];
+      const names: ImageName[] = [];
       let at = 20;
       for (let i = 0; i < n && at + 16 <= buf.byteLength; i++) {
+        if (v.getUint8(at + 1) === 0x58 && v.getUint8(at + 2) === 0x4e) {
+          // "FXNM"
+          const len = v.getUint16(at + 8, true);
+          if (at + 16 + len > buf.byteLength) break;
+          names.push({ picture: v.getUint32(at + 4, true), name: utf8.decode(new Uint8Array(buf, at + 16, len)) });
+          at += (16 + len + 3) & ~3;
+          continue;
+        }
         const width = v.getUint16(at + 12, true);
         const channels = v.getUint8(at + 14) === 3 ? 3 : 1;
         const len = width * channels;
@@ -174,7 +192,7 @@ export function decodeFrame(buf: ArrayBuffer): { id: number; seq: number; frame:
         });
         at += (16 + len + 3) & ~3;
       }
-      return { id, seq, frame: { kind: 'image', gap: (v.getUint8(16) & 1) !== 0, rows } };
+      return { id, seq, frame: { kind: 'image', gap: (v.getUint8(16) & 1) !== 0, rows, names } };
     }
     case 8: {
       // n packets of 188 bytes.

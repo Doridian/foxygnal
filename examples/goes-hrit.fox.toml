@@ -1,0 +1,131 @@
+# GOES HRIT: full-disk and mesoscale pictures and NWS bulletins (EMWIN) from
+# GOES-East (GOES-19, 75.2° W) or GOES-West (GOES-18, 137.0° W) on 1694.1 MHz.
+#
+#   SDR 2.4 MS/s ─▶ AGC ─▶ RRC (α 0.3) ─▶ clock recovery ─▶ Costas loop (BPSK)
+#        log ◀─status─ deframer (NRZ-M, r=1/2 code, RS I=4) ◀─────────┘
+#         ▲              │ CADUs
+#         └─messages─ xRIT decoder ─pictures─▶ image_sink (PNG files)
+#                        └─▶ files: EMWIN bulletins and charts, admin text
+#
+# What you need: a dish of 60–100 cm (or a Discovery Dish with its L-band
+# feed) pointed at the satellite, an LNA with a filter for 1.69 GHz (often
+# powered over the coax: turn on the SDR's bias tee in its driver or tool),
+# and an SDR that runs at 2 MS/s or more (an RTL-SDR at 2.4 MS/s, an Airspy at
+# 2.5 or 3 MS/s: set `rate`). HRIT is BPSK at 927 kBd, 1.2 MHz wide.
+#
+# Tuning: a cheap SDR's clock may be 10–40 kHz off at 1.7 GHz. The Costas loop
+# pulls in about ±20 kHz (more on a strong signal); look at the spectrum on
+# `sdr.out` and set `ppm` on the SDR (or `freq`) so the signal is centred. The
+# constellation on `carrier.out` should show two clusters; the deframer's
+# status (`state=lock … rs_corrected=… ber=…`) says whether frames decode.
+# A clean picture needs about 4 dB Eb/N0 (frames start to fail near 2 dB).
+#
+# What comes out:
+# - Pictures on `xrit.image` (click the wire, choose Image), saved by
+#   `pictures` as `goes/pictures/G19/FD/CH13/<date>/G19_FD_CH13_<time>.png`:
+#   full disks in channels 2, 7, 8, 9, 13, 14, 15 (5424 × 5424, every 10–30
+#   minutes), the mesoscale sectors in 2, 7 and 13, a false-colour picture
+#   from channels 2 + 13, and the relayed GOES / Himawari pictures.
+# - Messages (`log`): one line per picture segment and picture, and one per
+#   EMWIN bulletin: `type=emwin product=TORBMX event="Tornado Warning"
+#   office=KBMX wmo="WFUS54 KBMX 231804" issued=… text="…"`. Filter on
+#   `event=` in the Messages instrument to see only warnings.
+# - Files under `goes/`: EMWIN bulletins (`emwin/<date>/`, the full text) and
+#   charts, NWS charts (`files/`), admin messages (`text/`), DCS (`dcs/`).
+#
+#   foxygnal run examples/goes-hrit.fox.toml
+
+[vars]
+freq = "1694.1M"
+rate = "2.4M"
+symbol_rate = "927k"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$freq", sample_rate = "$rate", gain = 40.0 }
+ui = { x = 50, y = 100 }
+
+[[block]]
+id = "level"
+kind = "agc"
+params = { type = "c32" }
+ui = { x = 300, y = 100 }
+
+[[block]]
+id = "matched"
+kind = "rrc_filter"
+params = { type = "c32", mode = "filter", sps = "$rate / $symbol_rate", rolloff = 0.3, span = 31 }
+ui = { x = 520, y = 100 }
+
+[[block]]
+id = "clock"
+kind = "clock_recovery"
+params = { type = "c32", sps = "$rate / $symbol_rate", loop_bw = 0.005, ted = "gardner" }
+ui = { x = 780, y = 100 }
+
+[[block]]
+id = "carrier"
+kind = "costas_loop"
+params = { order = "2", loop_bw = 0.01 }
+ui = { x = 1030, y = 100 }
+
+[[block]]
+id = "deframer"
+kind = "ccsds_deframer"
+params = { modulation = "bpsk", code = "conv_noninverted", nrzm = true, randomizer = true, rs_interleave = 4, dual_basis = true, frame_len = 1020, bad_frames = "drop" }
+ui = { x = 50, y = 320 }
+
+[[block]]
+id = "xrit"
+kind = "xrit_decoder"
+params = { frame_len = 1020, rs_interleave = 4, dir = "goes", false_colour = true }
+ui = { x = 330, y = 320 }
+
+[[block]]
+id = "pictures"
+kind = "image_sink"
+params = { dir = "goes/pictures", prefix = "goes", min_rows = 16 }
+ui = { x = 620, y = 260 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true, inputs = 2 }
+ui = { x = 620, y = 400 }
+
+[[connect]]
+from = "sdr.out"
+to = "level.in"
+
+[[connect]]
+from = "level.out"
+to = "matched.in"
+
+[[connect]]
+from = "matched.out"
+to = "clock.in"
+
+[[connect]]
+from = "clock.out"
+to = "carrier.in"
+
+[[connect]]
+from = "carrier.out"
+to = "deframer.in"
+
+[[connect]]
+from = "deframer.frames"
+to = "xrit.in"
+
+[[connect]]
+from = "xrit.image"
+to = "pictures.in"
+
+[[connect]]
+from = "xrit.out"
+to = "log.in"
+
+[[connect]]
+from = "deframer.status"
+to = "log.in1"

@@ -534,6 +534,11 @@ format knows about pictures.
   It runs on a thread of its own, since it writes files.
 - A decoder that knows when a picture is cut off (an SSTV transmission that stops) sends its
   last row again with the last-row flag, so sinks and the instrument close the picture.
+- A decoder that knows a picture's name (a satellite product) sends a **name record** before
+  its first row: magic `FXNM`, picture number, name length (`u16`), 6 zero bytes, then the
+  name (UTF-8, up to 200 bytes; `/` separates folders, no `..`, no leading `/`). `image_sink`
+  then saves the picture as `<dir>/<name>.png` (folders made, `-2`, `-3` … rather than
+  overwriting) and the Image instrument shows the name and downloads under it.
 
 Digital video (M14) doesn't use row records: a demodulator's output is already a compressed
 transport stream (see "DVB-S and the DVB FEC chain"), and the browser decodes it (see
@@ -1344,6 +1349,97 @@ rad/sample) holds lock without slips at 6 dB, and slips now and then around 3 dB
 (`cargo bench -p foxygnal-blocks --bench blocks -- ccsds`, one core, AVX2): about 33 M
 coded QPSK symbols/s through the deframer, search included, so Metop's 2.33 MSym/s uses a
 small part of a core. Not checked yet: real recordings of any satellite.
+
+## xRIT: GOES HRIT/LRIT and EMWIN (M15)
+
+`blocks/src/xrit/` turns CADUs from `ccsds_deframer` into pictures, bulletins and files: the
+LRIT/HRIT Mission Specific Implementation (CGMS) as NOAA flies it on GOES-R (HRIT 927 kBd),
+plus what GK-2A and Elektro-L do differently. Layers, each a plain struct:
+
+- **Link**: GOES HRIT is BPSK, RRC α 0.3, r = 1/2 K = 7 **without** G2 inverted (NOAA's LRIT
+  receiver spec: "symbol inversion: none"; the NOAA/Aerospace reference receiver and goestools
+  agree), NRZ-M before the encoder, CCSDS randomizer, RS(255,223) I = 4 with the dual basis,
+  1024-byte CADUs. So `ccsds_deframer` with `code = conv_noninverted, nrzm = true`. The
+  template's loops came from a sweep (`tests/xrit.rs`, `costas_sweep`, at 2.4 MS/s): Costas
+  0.01 rad/sample pulls in ±20 kHz from 2.5 dB Eb/N0 (40 kHz needs 4 dB); 0.002 already fails
+  at 10 kHz. Clock recovery 0.005, Gardner.
+- **Transport** (`transport::FileAssembler`): space packets from `vcdu::PacketAssembler` per
+  (VCID, APID); a file starts with a packet whose sequence flags say first (or standalone) and
+  carries the 10-byte transport header (file counter, length in bits). Every packet ends in a
+  CRC-16 (CCITT-FALSE) over its data; a bad CRC or a sequence count gap loses the packet. For
+  a Rice-coded GOES image each packet after the header packet is one compressed line, decoded
+  as it arrives, and a lost one becomes a black line (counted in `lost_lines=`); any other
+  file with a loss is dropped (`event=incomplete`).
+- **Headers** (`header::Headers`): primary (0), image structure (1), navigation (2),
+  annotation (4), time stamp (5, CDS), ancillary text (6), key (7), segment identification
+  (128: NOAA's 7 bytes; GK-2A's 4 and EUMETSAT's 10 too, told apart by length), NOAA (129),
+  header structure (130), Rice (131), DCS filename (132). 129–132 are only NOAA's when the
+  NOAA header's agency says so.
+- **Rice** (`rice`): CCSDS 121.0-B lossless, as szip packages it (that is what GOES's header
+  131 flags and pixels-per-block describe): ID length by sample width, zero blocks (with
+  runs and ROS), second extension, k-split and uncompressed blocks, the unit-delay predictor
+  with the reference sample at each RSI. szip packs each scanline as whole blocks and doesn't
+  pad RSIs. An encoder too (for the test broadcast and to check the decoder).
+- **Products** (`products`): classification by product id (NOAA's equals the satellite),
+  ancillary keys (`Satellite`, `Channel`, `Region`, `Time of frame start`), the annotation
+  (`OR_ABI-L2-CMIPF-M6C13_G19_s…`), and the other agencies' file names, into
+  `ImageInfo { satellite, region, channel, time }` and the picture name
+  `G19/FD/CH13/<yyyy-mm-dd>/G19_FD_CH13_<yyyymmddThhmmss>Z`. Full disk 5424² in 16 segments
+  of 339 lines, mesoscale (M1, M2) in one file; GOES-R HRIT has no CONUS sector. Relayed
+  Himawari and older GOES pictures get their own names.
+- **Pictures** (`picture::Pictures`): segments are placed by their start line; a picture is
+  done when all its segments arrived, or abandoned (sent with what it has) when 200 newer
+  parts went by or more than 6 are open (a full disk is 29 MB, held until done). Done
+  pictures go out one at a time, in the order they started: a name record, the rows, the last
+  one flagged. GOES fills outside the Earth's disk with 255; those ends of each row become
+  black. With `false_colour`, CH02 (resized) and CH13 of one scan make a third picture,
+  r = g = visible, b = max(visible, IR) (our own simple scheme, not goesproc's lookup table).
+- **EMWIN** (`emwin`): EMWIN files (VCIDs 20–22; NOAA product 9) are named
+  `A_TTAAiiCCCCYYGGgg…_C_KWIN_<time>_<n>-<p>-<AWIPS id>.<ext>`; text becomes one message
+  (`type=emwin t=… product=TORBMX category=warning event="Tornado Warning" office=KBMX
+  state=AL wmo="WFUS54 KBMX 231804" priority=… issued=… file=… text="…"`, text cut at
+  `max_text`), ZIPs are unpacked (stored and deflate via `miniz_oxide`, CRC-32 checked), GIF
+  and other files are saved.
+- **Decoder** (`decoder::Decoder`, wrapped by `xrit_decoder`): pictures (raw 1/8/9–16 bit,
+  Rice, JPEG via `zune-jpeg`), text and admin messages, DCS files, and the files it can't
+  decode, saved under `dir` (`emwin/<date>/`, `text/<date>/`, `dcs/<date>/`,
+  `files/<sat>/<date>/`, `encrypted/<sat>/`, `unsupported/<sat>/`; `save_lrit` keeps every
+  file as received under `lrit/<sat>/`). Messages: `type=image name=… segment=i/n width=…
+  lines=… [lost_lines=…]`, `type=picture name=… complete=0|1`, `type=emwin`, `type=text`,
+  `type=file event=encrypted|incomplete|unsupported|error`.
+
+**Pacing.** A full disk is 29 MB of rows, far more than a probe tap's ring (32 kB) takes at
+once, so the block sends rows at `image_rate` kB/s (default 1000; a token bucket of 64 kB)
+and stops taking CADUs while its backlog is large. `image_sink` gets every row either way;
+the Image instrument sees them because they are paced. HRIT's whole link is about 50 kB/s
+(Rice-coded), so live pictures stay well under the default rate; pacing matters when a
+recording is decoded faster than real time.
+
+**Test broadcast** (`synth`, `xrit_source`): rounds of a full disk in CH13 and CH02 (made-up
+Earth, Rice-coded line by line, interleaved segments as GOES sends them), a mesoscale CH07,
+a zipped EMWIN tornado warning, a forecast discussion and an admin message, through
+`FileEncoder` and `FrameBuilder` per VCID.
+
+**Checked** (`scripts/xrit-vectors.py`, fixtures in `tests/fixtures/xrit`, tests in
+`src/xrit/vectors.rs` and `tests/xrit.rs`): Rice decoding against libaec/libsz (10 cases:
+8, 10, 12 and 16 bit, 8–32 pixels per block, with and without the predictor, MSB and LSB first, the 5424-pixel GOES line, partial blocks, zero runs, second extension and uncompressed blocks
+lines) and our encoder's output decoded by libaec; JPEG (grey and RGB) against libjpeg
+within 3 levels; the headers of NOAA's public GOES-16 sample files (full disk CH02 and CH13,
+M1 CH02, M2 CH07): segment, Rice parameters, navigation and names. With
+`FOXYGNAL_GOES_SAMPLES` set, `noaa_samples` sends those whole files through our Rice encoder
+and packets back into the decoder and saves the pictures. End to end: the test broadcast
+straight as CADUs (every pixel, message and file), and through the template's RF chain at
+Eb/N0 4 dB with a 15 kHz offset (everything after the loops lock).
+
+**Known gaps.** No off-air recording has been checked yet (NOAA's samples are already
+decompressed files, so only our own Rice coding of them has been through the decoder).
+GK-2A: files with a key index are DES-encrypted with keys KMA doesn't publish, and its
+JPEG 2000 / lossless pictures aren't decoded: both are saved raw; its segment header
+(sequence from 1) is untested. Elektro-L: only JPEG; wavelet files are saved raw, and its
+OQPSK HRIT isn't something `ccsds_deframer` demodulates. 12-bit JPEG isn't decoded. The DCS
+files HRIT relays (blocks of platform messages) are saved, not parsed; `goes_dcs_decoder`
+decodes the platforms' own uplink instead. The first file after lock is
+usually lost. LRIT (293 kBd) and an RTL-SDR's DC spike near the carrier are untested.
 
 ## Recording and playback (M6)
 
