@@ -1135,9 +1135,18 @@ async fn status(mcp: &Mcp) -> Out {
     });
     if let Some((id, mon, map)) = mcp.session.monitor() {
         let (c0, t0) = (mon.stats(), Instant::now());
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut fills = crate::probe::FillAverage::default();
+        while t0.elapsed() < Duration::from_millis(500) {
+            fills.sample(&mon);
+            tokio::time::sleep(crate::probe::FILL_TICK).await;
+        }
         if mcp.session.monitor().is_some_and(|(i, ..)| i == id) {
-            let st = map.stats(crate::probe::stats(&c0, &mon.stats(), t0.elapsed()));
+            let st = map.stats(crate::probe::stats(
+                &c0,
+                &mon.stats(),
+                t0.elapsed(),
+                &fills.take(),
+            ));
             v["blocks"] = json!(
                 st.blocks
                     .iter()

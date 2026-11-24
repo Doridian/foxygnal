@@ -394,7 +394,12 @@ A **probe** attaches to any wire at runtime, with no rebuild and no restart
   - **Video** (`ts` probe, frame kind 8, u8 wires only): every whole transport stream packet
     since the last frame. Read on a thread of its own, see "Digital video".
 - **Stats** are broadcast twice a second while running: items/s and buffer fill per wire,
-  and the share of a core each block spends in `work`. The UI shows them in the wire popover
+  and the share of a core each block spends in `work`. The fill is the average of samples
+  taken every 20 ms (the probe thread's tick while a graph runs), not a snapshot: a block
+  that takes its whole input buffer per `work` call (the ATSC demodulator) or a producer
+  that writes in bursts (an SDR) leaves a buffer either full or empty at any instant, so a
+  snapshot read only 0 % or 100 %. About 50 % then means the consumer is busy half the time;
+  a bottleneck stays near 100 %. The UI shows them in the wire popover
   and as the *Load* overlay (heat colours on blocks and wires).
 - The sample rate (and centre frequency, for absolute spectrum axes) comes from stream
   metadata, or can be set per instrument.
@@ -1962,7 +1967,7 @@ ordinary edits that a person sees and can undo.
   - **Files:** `list_files` / `open_file` (`.grc` imports) / `save_file` (project directory
     only, same file-name rules as the REST API), `import_grc` / `export_grc`.
   - **Running:** `run` (never arms TX), `stop`, `status` (errors, warnings, CPU per block,
-    throughput and buffer fill per wire over half a second).
+    throughput and average buffer fill per wire over half a second).
   - **Signals:** `measure` (a spectrum, level or messages summary), `watch` / `read_watch` /
     `stop_watch` (a decoder's text lines or pictures over time; pictures come back as PNG
     image content), `list_devices`, and `record` (a SigMF capture of n seconds).

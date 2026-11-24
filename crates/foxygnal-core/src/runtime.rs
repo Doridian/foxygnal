@@ -1103,6 +1103,18 @@ impl Monitor {
         self.inner.warnings.count.load(Ordering::Acquire)
     }
 
+    /// Adds each wire's buffer fill (0…1, in [`GraphCounters::edges`]
+    /// order) to `acc`, which is resized to the number of wires the first
+    /// time. A fill is an instant's snapshot; averaging many of these gives
+    /// a fill that means something when blocks move whole buffers at a time.
+    /// Allocates nothing once `acc` has its size.
+    pub fn add_fills(&self, acc: &mut Vec<f32>) {
+        acc.resize(self.inner.edges.len(), 0.0);
+        for (a, e) in acc.iter_mut().zip(&self.inner.edges) {
+            *a += e.tap.backlog(e.reader) as f32 / e.tap.capacity().max(1) as f32;
+        }
+    }
+
     pub fn stats(&self) -> GraphCounters {
         GraphCounters {
             blocks: self
