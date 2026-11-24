@@ -4,3 +4,5 @@
 *.cu8
 .playwright-mcp/
 /plugins/target
+# SigMF recordings the server writes into the project directory
+/recordings/

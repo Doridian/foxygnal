@@ -320,7 +320,38 @@ pub struct EdgeStat {
     pub fill: f32,
 }
 
-pub fn stats(prev: &GraphCounters, now: &GraphCounters, dt: Duration) -> Stats {
+/// Buffer fill averaged over a stats window: a single snapshot of a wire
+/// whose consumer takes the whole buffer per `work` call (or whose producer
+/// fills it in bursts) reads only 0 % or 100 %.
+#[derive(Default)]
+pub struct FillAverage {
+    sums: Vec<f32>,
+    samples: u32,
+}
+
+impl FillAverage {
+    pub fn sample(&mut self, monitor: &Monitor) {
+        monitor.add_fills(&mut self.sums);
+        self.samples += 1;
+    }
+
+    /// The averages since the last call (empty if there were no samples),
+    /// and start over.
+    pub fn take(&mut self) -> Vec<f32> {
+        let n = std::mem::take(&mut self.samples);
+        let out = if n == 0 {
+            Vec::new()
+        } else {
+            self.sums.iter().map(|s| s / n as f32).collect()
+        };
+        self.sums.clear();
+        out
+    }
+}
+
+/// Stats from two counter snapshots `dt` apart. `fills`: averaged buffer
+/// fills ([`FillAverage::take`]); where missing, the fill of `now` is used.
+pub fn stats(prev: &GraphCounters, now: &GraphCounters, dt: Duration, fills: &[f32]) -> Stats {
     let secs = dt.as_secs_f64().max(1e-6);
     Stats {
         blocks: now
@@ -341,7 +372,8 @@ pub fn stats(prev: &GraphCounters, now: &GraphCounters, dt: Duration) -> Stats {
         edges: now
             .edges
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(i, e)| {
                 let before = prev
                     .edges
                     .iter()
@@ -352,7 +384,10 @@ pub fn stats(prev: &GraphCounters, now: &GraphCounters, dt: Duration) -> Stats {
                     to: e.to.clone(),
                     rate: e.written.saturating_sub(before) as f64 / secs,
                     items: e.written,
-                    fill: e.backlog as f32 / e.capacity.max(1) as f32,
+                    fill: fills
+                        .get(i)
+                        .copied()
+                        .unwrap_or(e.backlog as f32 / e.capacity.max(1) as f32),
                 }
             })
             .collect(),
@@ -362,6 +397,9 @@ pub fn stats(prev: &GraphCounters, now: &GraphCounters, dt: Duration) -> Stats {
 const TICK: Duration = Duration::from_millis(16);
 const IDLE_TICK: Duration = Duration::from_millis(100);
 const STATS_EVERY: Duration = Duration::from_millis(500);
+/// The tick while a graph runs, for averaging buffer fills (25 samples a
+/// stats window; reading them is a few atomic loads).
+pub(crate) const FILL_TICK: Duration = Duration::from_millis(20);
 
 /// The session's probe thread. Exits when the session is dropped.
 pub(crate) fn spawn(session: Weak<Session>) {
@@ -369,6 +407,7 @@ pub(crate) fn spawn(session: Weak<Session>) {
         .name("fox:probes".into())
         .spawn(move || {
             let mut last: Option<(u64, GraphCounters, Instant)> = None;
+            let mut fills = FillAverage::default();
             loop {
                 let Some(s) = session.upgrade() else { return };
                 let run = s.monitor();
@@ -382,23 +421,32 @@ pub(crate) fn spawn(session: Weak<Session>) {
                     None => last = None,
                     Some((id, mon, map)) => match &last {
                         Some((lid, prev, at)) if lid == id => {
+                            fills.sample(mon);
                             if now.duration_since(*at) >= STATS_EVERY {
                                 let counters = mon.stats();
                                 s.emit_stats(map.stats(stats(
                                     prev,
                                     &counters,
                                     now.duration_since(*at),
+                                    &fills.take(),
                                 )));
                                 last = Some((*id, counters, now));
                             }
                         }
-                        _ => last = Some((*id, mon.stats(), now)),
+                        _ => {
+                            fills.take();
+                            last = Some((*id, mon.stats(), now));
+                        }
                     },
                 }
-                // Stats alone don't need a fast tick.
-                let busy = run.is_some() && !s.hub().is_empty();
+                let tick = match &run {
+                    Some(_) if !s.hub().is_empty() => TICK,
+                    // Stats alone only need the fills sampled.
+                    Some(_) => FILL_TICK,
+                    None => IDLE_TICK,
+                };
                 drop(s);
-                std::thread::sleep(if busy { TICK } else { IDLE_TICK });
+                std::thread::sleep(tick);
             }
         })
         .expect("spawning the probe thread");
@@ -409,6 +457,34 @@ mod tests {
     use super::*;
     use foxygnal_core::Complex32;
     use foxygnal_core::buffer::{self, Writer};
+
+    #[test]
+    fn stats_use_the_averaged_fill() {
+        use foxygnal_core::EdgeCounters;
+        let edge = |backlog| EdgeCounters {
+            from: "a.out".into(),
+            to: "b.in".into(),
+            written: 0,
+            backlog,
+            capacity: 100,
+        };
+        let c = |backlog| GraphCounters {
+            blocks: vec![],
+            edges: vec![edge(backlog)],
+        };
+        let dt = Duration::from_millis(500);
+        // A full buffer at the instant of the snapshot, but half full on average.
+        assert_eq!(stats(&c(0), &c(100), dt, &[0.5]).edges[0].fill, 0.5);
+        // No samples: the snapshot.
+        assert_eq!(stats(&c(0), &c(100), dt, &[]).edges[0].fill, 1.0);
+
+        let mut avg = FillAverage {
+            sums: vec![2.0, 0.5],
+            samples: 4,
+        };
+        assert_eq!(avg.take(), vec![0.5, 0.125]);
+        assert!(avg.take().is_empty());
+    }
 
     /// A c32 ring with a tap-backed source attached, and a way to feed it.
     fn rig(cap: usize) -> (Writer, Vec<buffer::Reader>, Source) {

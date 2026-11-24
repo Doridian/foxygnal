@@ -67,7 +67,7 @@
       {#each watchers as n (n)}<span class="badge" title="Instrument {n}">{n}</span>{/each}
       {#if rate && !stat}<span class="rate mono" title="Sample rate">{fmtRate(rate)}</span>{/if}
       {#if stat}
-        <span class="stat mono" style:border-color={heat(stat.fill)} title="Items per second · buffer fill for {to}"
+        <span class="stat mono" style:border-color={heat(stat.fill)} title="Items per second · average buffer fill for {to}"
           >{fmtRate(stat.rate).replace('S/s', '/s')} · {Math.round(stat.fill * 100)}%</span
         >
       {/if}

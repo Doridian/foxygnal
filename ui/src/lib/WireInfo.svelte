@@ -29,7 +29,7 @@
   {#if center !== null}<span class="muted">Centre</span><span class="mono">{fmtHz(center)}</span>{/if}
   {#if stat}
     <span class="muted">Flow</span><span class="mono">{fmtRate(stat.rate).replace('S/s', '/s')}</span>
-    <span class="muted">Buffer</span><span class="mono" title="Items waiting for {edge.to}. Near 100% means that block is the bottleneck.">{Math.round(stat.fill * 100)}% full</span>
+    <span class="muted">Buffer</span><span class="mono" title="Items waiting for {edge.to}, averaged over the last half second. Staying near 100% means that block is the bottleneck.">{Math.round(stat.fill * 100)}% full</span>
     {@const cpu = cpuOf(edge.to)}
     {#if cpu !== undefined}<span class="muted">CPU (dest.)</span><span class="mono">{(cpu * 100).toFixed(1)}%</span>{/if}
   {:else}

@@ -1007,11 +1007,13 @@ impl Receiver {
         let norm = 1.0 / ((FF + FB) as f32 * DATA_POWER);
         // Once trained, decision-directed adaptation runs on every other
         // symbol (at twice the step): half the cost, about the same
-        // tracking.
+        // tracking. The known symbols (segment syncs, 4 per segment, and
+        // the field syncs) keep the training step: off air, echoes that
+        // move (aircraft) need it to be followed, and on a still channel it
+        // costs nothing measurable at the noise threshold.
         let mu = norm
             * match (known.is_some(), fast) {
-                (true, true) => 0.2,
-                (true, false) => 0.05,
+                (true, _) => 0.2,
                 (false, true) => 0.04,
                 (false, false) if fidx & 1 == 0 => 0.02,
                 (false, false) => 0.0,
