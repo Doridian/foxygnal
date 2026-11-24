@@ -1192,10 +1192,13 @@ starts) → levels + pilot → a polyphase interpolator (512 phases, ±16 symbol
 3. **Matched filter and resampler in one** (`SymbolFilter`): the receive RRC evaluated at any
    input position from a 256-phase bank, one output per symbol at the position the timing
    loop asks for. Any input rate from 6.25 MS/s up works; the step is the nominal ratio, and
-   the loop corrects position and step (the clock offset).
+   the loop corrects position and step (the clock offset). Between segment syncs, where
+   the positions are known ahead, it runs over up to 64 symbols at a time in a loop of its
+   own, so its dot products overlap rather than wait in line behind the per-symbol loops.
 4. **Carrier**: ×j^k, then a PLL on the pilot low-passed at 1/512 (1 kHz bandwidth while
-   searching, 500 Hz at segment lock, 300 Hz at field lock). AGC to level units (data power
-   21) after removing the pilot's DC.
+   searching, 500 Hz at segment lock, 300 Hz at field lock), steered once per 16 symbols
+   (steered every symbol, its chain would be one long dependency from symbol to symbol).
+   AGC to level units (data power 21) after removing the pilot's DC.
 5. **Segment sync**: the +5 −5 −5 +5 correlation at every position mod 832, leaky-averaged
    (1/16); the best is the origin, and slips are followed after 8 segments in a row.
 6. **Timing**: early/late at ±½ symbol at the 4 sync symbols, Σ s·(late − early), scaled by
@@ -1208,8 +1211,9 @@ starts) → levels + pilot → a polyphase interpolator (512 phases, ±16 symbol
    feedback taps on the decisions (17.8 µs of post-echo), LMS. At each field sync's end its
    728 known symbols are replayed (32 passes the first time, 8 for the next 3) with the
    feedback taps fed the known symbols; then the known symbols (segment syncs and field
-   syncs) train it, and decisions in between (every other symbol once trained). MER is
-   measured on the field sync.
+   syncs) train it, and decisions in between (every other symbol once trained). Each
+   update is applied one update late (a delayed LMS), so the next symbol's filter needn't
+   wait for it. MER is measured on the field sync.
 9. **Decoding**: 12 four-state Viterbi decoders, hard decisions in level units, the two
    parallel transitions of each branch resolved by the nearer level (traceback 40, 24
    decided at a time), the precoder undone on the output; trellis deinterleaving by the
@@ -1233,10 +1237,10 @@ every packet clean from 16 dB, 5 of 1928 lost at 15.5 dB, 20 % at 15 dB, about A
 15.2 dB threshold (`threshold_sweep`, ignored by default). Bit-exact with a 40 kHz offset, ±50
 ppm, and two echoes (−3 dB 86 symbols late, −11 dB 16 symbols early) at 28 dB.
 
-**Speed** (`cargo bench -p foxygnal-blocks --bench blocks -- atsc`, one core, AVX2): 16.3 MS/s
-at a 12 MS/s input, 1.35× real time. Per input sample about 27 cycles for the matched
-filter, 45 for the DFE output, 40 for its adaptation (half that once trained), 40 for the
-Viterbi decoders and 5 for RS.
+**Speed** (`cargo bench -p foxygnal-blocks --bench blocks -- atsc`, one core, AVX2): 25.3 MS/s
+on a Ryzen 9 9950X3D (19.8 before the overlapping above), so a 12 MS/s input takes about
+47 % of a core. The DFE (output and adaptation) is about 40 % of it, then the Viterbi
+decoders, the matched filter and the rest of the per-symbol loops; RS is a few percent.
 
 **Off air** (a PlutoSDR at 12 MS/s): a strong UHF channel decodes at 23–24 dB MER with no
 errors once the equalizer has converged, apart from a few short bursts; its MPEG-2 video and
