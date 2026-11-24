@@ -423,3 +423,26 @@ fn decodes_gr_dtv_symbols() {
         assert_eq!(p[..], want[k][..], "packet {k}");
     }
 }
+
+/// Non-finite input samples (some SDR drivers emit the odd NaN) must not
+/// poison the receiver: it drops them and stays locked or locks again.
+#[test]
+fn survives_non_finite_samples() {
+    let ch = Channel {
+        snr_db: Some(25.0),
+        rx_rate: 12e6,
+        ..CLEAN
+    };
+    let pkts = ts_packets(2 * 312 + 800, 7);
+    let mut x = transmit(&pkts, &ch, 8);
+    let n = x.len();
+    x[n / 3] = Complex32::new(f32::NAN, 0.0);
+    x[n / 3 + 1000] = Complex32::new(0.0, f32::INFINITY);
+    let r = receive(x, ch.rx_rate);
+    let (good, bad) = compare(&pkts, &r.ts);
+    assert!(
+        good > 312 + 400,
+        "only {good} good, {bad} bad\n{}",
+        r.status
+    );
+}

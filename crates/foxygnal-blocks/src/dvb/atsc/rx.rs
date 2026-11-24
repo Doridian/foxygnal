@@ -465,6 +465,13 @@ impl Receiver {
         // spectrum flipped back if it is inverted.
         self.tmp.clear();
         for &v in input {
+            // A NaN or infinity (some drivers emit one now and then) would
+            // poison the DC estimate, and through it every loop, for good.
+            let v = if v.re.is_finite() && v.im.is_finite() {
+                v
+            } else {
+                Complex32::default()
+            };
             let v = if self.inverted { v.conj() } else { v };
             self.dc += (v - self.dc) * 2e-5;
             self.tmp.push(v - self.dc);
@@ -591,6 +598,14 @@ impl Receiver {
     fn symbols(&mut self, fifo: &mut ByteFifo) {
         let half = self.filt.half as f64;
         loop {
+            // The early sample needs the filter's history. Only a loop gone
+            // non-finite or wild breaks this; start over rather than index
+            // before the buffer.
+            let early = self.pos - 0.5 * self.step;
+            if !early.is_finite() || early < half - 1.0 {
+                self.restart();
+                return;
+            }
             let late = self.pos + 0.5 * self.step;
             if (late + half) as usize + 1 >= self.buf.len() {
                 break;
