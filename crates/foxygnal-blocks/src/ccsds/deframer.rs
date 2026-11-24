@@ -477,6 +477,16 @@ impl Deframer {
         }
     }
 
+    /// Forget everything collected and search again (the symbols that
+    /// follow aren't a continuation of those before).
+    pub fn reset(&mut self) {
+        if self.state == State::Locked {
+            self.unlock();
+        } else {
+            self.acq.clear();
+        }
+    }
+
     fn unlock(&mut self) {
         self.state = State::Search;
         self.stats.locked = false;

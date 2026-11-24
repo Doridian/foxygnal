@@ -131,7 +131,7 @@ Goal: watch an SSTV picture being drawn in the browser, from the ISS or a record
       phasing; the stations on 3–17 MHz send charts around the clock
 - [ ] NOAA APT: sync A/B, telemetry wedges, both channels, false colour. The NOAA POES
       satellites were switched off in 2025, so this is for archived recordings
-- [ ] Meteor-M LRPT: moved to M15, where it shares the CCSDS layer with the L-band satellites
+- [x] Meteor-M LRPT: done in M15, where it shares the CCSDS layer with the L-band satellites
 - [ ] Hellschreiber (Feld-Hell): text as pictures
 - [ ] An SSTV *encoder* (PNG in, audio out), for TX and for tests that don't need a radio
 
@@ -325,8 +325,13 @@ arrive; with a rotator or a steady hand, the polar orbiters too.
       against libjpeg, headers against NOAA's sample files; "GOES HRIT" and "GOES HRIT
       loopback" templates. GOES-R HRIT has no CONUS sector. GK-2A's encrypted files and
       JPEG 2000, and Elektro-L's wavelet files, are saved undecoded; see ARCHITECTURE.md)
-- [ ] Meteor-M LRPT (Meteor-M N2-3 / N2-4, 137 MHz): QPSK / OQPSK 72 kBd, Viterbi r=1/2,
-      CCSDS frames, Reed-Solomon, the JPEG-like MSU-MR codec; three channels in colour
+- [x] Meteor-M LRPT (Meteor-M N2-3 / N2-4, 137 MHz): `lrpt_demodulator` (offset QPSK 72 kBd
+      with NRZ-M, the interleaved 80 kBd test mode, plain QPSK 72 kBd), CCSDS frames and
+      Reed-Solomon through the shared layer, `lrpt_decoder` with the JPEG-like MSU-MR codec
+      (checked against libjpeg): a 2-2-1 composite and each channel per pass, gaps as black
+      rows. A shared PSK front end for the polar orbiters (`blocks/src/polar/`). "Meteor
+      LRPT" (with Doppler from the tracker) and "Meteor LRPT loopback" templates. Not yet
+      checked on a real recording
 - [ ] Meteor-M HRPT (1700 MHz, BPSK, Manchester 665.4 kbit/s): MSU-MR, all six channels
 - [ ] Metop AHRPT (Metop-B/C, 1701.3 MHz, QPSK 2.33 MSym/s, CCSDS): AVHRR/3 in false
       colour, plus the instrument packets that come for free (MHS, AMSU, IASI counts)

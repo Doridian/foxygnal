@@ -52,6 +52,28 @@ pub fn int(
     }
 }
 
+/// An int within `min..=max`.
+pub fn int_range(
+    name: &'static str,
+    label: &'static str,
+    default: i64,
+    min: i64,
+    max: i64,
+    help: &'static str,
+) -> ParamSpec {
+    ParamSpec {
+        name,
+        label,
+        kind: ParamKind::Int {
+            min: Some(min),
+            max: Some(max),
+        },
+        default: json!(default),
+        help,
+        live: false,
+    }
+}
+
 pub fn choice(
     name: &'static str,
     label: &'static str,

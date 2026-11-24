@@ -19,6 +19,7 @@ pub mod math;
 pub mod measure;
 pub mod net;
 mod params;
+pub mod polar;
 pub mod resample;
 pub mod ring;
 pub mod sat;
@@ -64,4 +65,5 @@ pub fn register_all(r: &mut Registry) {
     sat::register(r);
     ccsds::register(r);
     xrit::register(r);
+    polar::register(r);
 }

@@ -115,6 +115,14 @@ files, and shows NWS bulletins and warnings from EMWIN in the Messages instrumen
 other files are saved. "GOES HRIT loopback" sends a made-up broadcast through a noisy channel
 into the same receiver, no radio needed.
 
+**Meteor-M LRPT pictures.** Weather pictures from Meteor-M N2-3 and N2-4 at 137 MHz with an
+RTL-SDR: a demodulator for their offset QPSK (and the 80 kBd interleaved and old QPSK modes)
+that finds the carrier within ±18 kHz by itself or follows the satellite tracker's Doppler,
+the CCSDS frames and packets, and the MSU-MR imager's JPEG-like codec (checked against
+libjpeg), put together into one long picture per pass: a 2-2-1 colour composite and each
+channel in grey, drawn as it arrives and saved as PNG. Templates: "Meteor LRPT"
+(`examples/lrpt-rx.fox.toml`) and "Meteor LRPT loopback" (`examples/lrpt-loopback.fox.toml`).
+
 **Watching digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
 demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
 you pick with its sound (choosing between sound tracks by language), and shows codecs,

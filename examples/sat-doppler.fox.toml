@@ -22,8 +22,8 @@
 # the tracker's TLE text, or save that file in the project folder and set
 # `tle_file`. Nothing is downloaded by foxygnal itself.
 #
-# The LRPT demodulator is still to come (M15); until then, watch the channel's
-# spectrum or constellation, or record it.
+# This template only tracks; "Meteor LRPT" (examples/lrpt-rx.fox.toml) adds
+# the demodulator and decoder behind the same channel filter.
 
 [vars]
 lat = 52.52

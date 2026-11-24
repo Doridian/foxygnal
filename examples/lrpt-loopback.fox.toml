@@ -1,0 +1,142 @@
+# Meteor LRPT loopback: the weather satellite's whole chain, from a picture
+# to a picture, with no radio.
+#
+#   enc ─▶ mod ─▶ throttle ─×offset─+noise─▶ demod ─▶ packets ─▶ dec ─image─▶ (Image)
+#  (MSU-MR (RS, NRZ-M,                     (search, timing,          └─out─┐
+#   JPEG)   r=1/2, OQPSK)                   Costas, Viterbi) ─status─▶ log ◀┘
+#
+# `enc` draws a synthetic three-channel MSU-MR picture, JPEG-codes it into
+# image packets (APIDs 64–66, 14 per 8-row scan) and a telemetry packet per
+# scan, and packs them into transfer frames of virtual channel 5 with fill
+# frames, so one scan takes its 1.23 s of the link as on air. `mod` adds the
+# Reed-Solomon parity, randomizer, NRZ-M and the rate 1/2 code, and sends
+# offset QPSK at 72 kBd (the Meteor-M N2-3 / N2-4 mode; set both `mode`s to
+# `qpsk72` or `oqpsk80` for the others, and the carrier's `sample_rate` to
+# 80k × sps for the latter). The receive side is what the "Meteor LRPT"
+# template uses on air.
+#
+# Click the wire out of `dec.image` and choose Image to watch the 2-2-1
+# colour composite grow a scan at a time (`dec.ch1`…`dec.ch3` are the
+# channels in grey); `log` has the demodulator's lock and statistics and a
+# line per scan. The 80k mode's deinterleaver holds 16 s before the first
+# rows appear.
+#
+# Raise `noise` to find the threshold: the signal has unit power over 4
+# samples a symbol, so Es/N0 = 10·log10(4 / noise²) dB (1.0 is 6 dB).
+#
+#   foxygnal run examples/lrpt-loopback.fox.toml
+
+[vars]
+sps = 4
+offset = 3500
+noise = 0.7
+
+[[block]]
+id = "enc"
+kind = "lrpt_encoder"
+params = { channels = "1,2,3", quality = 80, scans = 0 }
+ui = { x = 50, y = 60 }
+
+[[block]]
+id = "mod"
+kind = "lrpt_modulator"
+params = { mode = "oqpsk72", sps = "$sps" }
+ui = { x = 300, y = 60 }
+
+[[block]]
+id = "realtime"
+kind = "throttle"
+params = { type = "c32", sample_rate = 0 }
+ui = { x = 550, y = 60 }
+
+[[block]]
+id = "carrier"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = "$offset", amplitude = 1.0, sample_rate = "72k * $sps" }
+ui = { x = 550, y = 220 }
+
+[[block]]
+id = "shift"
+kind = "multiply"
+params = { type = "c32" }
+ui = { x = 800, y = 120 }
+
+[[block]]
+id = "noise"
+kind = "noise_source"
+params = { type = "c32", amplitude = "$noise", seed = 0 }
+ui = { x = 800, y = 280 }
+
+[[block]]
+id = "channel"
+kind = "add"
+params = { type = "c32" }
+ui = { x = 1050, y = 160 }
+
+[[block]]
+id = "demod"
+kind = "lrpt_demodulator"
+params = { mode = "oqpsk72", offset = 0.0 }
+ui = { x = 50, y = 440 }
+
+[[block]]
+id = "packets"
+kind = "ccsds_packets"
+params = { frame_len = 1020, rs_interleave = 4, insert_zone = 2, trailer = 0, format = "records" }
+ui = { x = 330, y = 400 }
+
+[[block]]
+id = "dec"
+kind = "lrpt_decoder"
+params = { red = "2", green = "2", blue = "1", vcid = 5, gap = 100 }
+ui = { x = 600, y = 400 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true, inputs = 2 }
+ui = { x = 900, y = 520 }
+
+[[connect]]
+from = "enc.out"
+to = "mod.in"
+
+[[connect]]
+from = "mod.out"
+to = "realtime.in"
+
+[[connect]]
+from = "realtime.out"
+to = "shift.a"
+
+[[connect]]
+from = "carrier.out"
+to = "shift.b"
+
+[[connect]]
+from = "shift.out"
+to = "channel.a"
+
+[[connect]]
+from = "noise.out"
+to = "channel.b"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.frames"
+to = "packets.in"
+
+[[connect]]
+from = "packets.out"
+to = "dec.in"
+
+[[connect]]
+from = "demod.status"
+to = "log.in"
+
+[[connect]]
+from = "dec.out"
+to = "log.in1"

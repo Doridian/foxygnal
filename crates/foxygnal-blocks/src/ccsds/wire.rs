@@ -178,7 +178,17 @@ impl RecordReader {
 
     /// Read bytes; complete records go to `out`. Takes everything.
     pub fn push(&mut self, mut input: &[u8], mut out: impl FnMut(Record<'_>)) {
+        while !input.is_empty() {
+            let n = self.push_one(input, &mut out);
+            input = &input[n..];
+        }
+    }
+
+    /// Read bytes up to the end of the next complete record (which goes to
+    /// `out`), or all of them; returns how many were taken.
+    pub fn push_one(&mut self, all: &[u8], mut out: impl FnMut(Record<'_>)) -> usize {
         const HEAD: usize = RECORD_HEADER + 6;
+        let mut input = all;
         while !input.is_empty() {
             if self.buf.len() < HEAD {
                 let n = (HEAD - self.buf.len()).min(input.len());
@@ -207,8 +217,10 @@ impl RecordReader {
                     });
                 }
                 self.buf.clear();
+                break;
             }
         }
+        all.len() - input.len()
     }
 
     /// Whether what's buffered so far can be the start of a record.

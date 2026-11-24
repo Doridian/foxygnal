@@ -99,6 +99,12 @@ impl MsgQueue {
         self.buf.extend_from_slice(b);
     }
 
+    /// Forget what's queued.
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.sent = 0;
+    }
+
     /// True if nothing of the queued message has been sent yet.
     pub fn at_start(&self) -> bool {
         self.sent == 0 && !self.buf.is_empty()

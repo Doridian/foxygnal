@@ -1441,6 +1441,99 @@ files HRIT relays (blocks of platform messages) are saved, not parsed; `goes_dcs
 decodes the platforms' own uplink instead. The first file after lock is
 usually lost. LRIT (293 kBd) and an RTL-SDR's DC spike near the carrier are untested.
 
+## Polar orbiters: Meteor-M and Metop (M15)
+
+`blocks/src/polar/` holds the receivers of the polar-orbiting weather satellites. Each has a
+demodulator that owns its front end and embeds a deframer (as DVB-S does), and a decoder that
+turns the instrument's data into pictures.
+
+**PSK front end** (`polar::frontend::FrontEnd`): baseband in, one complex symbol per symbol
+out (unit RMS), for BPSK, QPSK and offset QPSK.
+
+1. An NCO removes the expected offset (the demodulator's live `offset` setting, which a
+   `sat_tracker` can drive with Doppler) plus the residual the coarse search found.
+2. An RRC matched filter at the input rate, decimating to 4–8 samples a symbol when the
+   input has more (an RTL-SDR channel at 256 kS/s is 3.6 samples a 72 kBd symbol).
+3. Gardner timing with a cubic interpolator, two samples a symbol (on time and halfway).
+4. AGC, then a decision-directed Costas loop (BPSK, QPSK, or OQPSK with I from the
+   on-time sample and Q from the halfway one).
+5. While the deframer isn't locked: the samples at twice the symbol rate, squared (BPSK) or
+   to the 4th power (QPSK, OQPSK; the line is there for offset QPSK too, since I and Q are
+   independent), into 4 averaged FFTs of 4096 points; a line 10× above the mean bin moves
+   the NCO. Range ± symbol rate / 2 (BPSK) or / 4 (QPSK): ± 18 kHz for LRPT, so a pass's
+   ± 3.3 kHz Doppler and a cheap tuner's error need no tracker. Once locked the loops
+   narrow (timing 0.008 → 0.002, carrier 0.012 → 0.004 per symbol).
+
+**Offset QPSK.** The timing detector runs per branch on derotated samples (I's Gardner term
+on the on-time samples, Q's on the halfway ones), since the plain complex Gardner detector
+cancels for OQPSK. The symbol out pairs I with the Q half a symbol before it; whether that Q
+belongs with this I or the previous one depends on which branch timing locked to and the
+carrier's quarter, so `OqpskPairs` makes the other pairing too and the LRPT demodulator runs
+two CCSDS deframers while searching (the one that locks wins, the other is reset). Every
+case is then one of the deframer's 8 symmetries.
+
+**Meteor-M LRPT** (`lrpt_demodulator`, `lrpt_decoder`). The link: 1024-byte CADUs, VCDUs
+with a 2-byte insert zone, RS(255,223) I = 4 in the *conventional* basis, the CCSDS
+randomizer, NRZ-M on the data bits (N2-3 and later), the r = 1/2 K = 7 code without CCSDS's
+G2 inversion, G1 on I. Modes: `oqpsk72` (N2-3, N2-4), `oqpsk80` (their test mode) and
+`qpsk72` (N2: no NRZ-M). The 80k mode inserts the marker 0x27 before every 72 coded bits
+and interleaves the coded bits with a convolutional interleaver (36 branches, branch k
+delayed by k × 2048 × 36 bits, counted from the first bit after a marker). The receiver
+searches the marker in 48 periods under each symmetry and both OQPSK pairings, strips it,
+deinterleaves (2.6 M soft bits, 16 s) and hands soft symbols to the deframer. Losing the
+marker (8 bad periods in a row, e.g. a fade) keeps counting the period with erasures, so a
+relock at the same place keeps the deinterleaver's contents.
+
+The imager's six channels are APIDs 64–69 on VCID 5. A packet's user data: time stamp
+(day, ms and µs of the day), the number of its first block (0, 14 … 182), two table ids
+(0), `FF F0` and the quality factor, then 14 JPEG-coded 8 × 8 blocks (8 rows × 112 pixels;
+14 packets make a 1568-pixel scan). The codec (`polar::jpeg`) is baseline JPEG's entropy
+coding without markers or byte stuffing: the T.81 Annex K luminance quantization table
+scaled by the IJG formula for the packet's quality, zigzag order, the Annex K luminance
+DC/AC Huffman tables, the DC prediction starting at 0 in each packet; a float 8 × 8 IDCT,
++128, clamped. A coding error ends the packet; the blocks after it stay black.
+
+**Placing scans.** All APIDs share one 14-bit sequence counter, and a scan cycle is 43
+packets: 14 for each of three channels, then the telemetry packet (APID 70). So a channel's
+scan starts at `seq − block/14` and scans are 43 counts apart; the telemetry packet fixes
+where a cycle starts, so the channels of one scan land on one row. Until it has been seen
+(at most one cycle), packets are decoded and held (86 at most); without it the cycle starts
+at the channel no other channel precedes by 14 counts. The counter is unwrapped from the
+previous packet, and across gaps of more than a minute with the time stamps (1.23 s a scan).
+Scans are written two scans behind the newest one (a ring of three), so late channels still
+land. Missing packets are black blocks; a dropout of up to `gap` scans (default 100, two
+minutes) becomes black rows (`missing=` in the scan's text line); a longer one, or a jump
+backwards, ends the picture and starts the next.
+
+**Pictures of a pass** (`polar::strip::Strip`): one picture per pass and output, rows
+numbered from 0 with height 0 (unknown) in the row records of "Decoded pictures"; the end of
+the input (or a long dropout) sends the last row again with the last-row flag, which closes
+the picture in the Image instrument and makes `image_sink` save it. A picture reaching the
+record's 65 535 rows is ended and continued in the next. Each output (the composite and the
+channels) has its own picture numbers; a channel's picture starts at the scan the channel
+first appeared in. Outputs nobody reads cost a copy and nothing else. Each picture is named
+(a name record before its first row), so `image_sink` files it in folders:
+`METEOR-M/<date>/MSU-MR_rgb221_<yyyymmddThhmmss>Z` and `…/MSU-MR_ch1_…` by the receiver's
+clock (LRPT's packets carry only the time of day); a continued picture gets `_2`, `_3`, ….
+
+**Transmit side**, for the loopback template and the tests: `lrpt_encoder` draws a smooth
+synthetic picture per channel (`polar::lrpt::test_pattern`), JPEG-codes it (`jpeg::
+encode_strip`) into image packets and a telemetry packet per scan, packs them into VCDUs
+and adds fill frames (VCID 63) so a scan takes its 1.23 s of the link; `lrpt_modulator`
+adds RS parity, the randomizer, NRZ-M, the code, the 80k interleaver and markers, and
+shapes QPSK or OQPSK with an RRC (α = 0.6).
+
+**Checked.** The codec decodes strips coded by libjpeg (through Pillow, at qualities 20–95,
+with gradients, edges, noise, flat and saturated blocks) to within 2 levels of libjpeg's own
+decode (`scripts/lrpt-jpeg-vectors.py`, fixture `tests/fixtures/lrpt/jpeg-strips.bin`); the
+script also checks that Pillow's table is the IJG-scaled standard one and its Huffman tables
+the Annex K ones. `tests/lrpt.rs` runs encoder → modulator → channel (4.2 kHz offset, 60 ppm
+clock error, a fractional delay, Es/N0 9 dB) → demodulator → packets → decoder in each mode
+and compares the decoded picture with the pattern (mean error under 5 levels, the JPEG
+loss), including a 3 s fade that has to become black rows in one picture, and the 80k mode
+through its 16 s deinterleaver. Format facts come from descriptions of the format and the
+behaviour of open decoders; nothing has been checked against a real recording yet.
+
 ## Recording and playback (M6)
 
 **Tags ↔ SigMF.** `blocks/src/sigmf.rs` maps tags to SigMF metadata and back. `SigmfWriter`
