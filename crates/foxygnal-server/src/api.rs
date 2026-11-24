@@ -405,6 +405,18 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/ahrpt-loopback.fox.toml"),
     },
     Example {
+        name: "hrpt-rx",
+        title: "Meteor HRPT",
+        description: "An SDR at 3 MS/s on 1700 MHz (a tracking dish or helix and an LNA) with Doppler from the satellite tracker → Meteor HRPT demodulator (Manchester BPSK 665.4 kbit/s) → MSU-MR decoder → the Image instrument (2-2-1 colour and all six channels) and a PNG per pass. Needs a real receiver.",
+        toml: include_str!("../../../examples/hrpt-rx.fox.toml"),
+    },
+    Example {
+        name: "hrpt-loopback",
+        title: "Meteor HRPT loopback",
+        description: "Synthetic MSU-MR lines → HRPT frames → Manchester-coded BPSK at 1.33 Mchip/s → noise and a 20 kHz offset → Meteor HRPT demodulator → MSU-MR decoder → the Image instrument (click `dec.image`). No hardware needed.",
+        toml: include_str!("../../../examples/hrpt-loopback.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",

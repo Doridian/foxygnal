@@ -6,9 +6,11 @@
 pub mod ahrpt;
 pub mod avhrr;
 pub mod frontend;
+pub mod hrpt;
 pub mod jpeg;
 pub mod lrpt;
 pub mod lrpt_image;
+pub mod msumr;
 mod strip;
 
 use foxygnal_core::Registry;
@@ -18,4 +20,6 @@ pub fn register(r: &mut Registry) {
     lrpt_image::register(r);
     ahrpt::register(r);
     avhrr::register(r);
+    hrpt::register(r);
+    msumr::register(r);
 }

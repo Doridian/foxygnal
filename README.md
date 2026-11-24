@@ -132,6 +132,13 @@ time. The other instruments' packets (MHS, AMSU-A, IASI…) are counted and pass
 "Metop AHRPT" (`examples/ahrpt-rx.fox.toml`) and "Metop AHRPT loopback"
 (`examples/ahrpt-loopback.fox.toml`).
 
+**Meteor-M HRPT pictures.** The Meteors' L-band downlink at 1700 MHz, receivable with a tracking
+dish or helix and an SDR at 3 MS/s: a demodulator for the Manchester-coded BPSK (carrier within
+±665 kHz found by itself, or the tracker's Doppler), the frames and the MSU-MR imager's lines,
+all six channels at full resolution, put together into one picture per pass as a 2-2-1 colour
+composite and each channel. Templates: "Meteor HRPT" (`examples/hrpt-rx.fox.toml`) and
+"Meteor HRPT loopback" (`examples/hrpt-loopback.fox.toml`).
+
 **Watching digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
 demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
 you pick with its sound (choosing between sound tracks by language), and shows codecs,

@@ -1,0 +1,130 @@
+# Meteor HRPT loopback: the L-band Meteor's whole chain, from a picture to a
+# picture, with no radio.
+#
+#   enc ─▶ mod ─▶ throttle ─×offset─+noise─▶ demod ─▶ dec ─image─▶ (Image)
+#  (MSU-MR  (Manchester,                (search, timing,   └─out─┐
+#   lines)   BPSK)                       Costas, frames) ─status─▶ log
+#
+# `enc` draws a synthetic six-channel MSU-MR picture and sends its lines in
+# the MSU-MR part of HRPT frames, back to back as on air (6.5 lines a
+# second). `mod` Manchester-codes the frames' bits and sends BPSK at
+# 1.3308 Mchip/s, 2 samples a chip (2.66 MS/s). The receive side is what the
+# "Meteor HRPT" template uses on air; the 20 kHz offset is a typical Doppler
+# shift at 1.7 GHz.
+#
+# Click the wire out of `dec.image` and choose Image to watch the 2-2-1
+# colour composite grow (`dec.ch1`…`dec.ch6` are the channels in grey);
+# `log` has the demodulator's lock and statistics and a line a second from
+# the decoder.
+#
+# Raise `noise` to find the threshold: the signal has unit power over 2
+# samples a chip, so Es/N0 per chip = 10·log10(2 / noise²) dB (0.5 is
+# 9 dB); a bit is two chips. With no error correction, bit errors show as
+# speckles.
+#
+#   foxygnal run examples/hrpt-loopback.fox.toml
+
+[vars]
+sps = 2
+offset = 20000
+noise = 0.5
+
+[[block]]
+id = "enc"
+kind = "hrpt_encoder"
+params = { lines = 0 }
+ui = { x = 50, y = 60 }
+
+[[block]]
+id = "mod"
+kind = "hrpt_modulator"
+params = { sps = "$sps" }
+ui = { x = 300, y = 60 }
+
+[[block]]
+id = "realtime"
+kind = "throttle"
+params = { type = "c32", sample_rate = 0 }
+ui = { x = 550, y = 60 }
+
+[[block]]
+id = "carrier"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = "$offset", amplitude = 1.0, sample_rate = "1.3308M * $sps" }
+ui = { x = 550, y = 220 }
+
+[[block]]
+id = "shift"
+kind = "multiply"
+params = { type = "c32" }
+ui = { x = 800, y = 120 }
+
+[[block]]
+id = "noise"
+kind = "noise_source"
+params = { type = "c32", amplitude = "$noise", seed = 0 }
+ui = { x = 800, y = 280 }
+
+[[block]]
+id = "channel"
+kind = "add"
+params = { type = "c32" }
+ui = { x = 1050, y = 160 }
+
+[[block]]
+id = "demod"
+kind = "hrpt_demodulator"
+params = { offset = 0.0 }
+ui = { x = 50, y = 440 }
+
+[[block]]
+id = "dec"
+kind = "msumr_decoder"
+params = { red = "2", green = "2", blue = "1", gap = 300 }
+ui = { x = 350, y = 400 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true, inputs = 2 }
+ui = { x = 650, y = 520 }
+
+[[connect]]
+from = "enc.out"
+to = "mod.in"
+
+[[connect]]
+from = "mod.out"
+to = "realtime.in"
+
+[[connect]]
+from = "realtime.out"
+to = "shift.a"
+
+[[connect]]
+from = "carrier.out"
+to = "shift.b"
+
+[[connect]]
+from = "shift.out"
+to = "channel.a"
+
+[[connect]]
+from = "noise.out"
+to = "channel.b"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.frames"
+to = "dec.in"
+
+[[connect]]
+from = "demod.status"
+to = "log.in"
+
+[[connect]]
+from = "dec.out"
+to = "log.in1"

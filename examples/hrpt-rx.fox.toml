@@ -1,0 +1,103 @@
+# Meteor-M HRPT: the MSU-MR imager's full six channels from Meteor-M N2-3 and
+# N2-4 at 1700 MHz. This needs a dish (60 cm–1.2 m) or a helix that follows
+# the satellite (by hand or with a rotator), an LNA with a filter for
+# 1.7 GHz at the feed, and an SDR that does at least 2.7 MS/s (an RTL-SDR at
+# 3 MS/s is just enough; an Airspy or SDRplay has room to spare).
+#
+#   SDR 1700 MHz, 3 MS/s ─▶ demod ─▶ dec ─image─▶ PNG files
+#   tracker ─offset─▶ demod.@offset └─status─▶ log ◀─out─┘
+#
+# The satellite sends Manchester-coded BPSK at 665.4 kbit/s, frames with no
+# error correction; the imager's lines (six 10-bit channels of 1572
+# pixels, 6.5 a second) are put together into one long picture per pass.
+# Click the wire out of `dec.image` and choose Image to watch the 2-2-1
+# colour composite grow (`dec.ch1`…`dec.ch6`: each channel in grey);
+# `pictures` saves each pass as a PNG under `hrpt-pictures/METEOR-M/<date>/`
+# when it ends. `log` shows the demodulator's lock, carrier offset and MER
+# once a second, and a line a second from the decoder.
+#
+# Doppler at 1.7 GHz is up to ±40 kHz, inside the demodulator's ± 665 kHz
+# search, so the tracker isn't needed to lock; wired to the demodulator's
+# `offset` it keeps the carrier loop centred. Set `lat`, `lon`, `alt` to
+# your position and paste fresh element sets (CelesTrak's "Weather" group);
+# the palette's Passes section lists the next passes and *Track* picks the
+# satellite (its `az`/`el` outputs can point a rotator). Without a tracker,
+# delete it and its wire.
+
+[vars]
+lat = 52.52
+lon = 13.405
+alt = 34
+downlink = "1700M"
+samp_rate = "3M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$downlink", sample_rate = "$samp_rate", gain = 40.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "tracker"
+kind = "sat_tracker"
+params = { satellite = "METEOR-M2 3", lat = "$lat", lon = "$lon", alt = "$alt", frequency = "$downlink", offset = 0.0, min_elevation = 10.0, rate = 20.0, tle_file = "", time = "", tle = """
+METEOR-M2 3
+1 57166U 23091A   26327.52301369 -.00000007  00000+0  15745-4 0  9992
+2 57166  98.5884  19.0681 0004988  73.2184 286.9542 14.24057105177198
+METEOR-M2 4
+1 59051U 24039A   26327.50722175 -.00000013  00000+0  13685-4 0  9998
+2 59051  98.7256 284.9730 0008115  71.3466 288.8592 14.22444296141910
+""" }
+ui = { x = 50, y = 320 }
+
+[[block]]
+id = "demod"
+kind = "hrpt_demodulator"
+params = { offset = 0.0 }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "dec"
+kind = "msumr_decoder"
+params = { red = "2", green = "2", blue = "1", gap = 300 }
+ui = { x = 680, y = 80 }
+
+[[block]]
+id = "pictures"
+kind = "image_sink"
+params = { dir = "hrpt-pictures", prefix = "meteor", min_rows = 64 }
+ui = { x = 980, y = 40 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true, inputs = 3 }
+ui = { x = 680, y = 360 }
+
+[[connect]]
+from = "sdr.out"
+to = "demod.in"
+
+[[connect]]
+from = "tracker.offset"
+to = "demod.@offset"
+
+[[connect]]
+from = "demod.frames"
+to = "dec.in"
+
+[[connect]]
+from = "dec.image"
+to = "pictures.in"
+
+[[connect]]
+from = "demod.status"
+to = "log.in"
+
+[[connect]]
+from = "dec.out"
+to = "log.in1"
+
+[[connect]]
+from = "tracker.track"
+to = "log.in2"

@@ -332,7 +332,12 @@ arrive; with a rotator or a steady hand, the polar orbiters too.
       rows. A shared PSK front end for the polar orbiters (`blocks/src/polar/`). "Meteor
       LRPT" (with Doppler from the tracker) and "Meteor LRPT loopback" templates. Not yet
       checked on a real recording
-- [ ] Meteor-M HRPT (1700 MHz, BPSK, Manchester 665.4 kbit/s): MSU-MR, all six channels
+- [x] Meteor-M HRPT (1700 MHz, BPSK, Manchester 665.4 kbit/s): MSU-MR, all six channels.
+      `hrpt_demodulator` (the shared PSK front end at the chip rate, both chip pairings,
+      frame sync without FEC, missed-sync frames kept for alignment) and `msumr_decoder`
+      (lines by their sync word, 10-bit channels, a 2-2-1 composite and each channel per
+      pass, lost lines black). "Meteor HRPT" and "Meteor HRPT loopback" templates. Not yet
+      checked on a real recording
 - [x] Metop AHRPT (Metop-B/C, 1701.3 MHz, QPSK 2.33 MSym/s, CCSDS): `ahrpt_demodulator`
       (the shared PSK front end, the rate 3/4 punctured Viterbi decoder with its puncturing
       and carrier phase found by trying each, CCSDS frames and RS in the dual basis),

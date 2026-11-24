@@ -1443,7 +1443,7 @@ usually lost. LRIT (293 kBd) and an RTL-SDR's DC spike near the carrier are unte
 
 ## Polar orbiters: Meteor-M and Metop (M15)
 
-`blocks/src/polar/` holds the receivers of the polar-orbiting weather satellites (Meteor-M LRPT, Metop AHRPT). Each has a
+`blocks/src/polar/` holds the receivers of the polar-orbiting weather satellites (Meteor-M LRPT and HRPT, Metop AHRPT). Each has a
 demodulator that owns its front end and embeds a deframer (as DVB-S does), and a decoder that
 turns the instrument's data into pictures.
 
@@ -1579,6 +1579,38 @@ G2 not inverted, RS basis, insert zone, packet layout, APIDs) come from descript
 format and the behaviour of open decoders; nothing has been checked against a real
 recording yet. Not done: calibration (the counts are raw), the scan's geometry and the
 pass direction (a northbound pass comes out turned by half a turn), decoding the other instruments.
+
+**Meteor-M HRPT** (`hrpt_demodulator`, `msumr_decoder`). The link: BPSK carrying 665.4 kbit/s
+Manchester-coded (1 = chips 1 0), 1.3308 Mchip/s, 1024-byte frames starting with the ASM,
+no randomizer, no FEC. The demodulator runs the front end as BPSK at the chip rate (RRC α
+0.7; the squaring search covers ± 665 kHz) and makes a bit of every two chips (their
+difference, as a soft bit) for both chip pairings, each into a CCSDS `Deframer` without
+coding, RS or randomizer; the one that finds the ASM wins (its BPSK search resolves the
+half-turn), as for LRPT's OQPSK pairings. With no FEC a frame whose ASM had too many
+wrong bits is mostly right, so a flywheel frame goes out with the inverted ASM rather than
+being dropped, and the decoder keeps the imager's stream aligned through it.
+
+Of each frame, bytes 22–259, 278–515, 534–771 and 790–1023 (from the ASM) are the MSU-MR
+stream, 948 bytes. `msumr_decoder` cuts it into 11 850-byte lines: the sync word
+`02 18 A7 A3 92 DD 9A BF`, the time of day (Moscow: hour, minute, second, a fraction taken as
+1/256 s), calibration, then from byte 50 the video, 393 groups of 4 pixels with each of the
+six channels' 4 ten-bit values in 5 bytes, 1572 pixels a channel. Lines are searched for
+with up to 6 wrong sync bits, then taken 11 850 bytes apart while each starts with the sync
+word and the next one follows it (16 of 64 bits may be wrong). That second check catches a
+stream broken inside a line (the demodulator lost lock and frames are missing): the line is
+dropped and the search starts again. Lines in an unbroken stream are consecutive rows; after
+a search, the time stamps (6.5 lines a second, the stream's rate over the line length) say
+how many rows were lost (black, up to `gap`; a longer gap or a step back in time starts a
+new picture). Pictures are named `METEOR-M/<date>/MSU-MR-HRPT_rgb221_<time>Z` by the
+receiver's clock. The transmit side: `hrpt_encoder` sends the pattern's six channels as
+lines back to back in the frames' MSU-MR parts (with a frame counter in the first header
+bytes), `hrpt_modulator` Manchester-codes and shapes BPSK. **Checked**: `tests/hrpt.rs`
+compares the lines bit for bit after a 31 kHz offset, 50 ppm clock error, a fractional delay
+and Es/N0 11 dB per chip, and a dropout has to become black rows in one picture. The
+frame layout, the line format and the Manchester polarity (the receiver doesn't depend on
+it) come from descriptions and open decoders' behaviour; nothing has been checked against
+a real recording yet. Not done: the frame header and the other instruments in the frame,
+calibration, geometry, whether a residual carrier needs other loop settings.
 
 ## Recording and playback (M6)
 
