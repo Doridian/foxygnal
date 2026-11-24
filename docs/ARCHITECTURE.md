@@ -1211,7 +1211,9 @@ starts) → levels + pilot → a polyphase interpolator (512 phases, ±16 symbol
    feedback taps on the decisions (17.8 µs of post-echo), LMS. At each field sync's end its
    728 known symbols are replayed (32 passes the first time, 8 for the next 3) with the
    feedback taps fed the known symbols; then the known symbols (segment syncs and field
-   syncs) train it, and decisions in between (every other symbol once trained). Each
+   syncs) train it at the training step throughout (off air, moving echoes need it: a
+   recording of a fluttering UHF channel loses 31 % fewer packets than with a quarter of
+   it once trained), and decisions in between (every other symbol once trained). Each
    update is applied one update late (a delayed LMS), so the next symbol's filter needn't
    wait for it. MER is measured on the field sync.
 9. **Decoding**: 12 four-state Viterbi decoders, hard decisions in level units, the two
