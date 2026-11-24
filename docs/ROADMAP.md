@@ -333,8 +333,13 @@ arrive; with a rotator or a steady hand, the polar orbiters too.
       LRPT" (with Doppler from the tracker) and "Meteor LRPT loopback" templates. Not yet
       checked on a real recording
 - [ ] Meteor-M HRPT (1700 MHz, BPSK, Manchester 665.4 kbit/s): MSU-MR, all six channels
-- [ ] Metop AHRPT (Metop-B/C, 1701.3 MHz, QPSK 2.33 MSym/s, CCSDS): AVHRR/3 in false
-      colour, plus the instrument packets that come for free (MHS, AMSU, IASI counts)
+- [x] Metop AHRPT (Metop-B/C, 1701.3 MHz, QPSK 2.33 MSym/s, CCSDS): `ahrpt_demodulator`
+      (the shared PSK front end, the rate 3/4 punctured Viterbi decoder with its puncturing
+      and carrier phase found by trying each, CCSDS frames and RS in the dual basis),
+      `avhrr_decoder`: AVHRR/3's five channels, a 2-2-1 false-colour composite, lines placed
+      by time stamp with lost ones black, one named picture per pass; the other instruments'
+      packets (MHS, AMSU-A, HIRS, IASI…) counted and passed on as records. "Metop AHRPT"
+      and "Metop AHRPT loopback" templates. Not yet checked on a real recording
 - [x] GOES DCS (DCPR relay, 1679.7–1680.1 MHz): `goes_dcs_decoder`, the CS2 format (300 and
       1200 bit/s, both 8PSK with a 64-state trellis code; only the preamble is BPSK), a
       fast-convolution channelizer and carrier detector over the whole band, many platforms

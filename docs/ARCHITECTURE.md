@@ -1443,7 +1443,7 @@ usually lost. LRIT (293 kBd) and an RTL-SDR's DC spike near the carrier are unte
 
 ## Polar orbiters: Meteor-M and Metop (M15)
 
-`blocks/src/polar/` holds the receivers of the polar-orbiting weather satellites. Each has a
+`blocks/src/polar/` holds the receivers of the polar-orbiting weather satellites (Meteor-M LRPT, Metop AHRPT). Each has a
 demodulator that owns its front end and embeds a deframer (as DVB-S does), and a decoder that
 turns the instrument's data into pictures.
 
@@ -1533,6 +1533,52 @@ and compares the decoded picture with the pattern (mean error under 5 levels, th
 loss), including a 3 s fade that has to become black rows in one picture, and the 80k mode
 through its 16 s deinterleaver. Format facts come from descriptions of the format and the
 behaviour of open decoders; nothing has been checked against a real recording yet.
+
+**Metop AHRPT** (`ahrpt_demodulator`, `avhrr_decoder`). The link: QPSK at 2.3333 MSym/s,
+3.5 Mbit/s of 1024-byte CADUs (VCDUs with a 2-byte insert zone, RS I = 4 in the dual basis,
+the CCSDS randomizer, NRZ-L), coded with the K = 7 code without G2 inversion punctured to
+rate 3/4 (CCSDS 131.0-B: of each three data bits' (G1, G2), G1₁ G2₁ G2₂ G1₃ are sent),
+the first symbol of a period carrying (G1₁, G2₁) on (I, Q), the second (G1₃, G2₂). The
+demodulator runs the front end at QPSK (RRC α 0.5, the frequency search covers ± 580 kHz,
+Doppler at 1.7 GHz is ± 40 kHz), then has to find three things before the deframer can look
+for the ASM: which symbol starts a period, the carrier's phase (a quarter turn and the I/Q
+mirror; a half turn only inverts the data, which the deframer's BPSK search resolves) and
+which branch of the second symbol is G1 (searched too, in case the satellite differs from
+the description). `polar::ahrpt::Search` decodes 4096 symbols under each of the 16
+hypotheses and scores the re-encoded disagreement; the best goes on into a Viterbi decoder
+whose hard bits feed an uncoded CCSDS `Deframer`. Some wrong hypotheses decode cleanly too
+(with G2 inverted the stream is still a codeword of the punctured code), so a hypothesis
+that hasn't given an ASM within 8 frames (19 ms) is set aside and the next best taken.
+Once locked, the loops narrow as for LRPT. In release builds the loopback template's
+4.67 MS/s run in real time.
+
+AVHRR/3 sends a line as one 12 966-byte packet (APID 103 while channel 3 is 3A, 104 while
+3B) on VCID 9: the time stamp (CCSDS day segmented: day since 2000, ms of the day, µs), six
+bytes of on-board time, 10 355 ten-bit words (space view, the Earth view with pixel `p`,
+channel `c` at word 55 + 5p + c, housekeeping, the calibration target) and the packet error
+control. The decoder places a line by its time stamp, six lines a second from the picture's
+first line, so lost lines are black rows (up to `gap`, 300 = 50 s, else a new picture) and
+late or repeated ones are dropped; counts are cut to 8 bits. Pictures are named
+`METOP-B/<date>/AVHRR_rgb221_<yyyymmddThhmmss>Z` (and `…/AVHRR_ch1_…`) from the first
+line's time stamp and the spacecraft id (11 Metop-B, 12 Metop-A, 13 Metop-C). Every other
+packet (MHS 34, A-DCS 35, SEM 37, HIRS 38, AMSU-A 39/40, IASI 130–180, …) goes out of
+`other` as a packet record and is counted per instrument in the line a second on `out`.
+
+The transmit side: `ahrpt_encoder` sends the AVHRR test pattern (`avhrr::avhrr_pattern`,
+LRPT's pattern with two more bits) as time-stamped line packets and a placeholder MHS
+packet every 16 lines, with fill frames for the real link rate (`pace = air`) or without
+(`packed`, for tests); `ahrpt_modulator` adds RS parity and the randomizer, codes,
+punctures and shapes the QPSK. **Checked**: the puncturer's output matches scikit-commpy's
+encoder (its trellis pinned to CCSDS's tap sequences by the impulse response) and the
+depuncturer and Viterbi decoder recover commpy's message (`scripts/ahrpt-conv-vectors.py`,
+fixture `tests/fixtures/ahrpt/conv34.bin`); every symmetry and puncturing phase is found by
+the search; `tests/ahrpt.rs` runs the whole chain with a 37 kHz offset, 40 ppm clock error,
+a fractional delay and Es/N0 8 dB and compares the lines bit for bit, and a dropout has to
+become black rows in one picture. The format facts (puncturing order and branch mapping,
+G2 not inverted, RS basis, insert zone, packet layout, APIDs) come from descriptions of the
+format and the behaviour of open decoders; nothing has been checked against a real
+recording yet. Not done: calibration (the counts are raw), the scan's geometry and the
+pass direction (a northbound pass comes out turned by half a turn), decoding the other instruments.
 
 ## Recording and playback (M6)
 

@@ -1,0 +1,115 @@
+# Metop AHRPT: AVHRR/3 pictures from Metop-B and Metop-C at 1701.3 MHz. This
+# needs a dish (60 cm–1.2 m) or a helix that follows the satellite (by hand
+# or with a rotator), an LNA with a filter for 1.7 GHz at the feed, and an
+# SDR that does 6 MS/s (Airspy, SDRplay, HackRF, USRP…): an RTL-SDR's
+# 2.4 MS/s is too narrow for 2.33 MSym/s.
+#
+#   SDR 1701.3 MHz, 6 MS/s ─▶ demod ─▶ packets ─▶ dec ─image─▶ PNG files
+#   tracker ─offset─▶ demod.@offset  └─status─▶ log ◀─out─┘    └─other─▶ (records)
+#
+# The satellite sends its imager's five channels as one packet per line, six
+# lines a second; the decoder puts them together into one long picture per
+# pass. Click the wire out of `dec.image` and choose Image to watch the
+# 2-2-1 false-colour composite grow (`dec.ch1`…`dec.ch5`: each channel in
+# grey); `pictures` saves each pass as a PNG under
+# `ahrpt-pictures/METOP-B/<date>/` when it ends. `log` shows the
+# demodulator's lock, carrier offset, MER and Reed-Solomon statistics once a
+# second, and a line a second from the decoder with the other instruments'
+# packets counted (MHS, AMSU-A, HIRS, IASI…); `dec.other` has those packets
+# as records, for a file.
+#
+# Doppler at 1.7 GHz is up to ±40 kHz, well inside the demodulator's
+# ± 580 kHz search, so the tracker isn't needed to lock; wired to the
+# demodulator's `offset` it keeps the carrier loop centred. Set `lat`,
+# `lon`, `alt` to your position and paste fresh element sets (CelesTrak's
+# "Weather" group); the palette's Passes section lists the next passes and
+# *Track* picks the satellite (its `az`/`el` outputs can point a rotator).
+# Without a tracker, delete it and its wire.
+
+[vars]
+lat = 52.52
+lon = 13.405
+alt = 34
+downlink = "1701.3M"
+samp_rate = "6M"
+
+[[block]]
+id = "sdr"
+kind = "sdr_source"
+params = { device = "", frequency = "$downlink", sample_rate = "$samp_rate", gain = 30.0 }
+ui = { x = 50, y = 120 }
+
+[[block]]
+id = "tracker"
+kind = "sat_tracker"
+params = { satellite = "METOP-B", lat = "$lat", lon = "$lon", alt = "$alt", frequency = "$downlink", offset = 0.0, min_elevation = 10.0, rate = 20.0, tle_file = "", time = "", tle = """
+METOP-B
+1 38771U 12049A   26327.76408250  .00000073  00000+0  52936-4 0  9992
+2 38771  98.6298  15.9104 0001480 222.1773 137.9291 14.21475175735933
+METOP-C
+1 43689U 18087A   26327.77870311  .00000069  00000+0  51679-4 0  9994
+2 43689  98.7232  24.9428 0001738 108.9252 251.2114 14.21476095417500
+""" }
+ui = { x = 50, y = 320 }
+
+[[block]]
+id = "demod"
+kind = "ahrpt_demodulator"
+params = { offset = 0.0 }
+ui = { x = 380, y = 120 }
+
+[[block]]
+id = "packets"
+kind = "ccsds_packets"
+params = { frame_len = 1020, rs_interleave = 4, insert_zone = 2, trailer = 0, format = "records" }
+ui = { x = 680, y = 80 }
+
+[[block]]
+id = "dec"
+kind = "avhrr_decoder"
+params = { red = "2", green = "2", blue = "1", vcid = 9, gap = 300 }
+ui = { x = 960, y = 80 }
+
+[[block]]
+id = "pictures"
+kind = "image_sink"
+params = { dir = "ahrpt-pictures", prefix = "metop", min_rows = 64 }
+ui = { x = 1260, y = 40 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true, inputs = 3 }
+ui = { x = 960, y = 360 }
+
+[[connect]]
+from = "sdr.out"
+to = "demod.in"
+
+[[connect]]
+from = "tracker.offset"
+to = "demod.@offset"
+
+[[connect]]
+from = "demod.frames"
+to = "packets.in"
+
+[[connect]]
+from = "packets.out"
+to = "dec.in"
+
+[[connect]]
+from = "dec.image"
+to = "pictures.in"
+
+[[connect]]
+from = "demod.status"
+to = "log.in"
+
+[[connect]]
+from = "dec.out"
+to = "log.in1"
+
+[[connect]]
+from = "tracker.track"
+to = "log.in2"

@@ -393,6 +393,18 @@ pub(crate) const EXAMPLES: &[Example] = &[
         toml: include_str!("../../../examples/lrpt-loopback.fox.toml"),
     },
     Example {
+        name: "ahrpt-rx",
+        title: "Metop AHRPT",
+        description: "An SDR at 6 MS/s on 1701.3 MHz (a tracking dish or helix and an LNA) with Doppler from the satellite tracker → Metop AHRPT demodulator (QPSK 2.33 MSym/s, rate 3/4 Viterbi) → CCSDS packets → AVHRR decoder → the Image instrument (2-2-1 false colour and each channel) and a PNG per pass; the other instruments' packets counted. Needs a real receiver.",
+        toml: include_str!("../../../examples/ahrpt-rx.fox.toml"),
+    },
+    Example {
+        name: "ahrpt-loopback",
+        title: "Metop AHRPT loopback",
+        description: "Synthetic AVHRR/3 lines → CCSDS frames → rate 3/4 code, QPSK at 2.33 MSym/s → noise and a 25 kHz offset → Metop AHRPT demodulator → packets → AVHRR decoder → the Image instrument (click `dec.image`). No hardware needed, but a fast machine (4.7 MS/s in real time).",
+        toml: include_str!("../../../examples/ahrpt-loopback.fox.toml"),
+    },
+    Example {
         name: "fm-receiver",
         title: "FM broadcast receiver",
         description: "An IQ recording in, a WAV file of the station out. Set the file, its rate and centre frequency, and the station offset.",

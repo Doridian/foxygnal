@@ -1,0 +1,140 @@
+# Metop AHRPT loopback: the L-band weather satellite's whole chain, from a
+# picture to a picture, with no radio.
+#
+#   enc ─▶ mod ─▶ throttle ─×offset─+noise─▶ demod ─▶ packets ─▶ dec ─image─▶ (Image)
+#  (AVHRR (RS, rate 3/4                  (search, timing, Costas,     └─out─┐
+#   lines)  code, QPSK)                   punctured Viterbi) ─status─▶ log ◀┘
+#
+# `enc` draws a synthetic five-channel AVHRR/3 picture, a line per packet
+# (APID 103) on virtual channel 9 with fill frames, so a line takes its
+# sixth of a second of the link as on air, and a placeholder MHS packet now
+# and then. `mod` adds the Reed-Solomon parity and randomizer, codes at rate
+# 1/2 punctured to 3/4, and sends QPSK at 2.3333 MSym/s, 2 samples a symbol
+# (4.67 MS/s: this template needs a fast machine to keep up in real time).
+# The receive side is what the "Metop AHRPT" template uses on air; the
+# 25 kHz offset is a typical Doppler shift at 1.7 GHz.
+#
+# Click the wire out of `dec.image` and choose Image to watch the 2-2-1
+# false-colour composite grow (`dec.ch1`…`dec.ch5` are the channels in
+# grey); `log` has the demodulator's lock and statistics and a line a
+# second from the decoder.
+#
+# Raise `noise` to find the threshold: the signal has unit power over 2
+# samples a symbol, so Es/N0 = 10·log10(2 / noise²) dB (0.5 is 9 dB).
+#
+#   foxygnal run examples/ahrpt-loopback.fox.toml
+
+[vars]
+sps = 2
+offset = 25000
+noise = 0.5
+
+[[block]]
+id = "enc"
+kind = "ahrpt_encoder"
+params = { lines = 0, pace = "air" }
+ui = { x = 50, y = 60 }
+
+[[block]]
+id = "mod"
+kind = "ahrpt_modulator"
+params = { sps = "$sps" }
+ui = { x = 300, y = 60 }
+
+[[block]]
+id = "realtime"
+kind = "throttle"
+params = { type = "c32", sample_rate = 0 }
+ui = { x = 550, y = 60 }
+
+[[block]]
+id = "carrier"
+kind = "signal_source"
+params = { type = "c32", waveform = "sine", frequency = "$offset", amplitude = 1.0, sample_rate = "3.5M * 2 / 3 * $sps" }
+ui = { x = 550, y = 220 }
+
+[[block]]
+id = "shift"
+kind = "multiply"
+params = { type = "c32" }
+ui = { x = 800, y = 120 }
+
+[[block]]
+id = "noise"
+kind = "noise_source"
+params = { type = "c32", amplitude = "$noise", seed = 0 }
+ui = { x = 800, y = 280 }
+
+[[block]]
+id = "channel"
+kind = "add"
+params = { type = "c32" }
+ui = { x = 1050, y = 160 }
+
+[[block]]
+id = "demod"
+kind = "ahrpt_demodulator"
+params = { offset = 0.0 }
+ui = { x = 50, y = 440 }
+
+[[block]]
+id = "packets"
+kind = "ccsds_packets"
+params = { frame_len = 1020, rs_interleave = 4, insert_zone = 2, trailer = 0, format = "records" }
+ui = { x = 330, y = 400 }
+
+[[block]]
+id = "dec"
+kind = "avhrr_decoder"
+params = { red = "2", green = "2", blue = "1", vcid = 9, gap = 300 }
+ui = { x = 600, y = 400 }
+
+[[block]]
+id = "log"
+kind = "message_log"
+params = { stdout = true, inputs = 2 }
+ui = { x = 900, y = 520 }
+
+[[connect]]
+from = "enc.out"
+to = "mod.in"
+
+[[connect]]
+from = "mod.out"
+to = "realtime.in"
+
+[[connect]]
+from = "realtime.out"
+to = "shift.a"
+
+[[connect]]
+from = "carrier.out"
+to = "shift.b"
+
+[[connect]]
+from = "shift.out"
+to = "channel.a"
+
+[[connect]]
+from = "noise.out"
+to = "channel.b"
+
+[[connect]]
+from = "channel.out"
+to = "demod.in"
+
+[[connect]]
+from = "demod.frames"
+to = "packets.in"
+
+[[connect]]
+from = "packets.out"
+to = "dec.in"
+
+[[connect]]
+from = "demod.status"
+to = "log.in"
+
+[[connect]]
+from = "dec.out"
+to = "log.in1"

@@ -123,6 +123,15 @@ libjpeg), put together into one long picture per pass: a 2-2-1 colour composite 
 channel in grey, drawn as it arrives and saved as PNG. Templates: "Meteor LRPT"
 (`examples/lrpt-rx.fox.toml`) and "Meteor LRPT loopback" (`examples/lrpt-loopback.fox.toml`).
 
+**Metop AHRPT pictures.** With a tracking dish or helix at 1701.3 MHz and an SDR that does
+6 MS/s, AVHRR/3 pictures from Metop-B and -C: a demodulator for the 2.33 MSym/s QPSK with its
+rate 3/4 punctured code (it finds the carrier within ±580 kHz by itself, or follows the
+tracker's Doppler), the CCSDS frames and packets, and the five imager channels put together
+into one picture per pass, a 2-2-1 false-colour composite and each channel, named by date and
+time. The other instruments' packets (MHS, AMSU-A, IASI…) are counted and passed on. Templates:
+"Metop AHRPT" (`examples/ahrpt-rx.fox.toml`) and "Metop AHRPT loopback"
+(`examples/ahrpt-loopback.fox.toml`).
+
 **Watching digital TV.** The Video instrument plays an MPEG transport stream on any `u8` wire (a DVB
 demodulator's output, or a `.ts` file): it lists the programs with their names, plays the one
 you pick with its sound (choosing between sound tracks by language), and shows codecs,
