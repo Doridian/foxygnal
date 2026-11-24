@@ -130,6 +130,8 @@ struct Dfe {
     meta: Box<[u32]>,
     head: usize,
     filled: usize,
+    /// An update not applied yet: (ring index, error × step).
+    pending: Option<(usize, f32)>,
     dot: fn(&[f32], &[f32]) -> f32,
     axpy: fn(f32, &[f32], &mut [f32]),
 }
@@ -145,6 +147,7 @@ impl Dfe {
             meta: vec![NONE; RING].into_boxed_slice(),
             head: 0,
             filled: 0,
+            pending: None,
             dot: kernels().dot_f32,
             axpy: kernels().axpy,
         };
@@ -157,6 +160,7 @@ impl Dfe {
         self.f[FF - 1 - FF_AHEAD] = 1.0;
         self.b = [0.0; FB];
         self.bias = 0.0;
+        self.pending = None;
     }
 
     #[inline]
@@ -199,10 +203,31 @@ impl Dfe {
             - self.bias
     }
 
+    /// Queue an update, applying the one queued before. The filter for
+    /// the next symbol then doesn't wait on this symbol's update (a delayed
+    /// LMS, by one symbol: the same convergence at these steps), so the
+    /// two overlap instead of running back to back.
+    #[inline]
+    fn adapt_delayed(&mut self, m: usize, e: f32, mu: f32) {
+        self.flush();
+        self.pending = Some((m, mu * e));
+    }
+
+    #[inline]
+    fn flush(&mut self) {
+        if let Some((m, g)) = self.pending.take() {
+            self.update(m, g);
+        }
+    }
+
     #[inline]
     fn adapt(&mut self, m: usize, e: f32, mu: f32) {
+        self.update(m, mu * e);
+    }
+
+    #[inline]
+    fn update(&mut self, m: usize, g: f32) {
         let (xs, ds) = Self::windows(m);
-        let g = mu * e;
         (self.axpy)(-g, &self.x[xs..xs + FF], &mut self.f);
         (self.axpy)(g, &self.d[ds..ds + FB], &mut self.b);
         self.bias += g * 4.0;
@@ -222,10 +247,11 @@ impl Dfe {
     }
 }
 
-/// The nearest of the 8 levels.
+/// The nearest of the 8 levels. (Truncating a value clamped positive,
+/// rather than `round`, which is a libm call without SSE4.1.)
 #[inline]
 fn slice(z: f32) -> f32 {
-    ((z + 7.0) * 0.5).round().clamp(0.0, 7.0) * 2.0 - 7.0
+    ((z + 8.0) * 0.5).clamp(0.0, 7.5) as i32 as f32 * 2.0 - 7.0
 }
 
 /// The known level of field position `fidx`, if any.
@@ -261,6 +287,12 @@ pub(super) enum Phase {
     Field,
 }
 
+/// Matched filter outputs computed in one go, at most.
+const AHEAD: usize = 64;
+
+/// Symbols per carrier-loop and AGC update.
+const REFRESH: u64 = 16;
+
 /// Search range for the pilot around its nominal place.
 const MAX_OFFSET: f64 = 250e3;
 /// Pilot spectrum averages.
@@ -289,6 +321,8 @@ pub(super) struct Receiver {
     // Matched filter and resampling.
     filt: SymbolFilter,
     buf: Vec<Complex32>,
+    /// Matched filter outputs computed ahead (see `symbols`).
+    ahead: Box<[Complex32; AHEAD]>,
     pos: f64,
     step: f64,
     n: u64,
@@ -299,6 +333,8 @@ pub(super) struct Receiver {
     inv_pilot: f32,
     // Carrier loop: e^{-jθ}, ω (rad/symbol), the pilot low-passed.
     rot: Complex32,
+    /// e^{-jδ}, the per-symbol turn of `rot`, refreshed with the loop.
+    rot_step: Complex32,
     omega: f64,
     pilot: Complex32,
     pll: (f64, f64),
@@ -374,12 +410,14 @@ impl Receiver {
             tmp: Vec::with_capacity(max_push),
             buf: Vec::with_capacity(max_push + 4 * filt.taps + 64),
             filt,
+            ahead: Box::new([Complex32::default(); AHEAD]),
             pos: 0.0,
             step: nominal,
             n: 0,
             n_seg: 0,
             inv_pilot: 0.0,
             rot: Complex32::new(1.0, 0.0),
+            rot_step: Complex32::new(1.0, 0.0),
             omega: 0.0,
             pilot: Complex32::default(),
             pll: (0.0, 0.0),
@@ -576,6 +614,7 @@ impl Receiver {
         self.pos = self.filt.half as f64 + 1.0;
         self.step = self.nominal;
         self.rot = Complex32::new(1.0, 0.0);
+        self.rot_step = Complex32::new(1.0, 0.0);
         self.omega = 0.0;
         self.pilot = Complex32::default();
         self.set_pll(1000.0);
@@ -595,6 +634,22 @@ impl Receiver {
         self.pll = (2.0 * 0.707 * wn, wn * wn);
     }
 
+    /// How many symbols from the next one on need neither early/late
+    /// samples nor can move the timing: the timing loop only acts at the
+    /// segment sync's 4 symbols, and the segment sync is only found, moved
+    /// or lost at the symbol where `segment_check` runs.
+    fn plain_run(&self) -> usize {
+        // Up to and including the symbol whose `k_seg` is 2.
+        let check = (2 + SEGMENT - self.n_seg) % SEGMENT + 1;
+        if self.phase < Phase::Segment {
+            return check;
+        }
+        if self.seg_pos < 4 {
+            return 0;
+        }
+        check.min(SEGMENT - self.seg_pos)
+    }
+
     fn symbols(&mut self, fifo: &mut ByteFifo) {
         let half = self.filt.half as f64;
         loop {
@@ -605,6 +660,32 @@ impl Receiver {
             if !early.is_finite() || early < half - 1.0 {
                 self.restart();
                 return;
+            }
+            // A stretch where the sample positions are known in advance:
+            // the matched filter runs over it in a tight loop of its own,
+            // where its independent dot products overlap, instead of
+            // interleaved with the long per-symbol chain below.
+            let run = self.plain_run().min(AHEAD);
+            if run >= 2 {
+                let x: &[f32] = bytemuck::cast_slice(&self.buf);
+                let (mut p, step) = (self.pos, self.step);
+                let mut n = 0;
+                while n < run && ((p + 0.5 * step + half) as usize + 1) < self.buf.len() {
+                    self.ahead[n] = self.filt.at(x, p);
+                    p += step;
+                    n += 1;
+                }
+                if n == 0 {
+                    break;
+                }
+                for i in 0..n {
+                    self.symbol(self.ahead[i], None, fifo);
+                    if self.phase == Phase::Coarse {
+                        return;
+                    }
+                    self.pos += self.step;
+                }
+                continue;
             }
             let late = self.pos + 0.5 * self.step;
             if (late + half) as usize + 1 >= self.buf.len() {
@@ -649,20 +730,27 @@ impl Receiver {
         self.n += 1;
         let k_seg = self.n_seg;
         self.n_seg = if k_seg + 1 == SEGMENT { 0 } else { k_seg + 1 };
-        let refresh = k & 15 == 0;
+        let refresh = k & (REFRESH - 1) == 0;
         // The pilot to DC and the data into the real part.
         let v = Self::turn(y, k) * self.rot;
         self.pilot += (v - self.pilot) * (1.0 / 512.0);
+        // The loop runs once per REFRESH symbols (the pilot is averaged over
+        // 512, and the loop is 300–1000 Hz wide against 10.76 MBd): steered
+        // every symbol, its chain (rotate, average, error, integrate, turn)
+        // would be one long dependency from symbol to symbol, and the
+        // symbol rate would wait on its latency.
         if refresh {
-            let mag = self.pilot.norm();
+            // (`norm` would be a libm `hypot` call.)
+            let mag = self.pilot.norm_sqr().sqrt();
             self.inv_pilot = if mag > 0.0 { 1.0 / mag } else { 0.0 };
+            let err = (self.pilot.im * self.inv_pilot) as f64;
+            self.omega += self.pll.1 * REFRESH as f64 * err;
+            let d = (self.omega + self.pll.0 * err) as f32;
+            self.rot_step = Complex32::new(1.0 - 0.5 * d * d, -d);
         }
-        let err = (self.pilot.im * self.inv_pilot) as f64;
-        self.omega += self.pll.1 * err;
-        let d = (self.omega + self.pll.0 * err) as f32;
-        self.rot *= Complex32::new(1.0 - 0.5 * d * d, -d);
+        self.rot *= self.rot_step;
         if k & 255 == 0 {
-            self.rot /= self.rot.norm();
+            self.rot /= self.rot.norm_sqr().sqrt();
         }
 
         // Level: remove the pilot, scale the data to ±1 … ±7.
@@ -933,7 +1021,7 @@ impl Receiver {
             self.mer.1 += 1.0;
         }
         if mu > 0.0 {
-            self.eq.adapt(m, e, mu);
+            self.eq.adapt_delayed(m, e, mu);
         }
         self.eq.decide(m, d);
         if fidx as usize == FIELD_SYNC_KNOWN - 1 {
@@ -970,6 +1058,7 @@ impl Receiver {
         // taps would reach back to them.
         let first = if self.trained == 0 { FB } else { 0 };
         self.trained += 1;
+        self.eq.flush();
         let mu = 0.15 / ((FF + FB) as f32 * DATA_POWER);
         // The feedback taps take the known symbols, not what was decided.
         for i in 0..FIELD_SYNC_KNOWN {

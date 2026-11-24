@@ -348,6 +348,13 @@ const TB_DEPTH: usize = 40;
 const TB_OUT: usize = 24;
 const TB_RING: usize = TB_DEPTH + TB_OUT;
 
+/// The smaller of two metrics. (`f32::min` also handles NaN, which costs
+/// extra instructions on x86; `step` keeps NaN out of the metrics.)
+#[inline(always)]
+fn min(a: f32, b: f32) -> f32 {
+    if b < a { b } else { a }
+}
+
 /// One 4-state Viterbi decoder for one trellis encoder's symbols. Each
 /// branch has two parallel transitions (z2 = 0 or 1, 8 levels apart): the
 /// branch metric is the nearer of the two, and which one is remembered.
@@ -375,6 +382,9 @@ impl Viterbi {
     /// writes their dibits (x2 x1) to `out` and returns true.
     #[inline]
     fn step(&mut self, r: f32, out: &mut [u8; TB_OUT]) -> bool {
+        // An equalizer gone non-finite (it resets at the next segment) must
+        // not leave NaN in the path metrics for good.
+        let r = if r.is_finite() { r } else { 0.0 };
         let mut bm = [0f32; 4];
         let mut z2 = 0u8;
         for (c, m) in bm.iter_mut().enumerate() {
@@ -382,7 +392,7 @@ impl Viterbi {
             let hi = lo - 8.0;
             let (dl, dh) = (lo * lo, hi * hi);
             z2 |= ((dh < dl) as u8) << c;
-            *m = dl.min(dh);
+            *m = min(dl, dh);
         }
         // State s = b1 b0. Into s = (c1, c0) from (b1, c1) with x1 = c0 ⊕ b1;
         // the branch's subset is z1 z0 = x1 c1.
@@ -394,11 +404,11 @@ impl Viterbi {
             let m0 = pm[c1] + bm[(c0 << 1) | c1];
             let m1 = pm[2 + c1] + bm[((c0 ^ 1) << 1) | c1];
             d |= ((m1 < m0) as u8) << s;
-            *n = m0.min(m1);
+            *n = min(m0, m1);
         }
-        let min = new[0].min(new[1]).min(new[2].min(new[3]));
+        let low = min(min(new[0], new[1]), min(new[2], new[3]));
         for (p, n) in self.pm.iter_mut().zip(new) {
-            *p = n - min;
+            *p = n - low;
         }
         self.dec[self.steps] = d;
         self.steps += 1;
