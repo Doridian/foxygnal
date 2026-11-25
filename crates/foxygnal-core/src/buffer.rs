@@ -346,6 +346,12 @@ impl Writer {
         r.capacity.saturating_sub(written - r.min_read()) > 0
     }
 
+    /// Whether any connection reads this ring (spare cursors for taps
+    /// don't count).
+    pub fn has_readers(&self) -> bool {
+        !self.ring.readers.is_empty()
+    }
+
     /// True when no reader will ever consume again (all readers finished).
     /// An output with zero readers is never "abandoned": its data is discarded.
     pub fn abandoned(&self) -> bool {

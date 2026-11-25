@@ -885,6 +885,7 @@ mod tests {
         sel.configure(&mut Configure {
             inputs: &inputs,
             outputs: &mut outputs,
+            outputs_connected: &[],
         })
         .unwrap();
         assert_eq!(outputs[0].sample_rate, Some(3.0));

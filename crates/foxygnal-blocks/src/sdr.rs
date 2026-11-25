@@ -1,11 +1,16 @@
-//! SDR hardware: receive (`sdr_source`) and transmit (`sdr_sink`) through the
-//! drivers in `foxygnal-sdr`.
+//! SDR hardware: receive (`sdr_source`, and `sdr_source_dual` for two
+//! sample-aligned channels) and transmit (`sdr_sink`) through the drivers in
+//! `foxygnal-sdr`.
 //!
 //! Devices open in `start()`, never while building or configuring. Drivers
 //! move samples on their own thread into a ring and wake the block, so
 //! `work()` only copies what is there and returns `Blocked` otherwise.
 //!
-//! Tags on `sdr_source`'s output, on the first item after the change:
+//! `sdr_source_dual` streams only the outputs that are connected: both
+//! through the device's two-channel stream, or one alone as a normal
+//! one-channel stream (so wiring only `rx2` costs one channel's bandwidth).
+//!
+//! Tags on each source output, on the first item after the change:
 //! - `hw` (string) the device's label and device string, on the first item
 //! - `rx_freq` (float, Hz) after a live retune
 //! - `rx_gain` (float, dB; NaN for automatic gain) after a live gain change
@@ -13,11 +18,12 @@
 //!   this item because the graph fell behind
 
 use foxygnal_core::{
-    Block, BlockDescriptor, Complex32, Configure, Error, Instance, ParamKind, ParamReader,
-    ParamSpec, PortSpec, Registry, StreamType, WorkIo, WorkStatus,
+    Block, BlockDescriptor, Complex32, Configure, Error, Instance, OutputPort, ParamKind,
+    ParamReader, ParamSpec, PortSpec, Registry, StreamType, WorkIo, WorkStatus,
 };
 use foxygnal_sdr::{
-    Capabilities, Device, Gain, Range, RxConfig, RxStream, SdrError, TxConfig, TxStream,
+    Capabilities, Device, DualRxStream, Gain, Range, RxConfig, RxStream, SdrError, TxConfig,
+    TxStream,
 };
 use serde_json::json;
 
@@ -31,52 +37,44 @@ pub fn register(r: &mut Registry) {
             kind: "sdr_source",
             label: "SDR Source",
             category: CATEGORY,
-            help: "Receive I/Q from an SDR (RTL-SDR, rtl_tcp, SoapySDR devices, or the \
-                   built-in simulator). Retunes and gain changes apply live and tag the \
-                   stream (`rx_freq`, `rx_gain`); dropped samples are tagged `overflow`, and \
-                   the first item `hw` (the device).",
+            help: "Receive I/Q from an SDR (RTL-SDR, HackRF, PlutoSDR, rtl_tcp, SpyServer, \
+                   SoapySDR devices, or the built-in simulator). Retunes and gain changes apply \
+                   live and tag the stream (`rx_freq`, `rx_gain`); dropped samples are tagged \
+                   `overflow`, and the first item `hw` (the device).",
             inputs: vec![],
             outputs: vec![PortSpec {
                 name: "out",
                 ty: Some(StreamType::C32),
             }],
-            params: vec![
-                device_param(
-                    "Device string, e.g. `rtlsdr:serial=00000001`, \
-                     `rtltcp:host=10.0.0.5,port=1234` or `sim:`. Empty: the first device \
-                     found (real hardware before the simulator).",
-                ),
-                frequency_param(100e6, "Centre frequency to tune to."),
-                rate_param(2.4e6),
-                params::float(
-                    "gain",
-                    "Gain",
-                    30.0,
-                    Some("dB"),
-                    "Overall gain; the device picks the nearest step it supports.",
-                )
-                .live(),
-                ParamSpec {
-                    name: "agc",
-                    label: "Automatic gain",
-                    kind: ParamKind::Bool,
-                    default: json!(false),
-                    help: "Let the device set its gain (hardware AGC). Overrides Gain.",
-                    live: true,
-                },
-                params::float(
-                    "ppm",
-                    "Frequency correction",
-                    0.0,
-                    Some("ppm"),
-                    "Crystal error to correct for, in parts per million.",
-                )
-                .live(),
-                bandwidth_param(),
-                antenna_param(),
-            ],
+            params: source_params(true),
         },
         build_source,
+    );
+    r.register(
+        BlockDescriptor {
+            kind: "sdr_source_dual",
+            label: "SDR Source (2 channels)",
+            category: CATEGORY,
+            help: "Receive both channels of a two-channel SDR at once, sample-aligned (one \
+                   local oscillator and sample clock): a PlutoSDR or other AD9361 board in \
+                   2r2t mode through `pluto:`, or the simulator. Only connected outputs are \
+                   streamed: wire just `rx2` to receive RX2 alone at one channel's bandwidth. \
+                   Every setting applies to both channels. Tags as on SDR Source, on both \
+                   outputs.",
+            inputs: vec![],
+            outputs: vec![
+                PortSpec {
+                    name: "rx1",
+                    ty: Some(StreamType::C32),
+                },
+                PortSpec {
+                    name: "rx2",
+                    ty: Some(StreamType::C32),
+                },
+            ],
+            params: source_params(false),
+        },
+        build_dual_source,
     );
     r.register_tx(
         BlockDescriptor {
@@ -113,6 +111,59 @@ pub fn register(r: &mut Registry) {
         },
         build_sink,
     );
+}
+
+fn source_params(channel: bool) -> Vec<ParamSpec> {
+    let mut p = vec![
+        device_param(
+            "Device string, e.g. `rtlsdr:serial=00000001`, `pluto:uri=ip:192.168.2.1`, \
+             `rtltcp:host=10.0.0.5,port=1234` or `sim:`. Empty: the first device found \
+             (real hardware before the simulator).",
+        ),
+        frequency_param(100e6, "Centre frequency to tune to."),
+        rate_param(2.4e6),
+        params::float(
+            "gain",
+            "Gain",
+            30.0,
+            Some("dB"),
+            "Overall gain; the device picks the nearest step it supports.",
+        )
+        .live(),
+        ParamSpec {
+            name: "agc",
+            label: "Automatic gain",
+            kind: ParamKind::Bool,
+            default: json!(false),
+            help: "Let the device set its gain (hardware AGC). Overrides Gain.",
+            live: true,
+        },
+        params::float(
+            "ppm",
+            "Frequency correction",
+            0.0,
+            Some("ppm"),
+            "Crystal error to correct for, in parts per million.",
+        )
+        .live(),
+        bandwidth_param(),
+        antenna_param(),
+    ];
+    if channel {
+        p.push(ParamSpec {
+            name: "channel",
+            label: "Channel",
+            kind: ParamKind::Int {
+                min: Some(0),
+                max: Some(7),
+            },
+            default: json!(0),
+            help: "Receive channel on devices with several: 0 = RX1, 1 = RX2 (a PlutoSDR \
+                   in 2r2t mode). For both at once use SDR Source (2 channels).",
+            live: false,
+        });
+    }
+    p
 }
 
 fn device_param(help: &'static str) -> ParamSpec {
@@ -293,6 +344,54 @@ fn open(device: &str) -> Result<Opened, Error> {
 
 // ---- Source ----------------------------------------------------------------
 
+/// A running receive stream and where its samples go.
+enum Rx {
+    /// One channel, written to output `port`.
+    One {
+        stream: Box<dyn RxStream>,
+        port: usize,
+    },
+    /// Two channels in sync, written to outputs 0 and 1.
+    Two(Box<dyn DualRxStream>),
+}
+
+impl Rx {
+    fn set_waker(&mut self, t: std::thread::Thread) {
+        match self {
+            Rx::One { stream, .. } => stream.set_waker(t),
+            Rx::Two(s) => s.set_waker(t),
+        }
+    }
+
+    fn overflows(&self) -> u64 {
+        match self {
+            Rx::One { stream, .. } => stream.overflows(),
+            Rx::Two(s) => s.overflows(),
+        }
+    }
+
+    fn set_frequency(&mut self, f: f64) -> foxygnal_sdr::Result<()> {
+        match self {
+            Rx::One { stream, .. } => stream.set_frequency(f),
+            Rx::Two(s) => s.set_frequency(f),
+        }
+    }
+
+    fn set_gain(&mut self, g: Gain) -> foxygnal_sdr::Result<()> {
+        match self {
+            Rx::One { stream, .. } => stream.set_gain(g),
+            Rx::Two(s) => s.set_gain(g),
+        }
+    }
+
+    fn set_ppm(&mut self, ppm: f64) -> foxygnal_sdr::Result<()> {
+        match self {
+            Rx::One { stream, .. } => stream.set_ppm(ppm),
+            Rx::Two(s) => s.set_ppm(ppm),
+        }
+    }
+}
+
 pub struct SdrSource {
     device: String,
     frequency: f64,
@@ -302,8 +401,14 @@ pub struct SdrSource {
     ppm: f64,
     bandwidth: f64,
     antenna: String,
+    /// The channel a one-output source receives.
+    channel: usize,
+    /// `sdr_source_dual`: outputs `rx1` and `rx2`.
+    dual: bool,
+    /// Which outputs feed anything (from `configure`).
+    connected: [bool; 2],
     // Dropped in this order: the stream before the device.
-    stream: Option<Box<dyn RxStream>>,
+    stream: Option<Rx>,
     opened: Option<Opened>,
     overflows: u64,
     tag_hw: bool,
@@ -312,6 +417,28 @@ pub struct SdrSource {
 }
 
 impl SdrSource {
+    fn new(p: &ParamReader<'_>, dual: bool) -> Result<Self, Error> {
+        Ok(SdrSource {
+            device: p.str("device")?.to_owned(),
+            frequency: p.f64("frequency")?,
+            sample_rate: p.f64("sample_rate")?,
+            gain: p.f64("gain")?,
+            agc: p.bool("agc")?,
+            ppm: p.f64("ppm")?,
+            bandwidth: p.f64("bandwidth")?,
+            antenna: p.str("antenna")?.to_owned(),
+            channel: if dual { 0 } else { p.u64("channel")? as usize },
+            dual,
+            connected: [true, true],
+            stream: None,
+            opened: None,
+            overflows: 0,
+            tag_hw: false,
+            tag_freq: false,
+            tag_gain: false,
+        })
+    }
+
     fn name(&self) -> &str {
         self.opened.as_ref().map_or("SDR", |o| o.name.as_str())
     }
@@ -327,6 +454,62 @@ impl SdrSource {
             Gain::Db(self.gain)
         }
     }
+
+    /// Starts the stream this block needs: its channel, or for the dual
+    /// source, both channels or just the one that is connected.
+    fn start_stream(&mut self, cfg: &mut RxConfig) -> Result<Rx, Error> {
+        let opened = self.opened.as_mut().expect("opened before starting");
+        let name = &opened.name;
+        let dev = &mut opened.device;
+        let fail = |e: SdrError| Error::Other(format!("{name}: {e}"));
+        if !self.dual {
+            cfg.channel = self.channel;
+            return Ok(Rx::One {
+                stream: dev.start_rx(cfg).map_err(fail)?,
+                port: 0,
+            });
+        }
+        match self.connected {
+            [true, true] => {
+                let channels = dev.rx_channels();
+                dev.start_rx_dual(cfg).map(Rx::Two).map_err(|e| match e {
+                    SdrError::Unsupported(_) if channels < 2 => Error::Other(format!(
+                        "{name}: has one receive channel, so it can't feed rx1 and rx2; \
+                         use SDR Source"
+                    )),
+                    e => fail(e),
+                })
+            }
+            [rx1, rx2] if rx1 != rx2 => {
+                cfg.channel = usize::from(rx2);
+                Ok(Rx::One {
+                    stream: dev.start_rx(cfg).map_err(fail)?,
+                    port: cfg.channel,
+                })
+            }
+            _ => Err(Error::Other(
+                "nothing is connected: connect rx1, rx2 or both".into(),
+            )),
+        }
+    }
+
+    /// Adds the pending tags at the start of what `port` is about to produce.
+    fn tag(&self, port: &mut OutputPort, overflow: u64) {
+        if self.tag_hw {
+            let name = self.opened.as_ref().map_or("", |o| o.name.as_str());
+            port.add_tag(0, "hw", name);
+        }
+        if self.tag_freq {
+            port.add_tag(0, "rx_freq", self.frequency);
+        }
+        if self.tag_gain {
+            let g = if self.agc { f64::NAN } else { self.gain };
+            port.add_tag(0, "rx_gain", g);
+        }
+        if overflow > 0 {
+            port.add_tag(0, "overflow", overflow as i64);
+        }
+    }
 }
 
 impl Block for SdrSource {
@@ -339,6 +522,9 @@ impl Block for SdrSource {
         for o in cx.outputs.iter_mut() {
             o.sample_rate = Some(self.sample_rate);
             o.center_freq = Some(self.frequency);
+        }
+        if self.dual {
+            self.connected = [cx.output_connected(0), cx.output_connected(1)];
         }
         Ok(())
     }
@@ -357,7 +543,7 @@ impl Block for SdrSource {
                 }
             });
         checks.map_err(|m| self.err(m))?;
-        let cfg = RxConfig {
+        let mut cfg = RxConfig {
             sample_rate: self.sample_rate,
             frequency: self.frequency,
             gain: self.gain_setting(),
@@ -366,11 +552,7 @@ impl Block for SdrSource {
             antenna: opt_str(&self.antenna),
             channel: 0,
         };
-        let opened = self.opened.as_mut().expect("just set");
-        let mut rx = opened
-            .device
-            .start_rx(&cfg)
-            .map_err(|e| Error::Other(format!("{}: {e}", opened.name)))?;
+        let mut rx = self.start_stream(&mut cfg)?;
         rx.set_waker(std::thread::current());
         self.overflows = rx.overflows();
         self.stream = Some(rx);
@@ -382,41 +564,45 @@ impl Block for SdrSource {
         let Some(rx) = self.stream.as_mut() else {
             return Err(Error::Other("SDR source used before start".into()));
         };
-        let out = io.outputs[0].slice_mut::<Complex32>();
-        if out.is_empty() {
-            return Ok(WorkStatus::Blocked);
-        }
-        let n = match rx.read(out) {
-            Ok(n) => n,
-            Err(e) => {
-                let name = self.name().to_owned();
-                return Err(Error::Other(format!("{name}: stream ended: {e}")));
+        let read = match rx {
+            Rx::One { stream, port } => {
+                let out = io.outputs[*port].slice_mut::<Complex32>();
+                if out.is_empty() {
+                    return Ok(WorkStatus::Blocked);
+                }
+                stream.read(out)
             }
+            Rx::Two(stream) => {
+                let (a, b) = io.outputs.split_at_mut(1);
+                let (a, b) = (a[0].slice_mut::<Complex32>(), b[0].slice_mut::<Complex32>());
+                if a.is_empty() || b.is_empty() {
+                    return Ok(WorkStatus::Blocked);
+                }
+                stream.read(a, b)
+            }
+        };
+        let n = match read {
+            Ok(n) => n,
+            Err(e) => return Err(self.err(format!("stream ended: {e}"))),
         };
         if n == 0 {
             return Ok(WorkStatus::Blocked);
         }
         let overflows = rx.overflows();
-        let port = &mut io.outputs[0];
-        if self.tag_hw {
-            let name = self.opened.as_ref().map_or("", |o| o.name.as_str());
-            port.add_tag(0, "hw", name);
-            self.tag_hw = false;
+        let overflow = overflows - self.overflows;
+        let ports = match rx {
+            Rx::One { port, .. } => *port..*port + 1,
+            Rx::Two(_) => 0..2,
+        };
+        for port in ports {
+            let out = &mut io.outputs[port];
+            self.tag(out, overflow);
+            out.produce(n);
         }
-        if self.tag_freq {
-            port.add_tag(0, "rx_freq", self.frequency);
-            self.tag_freq = false;
-        }
-        if self.tag_gain {
-            let g = if self.agc { f64::NAN } else { self.gain };
-            port.add_tag(0, "rx_gain", g);
-            self.tag_gain = false;
-        }
-        if overflows != self.overflows {
-            port.add_tag(0, "overflow", (overflows - self.overflows) as i64);
-            self.overflows = overflows;
-        }
-        port.produce(n);
+        self.overflows = overflows;
+        self.tag_hw = false;
+        self.tag_freq = false;
+        self.tag_gain = false;
         Ok(WorkStatus::Ok)
     }
 
@@ -472,26 +658,21 @@ impl Block for SdrSource {
 }
 
 fn build_source(p: &ParamReader<'_>) -> Result<Instance, Error> {
-    let sample_rate = p.f64("sample_rate")?;
     Ok(Instance {
-        block: Box::new(SdrSource {
-            device: p.str("device")?.to_owned(),
-            frequency: p.f64("frequency")?,
-            sample_rate,
-            gain: p.f64("gain")?,
-            agc: p.bool("agc")?,
-            ppm: p.f64("ppm")?,
-            bandwidth: p.f64("bandwidth")?,
-            antenna: p.str("antenna")?.to_owned(),
-            stream: None,
-            opened: None,
-            overflows: 0,
-            tag_hw: false,
-            tag_freq: false,
-            tag_gain: false,
-        }),
+        block: Box::new(SdrSource::new(p, false)?),
         inputs: vec![],
         outputs: vec![("out".into(), StreamType::C32)],
+    })
+}
+
+fn build_dual_source(p: &ParamReader<'_>) -> Result<Instance, Error> {
+    Ok(Instance {
+        block: Box::new(SdrSource::new(p, true)?),
+        inputs: vec![],
+        outputs: vec![
+            ("rx1".into(), StreamType::C32),
+            ("rx2".into(), StreamType::C32),
+        ],
     })
 }
 
@@ -747,6 +928,100 @@ to = "sink.in"
         }
         running.stop();
         running.wait().unwrap();
+    }
+
+    fn sim_params(kind_dual: bool) -> foxygnal_core::Params {
+        let mut params = foxygnal_core::Params::new();
+        params.insert("device".into(), json!("sim:"));
+        params.insert("sample_rate".into(), json!(1e6));
+        if !kind_dual {
+            params.insert("channel".into(), json!(5));
+        }
+        params
+    }
+
+    /// Runs until `done` says so (or 5 s), then stops.
+    fn run_until(fg: Flowgraph, done: impl Fn() -> bool) {
+        let running = fg.start().unwrap();
+        let t0 = Instant::now();
+        while !done() && t0.elapsed() < Duration::from_secs(5) {
+            assert!(!running.is_finished(), "stopped early");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        running.stop();
+        running.wait().unwrap();
+    }
+
+    #[test]
+    fn dual_source_streams_both_channels_aligned() {
+        let r = crate::registry();
+        let mut fg = Flowgraph::new();
+        let src = fg.add("rx", r.build("sdr_source_dual", &sim_params(true)).unwrap());
+        let (s1, d1, t1) = VectorSink::<Complex32>::with_tags();
+        let (s2, d2, t2) = VectorSink::<Complex32>::with_tags();
+        let (s1, s2) = (fg.add("a", s1), fg.add("b", s2));
+        fg.connect(src, 0, s1, 0).unwrap();
+        fg.connect(src, 1, s2, 0).unwrap();
+        run_until(fg, || d1.lock().unwrap().len() >= 50_000);
+        let (a, b) = (d1.lock().unwrap(), d2.lock().unwrap());
+        let n = a.len().min(b.len());
+        assert!(n >= 10_000, "{n}");
+        // The simulator's channel 1 is channel 0 turned by 90°.
+        for (x, y) in a[..n].iter().zip(&b[..n]) {
+            assert_eq!(*y, Complex32::new(-x.im, x.re));
+        }
+        for tags in [t1, t2] {
+            assert!(
+                tags.lock()
+                    .unwrap()
+                    .iter()
+                    .any(|t| &*t.key == "hw" && t.offset == 0)
+            );
+        }
+    }
+
+    #[test]
+    fn dual_source_streams_only_what_is_connected() {
+        let r = crate::registry();
+        let mut fg = Flowgraph::new();
+        let src = fg.add("rx", r.build("sdr_source_dual", &sim_params(true)).unwrap());
+        let (sink, data) = VectorSink::<Complex32>::instance();
+        let sink = fg.add("b", sink);
+        fg.connect(src, 1, sink, 0).unwrap();
+        run_until(fg, || data.lock().unwrap().len() >= 10_000);
+        assert!(data.lock().unwrap().len() >= 10_000);
+
+        // Nothing connected: says what to do.
+        let spec = GraphSpec::from_toml(
+            r#"
+[[block]]
+id = "rx"
+kind = "sdr_source_dual"
+params = { device = "sim:", sample_rate = 1e6 }
+"#,
+        )
+        .unwrap();
+        let err = Flowgraph::from_spec(&spec, &r)
+            .unwrap()
+            .start()
+            .unwrap()
+            .wait()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("connect rx1, rx2 or both"), "{err}");
+    }
+
+    #[test]
+    fn missing_channel_is_an_error() {
+        let r = crate::registry();
+        let mut fg = Flowgraph::new();
+        let src = fg.add("rx", r.build("sdr_source", &sim_params(false)).unwrap());
+        let (sink, _) = VectorSink::<Complex32>::instance();
+        let sink = fg.add("sink", sink);
+        fg.connect(src, 0, sink, 0).unwrap();
+        let err = fg.start().unwrap().wait().unwrap_err().to_string();
+        assert!(err.contains("receive channel 5 doesn't exist"), "{err}");
+        assert!(err.contains("Simulated FM band (sim:)"), "{err}");
     }
 
     #[test]

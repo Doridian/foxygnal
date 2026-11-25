@@ -617,6 +617,45 @@ fn placeholders_keep_the_file_loadable_and_come_back() {
 }
 
 #[test]
+fn pluto_sources_export() {
+    let g = graph(
+        json!({}),
+        vec![
+            blk(
+                "one",
+                "sdr_source",
+                json!({ "device": "pluto:uri=ip:10.0.0.5", "channel": 1 }),
+            ),
+            blk("both", "sdr_source_dual", json!({ "device": "pluto:" })),
+            blk("a", "null_sink", json!({ "type": "c32" })),
+            blk("b", "null_sink", json!({ "type": "c32" })),
+            blk("c", "null_sink", json!({ "type": "c32" })),
+        ],
+        &[
+            ("one.out", "a.in"),
+            ("both.rx1", "b.in"),
+            ("both.rx2", "c.in"),
+        ],
+    );
+    let exp = export(&g, &ExportOptions::default()).unwrap();
+    check_yaml(&exp.grc);
+    let grc = &exp.grc;
+    assert!(grc.contains("id: soapy_plutosdr_source"), "{grc}");
+    assert!(grc.contains("dev_args: \"'uri=ip:10.0.0.5'\""), "{grc}");
+    assert!(warned(&exp, &["RX1 only"]));
+    assert!(warned(&exp, &["`both` (sdr_source_dual)", "placeholder"]));
+    let back = import(grc, &Options::default()).unwrap();
+    let both = back.graph.blocks.iter().find(|b| b.id == "both").unwrap();
+    assert_eq!(both.kind, "sdr_source_dual");
+    assert!(
+        back.graph
+            .connections
+            .iter()
+            .any(|c| c.from == "both.rx2" && c.to == "c.in")
+    );
+}
+
+#[test]
 fn hierarchical_blocks_are_flattened() {
     let spec = GraphSpec::from_toml(
         &std::fs::read_to_string(examples().join("hier-tones.fox.toml")).unwrap(),

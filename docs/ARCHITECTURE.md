@@ -77,7 +77,11 @@ code.
   it), so most blocks implement nothing. A source sets its rate (`cx.set_rate`), a
   decimate-by-4 block divides it, and a throttle at rate 0 takes it from upstream
   (`cx.input_rate(0)?` gives a readable error if nothing upstream sets one). Building and
-  configuring must have **no side effects**: files and devices open in `start()`. The
+  configuring must have **no side effects**: files and devices open in `start()`.
+  `cx.output_connected(port)` says whether an output feeds anything, so a source can skip
+  work nobody reads (`sdr_source_dual` streams only the channels that are wired). An output
+  that was never connected doesn't keep its block running: a block finishes once every
+  *connected* output is abandoned. The
   server builds and configures the graph on every edit and sends `meta {edges, error}`, which
   the UI uses for rate labels on wires and instrument axes.
 - **Live parameters (M1, done).** Parameters flagged `live` (frequency, gain, cutoff…) can

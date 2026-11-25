@@ -419,6 +419,7 @@ impl Driver for SoapyDriver {
             },
             handle,
             caps,
+            rx_channels: nrx,
         }))
     }
 }
@@ -735,6 +736,7 @@ pub struct SoapyDevice {
     handle: Arc<Handle>,
     info: DeviceInfo,
     caps: Capabilities,
+    rx_channels: usize,
 }
 
 impl Device for SoapyDevice {
@@ -746,11 +748,22 @@ impl Device for SoapyDevice {
         self.caps.clone()
     }
 
+    fn rx_channels(&self) -> usize {
+        self.rx_channels.max(1)
+    }
+
     fn start_rx(&mut self, cfg: &RxConfig) -> Result<Box<dyn RxStream>> {
         let h = &self.handle;
         let ch = cfg.channel;
         if !self.info.rx {
             return Err(SdrError::Unsupported("receiving".into()));
+        }
+        if ch >= self.rx_channels {
+            return Err(SdrError::Range(format!(
+                "receive channel {ch} doesn't exist; SoapySDR reports {} (0–{})",
+                self.rx_channels,
+                self.rx_channels - 1
+            )));
         }
         let caps = if ch == 0 {
             self.caps.clone()

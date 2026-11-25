@@ -402,6 +402,67 @@ fn abandoned_sources_finish() {
     assert_eq!(finished.load(Ordering::Relaxed), configs().len());
 }
 
+/// An unconnected output doesn't keep a source running once the readers of
+/// its other outputs are gone. (Like a two-channel SDR source with only its
+/// second output wired: it writes that one alone.)
+#[test]
+fn unconnected_outputs_dont_keep_a_source_alive() {
+    struct TwoOut;
+    impl Block for TwoOut {
+        fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
+            let n = io.outputs[1].slice_mut::<f32>().len();
+            io.produce(1, n);
+            Ok(if n > 0 {
+                WorkStatus::Ok
+            } else {
+                WorkStatus::Blocked
+            })
+        }
+    }
+    struct Take(usize);
+    impl Block for Take {
+        fn work(&mut self, io: &mut WorkIo<'_>) -> Result<WorkStatus, Error> {
+            let n = io.inputs[0].slice::<f32>().len().min(self.0);
+            io.consume(0, n);
+            self.0 -= n;
+            Ok(if self.0 == 0 {
+                WorkStatus::Done
+            } else {
+                WorkStatus::Blocked
+            })
+        }
+    }
+    for (name, cfg) in configs() {
+        let mut fg = cfg(Flowgraph::new());
+        let a = fg.add(
+            "src",
+            Instance {
+                block: Box::new(TwoOut),
+                inputs: vec![],
+                outputs: vec![("a".into(), StreamType::F32), ("b".into(), StreamType::F32)],
+            },
+        );
+        let t = fg.add(
+            "take",
+            Instance {
+                block: Box::new(Take(10)),
+                inputs: vec![("in".into(), StreamType::F32)],
+                outputs: vec![],
+            },
+        );
+        fg.connect(a, 1, t, 0).unwrap();
+        let running = fg.start().unwrap();
+        let t0 = Instant::now();
+        while !running.is_finished() && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let finished = running.is_finished();
+        running.stop();
+        running.wait().unwrap();
+        assert!(finished, "{name}: the source kept running");
+    }
+}
+
 /// A dedicated block that fails to start must stop every other block, even
 /// idle dedicated ones that nothing else would ever wake.
 #[test]

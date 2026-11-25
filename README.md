@@ -190,6 +190,11 @@ again); **Add** puts an SDR Source for that device on the canvas. A **Simulated 
 can't be discovered are typed into the source's *Device* field, e.g.
 `rtltcp:host=10.0.0.5,port=1234`. An empty device means the first one found.
 
+A PlutoSDR (or another AD936x board) opens with `pluto:uri=ip:192.168.2.1` (libiio). Boards
+with two receivers in 2r2t mode can pick RX2 with the source's *Channel*, or receive both,
+sample-aligned, with **SDR Source (2 channels)**, which streams only the outputs that are
+wired. See [docs/HARDWARE.md](docs/HARDWARE.md).
+
 **Transmitting is off by default.** A graph with an SDR Sink (TX) only runs when the engine
 was started with `foxygnal serve --allow-tx` *and* you confirm "Arm TX and run" for that run
 (headless: `foxygnal run --arm-tx graph.fox.toml`). TX is disarmed when the run stops.

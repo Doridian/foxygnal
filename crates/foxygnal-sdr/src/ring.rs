@@ -183,6 +183,26 @@ impl<T: Copy> Consumer<T> {
         n
     }
 
+    /// Like [`Self::pop`], but hands each of up to `max` items to `f` with
+    /// its index instead of copying into one slice (to split pairs of
+    /// samples into two outputs without a scratch buffer).
+    pub fn pop_with(&mut self, max: usize, mut f: impl FnMut(usize, T)) -> usize {
+        let s = &*self.shared;
+        let tail = s.tail.load(Ordering::Relaxed);
+        let n = max.min(self.len());
+        for i in 0..n {
+            // SAFETY: as in `pop`.
+            f(i, unsafe { *s.slots[(tail + i) & s.mask].get() });
+        }
+        s.tail.store(tail.wrapping_add(n), Ordering::Release);
+        if n > 0
+            && let Some(t) = s.producer.get()
+        {
+            t.unpark();
+        }
+        n
+    }
+
     /// The thread to unpark when items arrive (the block's thread).
     pub fn set_waker(&self, t: Thread) {
         let _ = self.shared.consumer.set(t);
@@ -219,6 +239,19 @@ mod tests {
         assert!(!c.finished());
         drop(p);
         assert!(c.finished());
+    }
+
+    #[test]
+    fn pop_with_splits_pairs() {
+        let (mut p, mut c) = ring::<[u32; 2]>(8);
+        assert!(p.push(&[[1, 10], [2, 20], [3, 30]]));
+        let (mut a, mut b) = ([0; 2], [0; 2]);
+        let n = c.pop_with(2, |i, [x, y]| {
+            a[i] = x;
+            b[i] = y;
+        });
+        assert_eq!((n, a, b), (2, [1, 2], [10, 20]));
+        assert_eq!(c.len(), 1);
     }
 
     #[test]

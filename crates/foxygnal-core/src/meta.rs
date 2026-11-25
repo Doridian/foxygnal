@@ -42,6 +42,9 @@ impl StreamMeta {
 pub struct Configure<'a> {
     pub inputs: &'a [StreamMeta],
     pub outputs: &'a mut [StreamMeta],
+    /// Whether each output has at least one connection. Empty means unknown
+    /// (every output counts as connected).
+    pub outputs_connected: &'a [bool],
 }
 
 impl Configure<'_> {
@@ -57,6 +60,13 @@ impl Configure<'_> {
                         .into(),
                 )
             })
+    }
+
+    /// Whether output `port` feeds anything. A source that can skip work
+    /// for an unused output (an SDR channel nobody reads) asks this; data
+    /// written to an unconnected output is discarded.
+    pub fn output_connected(&self, port: usize) -> bool {
+        self.outputs_connected.get(port).copied().unwrap_or(true)
     }
 
     /// Set every output's sample rate.

@@ -317,6 +317,9 @@ impl Flowgraph {
                             .unwrap_or_default()
                     })
                     .collect();
+                let connected: Vec<bool> = (0..self.nodes[ni].inst.outputs.len())
+                    .map(|po| self.edges.iter().any(|e| e.from == (ni, po)))
+                    .collect();
                 let node = &mut self.nodes[ni];
                 let mut outputs = vec![StreamMeta::merge(&inputs); node.inst.outputs.len()];
                 node.inst
@@ -324,6 +327,7 @@ impl Flowgraph {
                     .configure(&mut Configure {
                         inputs: &inputs,
                         outputs: &mut outputs,
+                        outputs_connected: &connected,
                     })
                     .map_err(|e| match e {
                         e @ (Error::Block { .. } | Error::Param { .. }) => e,
@@ -844,9 +848,16 @@ impl BlockRun {
             WorkStatus::Done => Step::Finished,
             WorkStatus::Wait(d) => Step::Wait(d),
             WorkStatus::Blocked => {
-                // Every consumer is gone: nobody wants our output.
-                let abandoned =
-                    !self.outputs.is_empty() && self.outputs.iter().all(|o| o.writer.abandoned());
+                // Every consumer is gone: nobody wants our output. Outputs
+                // that were never connected don't keep a block alive (their
+                // data is discarded anyway); one with none connected at all
+                // runs until stopped, as before.
+                let mut wired = self
+                    .outputs
+                    .iter()
+                    .filter(|o| o.writer.has_readers())
+                    .peekable();
+                let abandoned = wired.peek().is_some() && wired.all(|o| o.writer.abandoned());
                 // Upstream ended and we made no progress although every
                 // output had room: we're done too. Blocked on a full output,
                 // a block may still have output due for input it already took

@@ -28,6 +28,7 @@ pub struct Options {
 const PACING: &[&str] = &[
     "throttle",
     "sdr_source",
+    "sdr_source_dual",
     "sdr_sink",
     "audio_sink",
     "audio_source",
@@ -43,7 +44,8 @@ pub fn is_paced(graph: &GraphSpec) -> bool {
 }
 
 /// Rewrite a resolved graph to run as fast as it can: throttles are bypassed,
-/// `sdr_source` becomes an unpaced c32 tone at the same rate and
+/// `sdr_source` becomes an unpaced c32 tone at the same rate (both outputs of
+/// `sdr_source_dual` read the same one) and
 /// `browser_audio` stops pacing. Returns what was changed, one line each.
 /// Blocks that can't be unpaced (sound cards, transmitters) are an error.
 pub fn unpace(graph: &mut GraphSpec) -> anyhow::Result<Vec<String>> {
@@ -70,9 +72,14 @@ pub fn unpace(graph: &mut GraphSpec) -> anyhow::Result<Vec<String>> {
         graph.blocks.retain(|b| b.id != id);
         notes.push(format!("throttle `{id}` bypassed"));
     }
+    let mut duals = Vec::new();
     for b in &mut graph.blocks {
         match b.kind.as_str() {
-            "sdr_source" => {
+            kind @ ("sdr_source" | "sdr_source_dual") => {
+                let kind = kind.to_owned();
+                if kind == "sdr_source_dual" {
+                    duals.push(b.id.clone());
+                }
                 let rate = b.params.get("sample_rate").cloned().unwrap_or(json!(2.4e6));
                 b.kind = "signal_source".into();
                 b.params = serde_json::from_value(json!({
@@ -83,7 +90,7 @@ pub fn unpace(graph: &mut GraphSpec) -> anyhow::Result<Vec<String>> {
                     "sample_rate": rate,
                 }))?;
                 notes.push(format!(
-                    "sdr_source `{}` replaced by an unpaced signal_source (c32 tone)",
+                    "{kind} `{}` replaced by an unpaced signal_source (c32 tone)",
                     b.id
                 ));
             }
@@ -99,6 +106,13 @@ pub fn unpace(graph: &mut GraphSpec) -> anyhow::Result<Vec<String>> {
                 )
             }
             _ => {}
+        }
+    }
+    for c in &mut graph.connections {
+        if let Some((block, "rx1" | "rx2")) = c.from.rsplit_once('.')
+            && duals.iter().any(|d| d == block)
+        {
+            c.from = format!("{block}.out");
         }
     }
     Ok(notes)
@@ -557,6 +571,43 @@ to = "sink.in"
         assert_eq!(g.connections[0].from, "src.out");
         assert_eq!(g.connections[0].to, "sink.in");
         // What's left builds.
+        let reg = foxygnal_blocks::registry();
+        foxygnal_core::Flowgraph::from_resolved(&g, &reg).unwrap();
+    }
+
+    #[test]
+    fn unpace_rewires_both_outputs_of_a_dual_source() {
+        let mut g = GraphSpec::from_toml(
+            r#"
+[[block]]
+id = "rx"
+kind = "sdr_source_dual"
+params = { device = "pluto:", sample_rate = 4e6 }
+[[block]]
+id = "a"
+kind = "null_sink"
+params = { type = "c32" }
+[[block]]
+id = "b"
+kind = "null_sink"
+params = { type = "c32" }
+[[connect]]
+from = "rx.rx1"
+to = "a.in"
+[[connect]]
+from = "rx.rx2"
+to = "b.in"
+"#,
+        )
+        .unwrap();
+        assert!(is_paced(&g));
+        let notes = unpace(&mut g).unwrap();
+        assert!(
+            notes[0].starts_with("sdr_source_dual `rx` replaced"),
+            "{notes:?}"
+        );
+        assert!(!is_paced(&g));
+        assert!(g.connections.iter().all(|c| c.from == "rx.out"));
         let reg = foxygnal_blocks::registry();
         foxygnal_core::Flowgraph::from_resolved(&g, &reg).unwrap();
     }

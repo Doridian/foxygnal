@@ -4,7 +4,10 @@
 //! It behaves like an RTL-SDR tuned somewhere in the FM broadcast band: a few
 //! stations at fixed frequencies, each FM-modulated (75 kHz deviation) with
 //! its own tone pattern, plus noise, delivered in real time at the configured
-//! rate. Retuning and gain changes apply live. It also accepts a transmit
+//! rate. Retuning and gain changes apply live. It has two receive channels:
+//! channel 1 (alone, or in sync with channel 0 through `start_rx_dual`) is
+//! channel 0 turned by 90°, as if its antenna sat a quarter wavelength
+//! further from every station. It also accepts a transmit
 //! stream, which takes samples at the configured rate and throws them away,
 //! so the TX path can be exercised without a transmitter.
 //!
@@ -24,8 +27,8 @@ use std::time::{Duration, Instant};
 
 use crate::ring::{self, Consumer, Producer};
 use crate::{
-    Capabilities, Complex32, Device, DeviceArgs, DeviceInfo, Driver, Gain, Range, Result, RxConfig,
-    RxStream, SdrError, TxConfig, TxStream,
+    Capabilities, Complex32, Device, DeviceArgs, DeviceInfo, Driver, DualRxStream, Gain, Range,
+    Result, RxConfig, RxStream, SdrError, TxConfig, TxStream,
 };
 
 /// A tone pattern: a cycle of (tone Hz, seconds); 0 Hz is silence.
@@ -190,30 +193,25 @@ impl Device for SimDevice {
         capabilities()
     }
 
+    fn rx_channels(&self) -> usize {
+        2
+    }
+
     fn start_rx(&mut self, cfg: &RxConfig) -> Result<Box<dyn RxStream>> {
-        let caps = capabilities();
-        caps.check_rate(cfg.sample_rate)?;
-        caps.check_frequency(cfg.frequency)?;
-        let ctl = Arc::new(Control {
-            freq: AtomicU64::new(cfg.frequency.to_bits()),
-            gain: AtomicU64::new(gain_bits(cfg.gain).to_bits()),
-            ppm: AtomicU64::new(cfg.ppm.to_bits()),
-            version: AtomicU64::new(0),
-            stop: AtomicBool::new(false),
-        });
-        // Sized like a hardware driver's ring (it used to hold 0.5 s, which
-        // rounds up to 16 MiB at 2.4 MS/s).
-        let (producer, consumer) = ring::ring(ring::rx_capacity(cfg.sample_rate));
-        let mut gen_ = Generator::new(cfg.sample_rate, &self.stations, self.noise);
-        let thread_ctl = ctl.clone();
-        let thread = std::thread::Builder::new()
-            .name("fox:sim-rx".into())
-            .spawn(move || rx_thread(&mut gen_, producer, &thread_ctl))?;
-        Ok(Box::new(SimRx {
-            consumer,
-            ctl,
-            thread: Some(thread),
-        }))
+        let map: fn(Complex32) -> Complex32 = match cfg.channel {
+            0 => |c| c,
+            1 => second,
+            ch => {
+                return Err(SdrError::Range(format!(
+                    "receive channel {ch} doesn't exist (the simulator has 0 and 1)"
+                )));
+            }
+        };
+        Ok(Box::new(self.start(cfg, map)?))
+    }
+
+    fn start_rx_dual(&mut self, cfg: &RxConfig) -> Result<Box<dyn DualRxStream>> {
+        Ok(Box::new(self.start(cfg, |c| [c, second(c)])?))
     }
 
     fn start_tx(&mut self, cfg: &TxConfig) -> Result<Box<dyn TxStream>> {
@@ -239,25 +237,58 @@ impl Device for SimDevice {
     }
 }
 
+/// Channel 1: channel 0 turned by 90°.
+fn second(c: Complex32) -> Complex32 {
+    Complex32::new(-c.im, c.re)
+}
+
+impl SimDevice {
+    /// Starts the generator thread; `map` makes a ring item from a sample.
+    fn start<T: Copy + Default + Send + 'static>(
+        &self,
+        cfg: &RxConfig,
+        map: fn(Complex32) -> T,
+    ) -> Result<SimRx<T>> {
+        let caps = capabilities();
+        caps.check_rate(cfg.sample_rate)?;
+        caps.check_frequency(cfg.frequency)?;
+        let ctl = Arc::new(Control {
+            freq: AtomicU64::new(cfg.frequency.to_bits()),
+            gain: AtomicU64::new(gain_bits(cfg.gain).to_bits()),
+            ppm: AtomicU64::new(cfg.ppm.to_bits()),
+            version: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+        });
+        // Sized like a hardware driver's ring (it used to hold 0.5 s, which
+        // rounds up to 16 MiB at 2.4 MS/s).
+        let (producer, consumer) = ring::ring(ring::rx_capacity(cfg.sample_rate));
+        let mut gen_ = Generator::new(cfg.sample_rate, &self.stations, self.noise);
+        let thread_ctl = ctl.clone();
+        let thread = std::thread::Builder::new()
+            .name("fox:sim-rx".into())
+            .spawn(move || rx_thread(&mut gen_, producer, &thread_ctl, map))?;
+        Ok(SimRx {
+            consumer,
+            ctl,
+            thread: Some(thread),
+        })
+    }
+}
+
 // ---- Receive ----------------------------------------------------------------
 
-struct SimRx {
-    consumer: Consumer<Complex32>,
+struct SimRx<T> {
+    consumer: Consumer<T>,
     ctl: Arc<Control>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl RxStream for SimRx {
-    fn read(&mut self, out: &mut [Complex32]) -> Result<usize> {
-        let n = self.consumer.pop(out);
+impl<T: Copy> SimRx<T> {
+    fn ended(&self, n: usize) -> Result<usize> {
         if n == 0 && self.consumer.finished() {
             return Err(SdrError::Device("the simulator stopped".into()));
         }
         Ok(n)
-    }
-
-    fn set_waker(&mut self, thread: Thread) {
-        self.consumer.set_waker(thread);
     }
 
     fn set_frequency(&mut self, freq: f64) -> Result<()> {
@@ -265,27 +296,61 @@ impl RxStream for SimRx {
         self.ctl.store(&self.ctl.freq, freq);
         Ok(())
     }
-
-    fn set_gain(&mut self, gain: Gain) -> Result<()> {
-        self.ctl.store(&self.ctl.gain, gain_bits(gain));
-        Ok(())
-    }
-
-    fn set_ppm(&mut self, ppm: f64) -> Result<()> {
-        self.ctl.store(&self.ctl.ppm, ppm);
-        Ok(())
-    }
-
-    fn overflows(&self) -> u64 {
-        self.consumer.dropped()
-    }
-
-    fn finished(&self) -> bool {
-        self.consumer.finished()
-    }
 }
 
-impl Drop for SimRx {
+/// The parts of `RxStream` and `DualRxStream` that don't read.
+macro_rules! sim_controls {
+    () => {
+        fn set_waker(&mut self, thread: Thread) {
+            self.consumer.set_waker(thread);
+        }
+
+        fn set_frequency(&mut self, freq: f64) -> Result<()> {
+            SimRx::set_frequency(self, freq)
+        }
+
+        fn set_gain(&mut self, gain: Gain) -> Result<()> {
+            self.ctl.store(&self.ctl.gain, gain_bits(gain));
+            Ok(())
+        }
+
+        fn set_ppm(&mut self, ppm: f64) -> Result<()> {
+            self.ctl.store(&self.ctl.ppm, ppm);
+            Ok(())
+        }
+
+        fn overflows(&self) -> u64 {
+            self.consumer.dropped()
+        }
+
+        fn finished(&self) -> bool {
+            self.consumer.finished()
+        }
+    };
+}
+
+impl RxStream for SimRx<Complex32> {
+    fn read(&mut self, out: &mut [Complex32]) -> Result<usize> {
+        let n = self.consumer.pop(out);
+        self.ended(n)
+    }
+
+    sim_controls!();
+}
+
+impl DualRxStream for SimRx<[Complex32; 2]> {
+    fn read(&mut self, a: &mut [Complex32], b: &mut [Complex32]) -> Result<usize> {
+        let n = self.consumer.pop_with(a.len().min(b.len()), |i, [x, y]| {
+            a[i] = x;
+            b[i] = y;
+        });
+        self.ended(n)
+    }
+
+    sim_controls!();
+}
+
+impl<T> Drop for SimRx<T> {
     fn drop(&mut self) {
         self.ctl.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
@@ -298,9 +363,15 @@ impl Drop for SimRx {
 /// Chunks of this long are generated and pushed at once.
 const CHUNK: Duration = Duration::from_millis(10);
 
-fn rx_thread(gen_: &mut Generator, mut producer: Producer<Complex32>, ctl: &Control) {
+fn rx_thread<T: Copy + Default>(
+    gen_: &mut Generator,
+    mut producer: Producer<T>,
+    ctl: &Control,
+    map: fn(Complex32) -> T,
+) {
     let chunk = ((gen_.rate * CHUNK.as_secs_f64()) as usize).max(64);
     let mut buf = vec![Complex32::default(); chunk];
+    let mut items = vec![T::default(); chunk];
     let mut version = u64::MAX;
     let mut t0 = Instant::now();
     let mut sent = 0u64;
@@ -313,7 +384,10 @@ fn rx_thread(gen_: &mut Generator, mut producer: Producer<Complex32>, ctl: &Cont
             gen_.set_gain(ctl.load(&ctl.gain));
         }
         gen_.fill(&mut buf);
-        producer.push(&buf);
+        for (d, s) in items.iter_mut().zip(&buf) {
+            *d = map(*s);
+        }
+        producer.push(&items);
         sent += chunk as u64;
         let due = t0 + Duration::from_secs_f64(sent as f64 / gen_.rate);
         let now = Instant::now();
@@ -631,6 +705,31 @@ mod tests {
         rx.set_gain(Gain::Auto).unwrap();
         assert!(rx.set_frequency(5e6).is_err());
         assert_eq!(rx.overflows(), 0);
+    }
+
+    #[test]
+    fn two_channels_in_sync() {
+        let mut dev = SimDriver.open(&DeviceArgs::new("sim")).unwrap();
+        assert_eq!(dev.rx_channels(), 2);
+        let mut cfg = rx_cfg(1e6, 100e6);
+        cfg.channel = 2;
+        assert!(dev.start_rx(&cfg).is_err());
+        let mut rx = dev.start_rx_dual(&rx_cfg(1e6, 100e6)).unwrap();
+        let (mut a, mut b) = (
+            vec![Complex32::default(); 4096],
+            vec![Complex32::default(); 1000],
+        );
+        let t0 = Instant::now();
+        let mut n = 0;
+        while n == 0 && t0.elapsed() < Duration::from_secs(2) {
+            n = rx.read(&mut a, &mut b).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!((1..=1000).contains(&n), "{n}");
+        for (x, y) in a[..n].iter().zip(&b[..n]) {
+            assert_eq!(*y, Complex32::new(-x.im, x.re));
+        }
+        assert!(a[..n].iter().any(|x| x.norm_sqr() > 0.0));
     }
 
     #[test]

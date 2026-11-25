@@ -61,10 +61,10 @@ A SpyServer shared by several clients gives control to one. Without control (`ca
 the server's CLIENT_SYNC message), setting the gain fails with an error saying so, and tuning is
 limited to the band the server reports. Sample rate and format remain per-client.
 
-## Native drivers (librtlsdr, libhackrf, SoapySDR)
+## Native drivers (librtlsdr, libhackrf, libiio, SoapySDR)
 
 Code: `crates/foxygnal-sdr/src/native/`. Registered first in `default_drivers()`, in the order
-`rtlsdr`, `hackrf`, `soapy`.
+`rtlsdr`, `hackrf`, `pluto`, `soapy`.
 
 ### No C libraries at build time
 
@@ -75,6 +75,7 @@ trying the usual names:
 |---|---|---|
 | `rtlsdr` | `librtlsdr.so.0`, `librtlsdr.so.2`, `librtlsdr.so`, `librtlsdr(.0).dylib`, `(lib)rtlsdr.dll` | `librtlsdr not found (install rtl-sdr)` |
 | `hackrf` | `libhackrf.so.0`, `libhackrf.so`, `libhackrf(.0).dylib`, `(lib)hackrf.dll` | `libhackrf not found (install hackrf)` |
+| `pluto` | `libiio.so.0`, `libiio.so`, `libiio(.0).dylib`, `iio.framework`, `libiio.dll` | `libiio not found (install libiio 0.x)` |
 | `soapy` | `libSoapySDR.so.0.8`, `libSoapySDR.so`, `libSoapySDR(.0.8).dylib`, `(lib)SoapySDR.dll` | `libSoapySDR not found (install SoapySDR 0.8 …)` |
 
 A missing library only makes that driver's `discover()` and `open()` fail with that message
@@ -101,6 +102,10 @@ still loads.
   waits for in-flight transfers before we free the callback state.
 - SoapySDR: a `soapy-rx` thread loops on `readStream` (100 ms timeout); a `soapy-tx` thread
   pops from the TX ring and calls `writeStream`.
+- Pluto: a `fox:pluto-rx` thread loops on `iio_buffer_refill` (one buffer is about 10 ms).
+  Drop sets a stop flag and waits up to 500 ms for the refill in flight; only a stuck one is
+  cancelled with `iio_buffer_cancel`, because cancelling makes libiio's network backend
+  print `READ LINE: -9` errors.
 - Control calls (retune, gain, ppm) take a per-device mutex, never taken by the streaming
   callbacks or loops. They're for `set_param`, not the block's hot path.
 - SoapySDR detail: SoapyPlutoSDR (at least) takes a lock inside `readStream` that is also
@@ -122,6 +127,7 @@ callbacks don't allocate or lock. If the ring is full, whole chunks are dropped 
 | `rtlsdr:…,offset_tuning=1`, `bias_tee=1`, `rtl_agc=1` | E4000 offset tuning; bias tee; RTL2832 digital AGC |
 | `hackrf:` / `hackrf:serial=…` / `hackrf:index=0` | a HackRF; `serial` may be a unique suffix |
 | `hackrf:…,amp=1`, `bias_tee=1` | the ~11 dB RF amp (RX and TX); antenna port power |
+| `pluto:` / `pluto:uri=ip:192.168.2.1` / `pluto:uri=usb:1.4.5` | a PlutoSDR or other AD936x board through libiio; no `uri` = the first Pluto on USB |
 | `soapy:<kwargs>` | every pair goes to `SoapySDRDevice_make`, e.g. `soapy:driver=plutosdr,uri=ip:192.168.2.1` |
 
 ### Capabilities and gain
@@ -139,6 +145,29 @@ callbacks don't allocate or lock. If the ring is full, whole chunks are dropped 
   70 dB → 40 + 30. No AGC, so `Gain::Auto` is LNA 16 + VGA 16. The RF amp is the `amp`
   option, not part of the gain. TX gain is the TX VGA, 0–47 dB. No ppm correction (a nonzero
   ppm is an error). Half duplex: one stream at a time.
+- **Pluto** (`pluto`, receive only; transmit through `soapy:driver=plutosdr`): ranges come
+  from the board's IIO attributes (`frequency_available` of `RX_LO`,
+  `sampling_frequency_available`, `hardwaregain_available`, `rf_bandwidth_available`,
+  `rf_port_select_available`), so an AD9361 PlutoSky reports 46.875 MHz–6 GHz where a stock
+  AD9363 Pluto reports less. Sample rates are 2.083–61.44 MS/s on the chip; below that the
+  FPGA's ×8 decimator (listed as a second `sampling_frequency_available` value of
+  `cf-ad9361-lpc`) runs the chip at 8× the rate, down to 260.4 kS/s. Gain is
+  `hardwaregain` per channel with `gain_control_mode` `manual`; `Gain::Auto` is
+  `slow_attack`. The analog filter follows the rate (clamped to its range) unless a
+  bandwidth is given. `ppm` scales `xo_correction` from the value the board booted with (the
+  context attribute `ad9361-phy,xo_correction`), then retunes. Samples are `le:S12/16`,
+  scaled by 1/2048. The board has one receive DMA: a second stream gets an error suggesting
+  the two-channel source.
+- **Two channels** (`Device::rx_channels`, `RxConfig::channel`, `Device::start_rx_dual`): an
+  AD9361 or an AD9363 Pluto Rev C/D has two receivers on one LO and sample clock, exposed
+  when the firmware runs in 2r2t mode (`fw_setenv attr_name compatible; fw_setenv attr_val
+  ad9361; fw_setenv mode 2r2t; reboot`). The driver sees two channels when `ad9361-phy` has
+  input `voltage1` and `cf-ad9361-lpc` has `voltage2`. Channel 1 alone enables only DMA
+  channels `voltage2`/`voltage3`, so it costs the same link bandwidth as channel 0; both
+  enable all four and come out as `[Complex32; 2]` pairs in one ring, so a drop always loses
+  both channels together and they never slip apart. Asking for channel 1 in 1r1t mode says
+  which `fw_setenv` to run. SoapyPlutoSDR reports one channel even in 2r2t mode, so RX2
+  needs `pluto:`. The simulator has two channels too (channel 1 is channel 0 turned by 90°).
 - **SoapySDR**: whatever the module reports for RX channel 0: `getFrequencyRange`,
   `getSampleRateRange` (or `listSampleRates`), `getGainRange`, `hasGainMode` (→ AGC),
   `listAntennas`, `getBandwidthRange` (or `listBandwidths`). Gain dB is clamped to the range
@@ -183,6 +212,18 @@ On real hardware, receive only, with a PlutoSDR over the network
   same absolute frequency across retunes and gain changes; mean power follows gain (10 dB:
   −55 dBFS, 40 dB: −26 dBFS, 60 dB: −11 dBFS, near clipping)
 - live retune ≈ 2 ms median, ≤ 30 ms max; gain change ≈ 13 ms
+
+With the `pluto` driver, against a PlutoSky (AD9361, Z7020, firmware libiio 0.26) in 2r2t mode
+over gigabit Ethernet (`FOXYGNAL_PLUTO_URI=ip:… cargo test -p foxygnal-sdr pluto --
+--include-ignored`, plus graphs run with `foxygnal run`):
+
+- RX1 at 2.4 MS/s, RX1 at 1 MS/s (through the FPGA decimator) and RX2 alone at 12 MS/s,
+  with a live retune and AGC switch; a second stream on the same board is refused
+- both channels at 4 MS/s: 2 M sample pairs, 0 dropped; at 10 MS/s, 30 M samples per channel
+  through `sdr_source_dual` → `head` → `null_sink` in 4.2 s (3 s of samples plus start-up)
+- bytes received from the board for 30 M samples at 10 MS/s: 126 MB for RX2 alone (through
+  `sdr_source_dual` with only `rx2` wired, or `sdr_source` with `channel = 1`), 252 MB for
+  both
 
 Not tested on hardware: the RTL-SDR and HackRF drivers (no device attached; their streaming
 paths have only been compiled and reviewed against the headers), and any transmit path. TX is

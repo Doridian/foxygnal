@@ -632,6 +632,7 @@ mod tests {
         b.configure(&mut Configure {
             inputs: &inputs,
             outputs: &mut outputs,
+            outputs_connected: &[],
         })
         .unwrap();
         assert_eq!(outputs[0].sample_rate, Some(2.4e6));

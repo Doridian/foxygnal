@@ -1547,6 +1547,34 @@ fn sdr(cx: &mut Cx<'_>, tx: bool) -> Result<Out, String> {
     let ppm = cx.num("ppm", 0.0);
     let dir = if tx { "sink" } else { "source" };
 
+    if driver == "pluto" && !tx {
+        // The same board through gr-soapy's PlutoSDR source.
+        let uri = get("uri").unwrap_or_default();
+        let args = if uri.is_empty() {
+            String::new()
+        } else {
+            format!("uri={uri}")
+        };
+        if !matches!(cx.num("channel", 0.0), Py::Num(v, _) if v == 0.0) {
+            cx.warn(
+                "gr-soapy's PlutoSDR source receives RX1 only; the channel setting is \
+                 not exported",
+            );
+        }
+        cx.warn(format!(
+            "device `{device}` → gr-soapy PlutoSDR source (`{args}`): check it in GNU Radio"
+        ));
+        let g = GBlock::new("soapy_plutosdr_source")
+            .p("type", "fc32")
+            .s("dev_args", &args)
+            .e("samp_rate", &rate)
+            .e("bandwidth", &bw)
+            .e("center_freq", &freq)
+            .b("agc", agc)
+            .e("gain", &gain);
+        return Ok(sdr_out(g, tx));
+    }
+
     if driver == "soapy" {
         let soapy_driver = get("driver").unwrap_or_default();
         let args: Vec<String> = kv
@@ -1709,6 +1737,7 @@ const KNOWN: &[KnownPorts] = &[
     ("fsk_demod", &[("in", C)], &[("out", F)]),
     ("ssb_demod", &[("in", C)], &[("out", F)]),
     ("fm_stereo", &[("in", F)], &[("left", F), ("right", F)]),
+    ("sdr_source_dual", &[], &[("rx1", C), ("rx2", C)]),
 ];
 
 /// The GRC dtype of a port of a block that becomes a placeholder.

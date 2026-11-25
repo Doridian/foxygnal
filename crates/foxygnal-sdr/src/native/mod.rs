@@ -16,6 +16,7 @@
 //! threads, and unloading code under a running thread crashes.
 
 pub mod hackrf;
+pub mod pluto;
 pub mod rtlsdr;
 pub mod soapy;
 
@@ -25,6 +26,7 @@ use crate::ring::{self, Consumer, Producer};
 use crate::{Complex32, Result, SdrError};
 
 pub use hackrf::HackrfDriver;
+pub use pluto::PlutoDriver;
 pub use rtlsdr::RtlSdrDriver;
 pub use soapy::SoapyDriver;
 
@@ -277,14 +279,15 @@ impl RxPump {
 }
 
 /// The consumer side of a receive stream, shared by the native drivers.
-pub(crate) struct RxRing {
-    ring: Consumer<Complex32>,
+/// Items are samples, or `[Complex32; 2]` for a two-channel stream.
+pub(crate) struct RxRing<T = Complex32> {
+    ring: Consumer<T>,
     /// Why the driver's thread stopped, if it did on its own.
     error: Arc<Mutex<Option<String>>>,
 }
 
-impl RxRing {
-    pub(crate) fn new(rate: f64) -> (Producer<Complex32>, Self, Arc<Mutex<Option<String>>>) {
+impl<T: Copy + Default + Send> RxRing<T> {
+    pub(crate) fn new(rate: f64) -> (Producer<T>, Self, Arc<Mutex<Option<String>>>) {
         let (p, c) = ring::ring(ring::rx_capacity(rate));
         let error = Arc::new(Mutex::new(None));
         (
@@ -297,8 +300,14 @@ impl RxRing {
         )
     }
 
-    pub(crate) fn read(&mut self, out: &mut [Complex32]) -> Result<usize> {
+    pub(crate) fn read(&mut self, out: &mut [T]) -> Result<usize> {
         let n = self.ring.pop(out);
+        self.ended(n)
+    }
+
+    /// `n` items were read: an error once nothing is left of a stream that
+    /// ended, else `Ok(n)`.
+    fn ended(&self, n: usize) -> Result<usize> {
         if n == 0 && self.ring.finished() {
             let msg = self.error.lock().unwrap_or_else(|e| e.into_inner()).clone();
             return Err(SdrError::Device(
@@ -318,6 +327,18 @@ impl RxRing {
 
     pub(crate) fn finished(&self) -> bool {
         self.ring.finished()
+    }
+}
+
+impl RxRing<[Complex32; 2]> {
+    /// Splits pairs into channel 0 (`a`) and channel 1 (`b`).
+    pub(crate) fn read_pair(&mut self, a: &mut [Complex32], b: &mut [Complex32]) -> Result<usize> {
+        let max = a.len().min(b.len());
+        let n = self.ring.pop_with(max, |i, [x, y]| {
+            a[i] = x;
+            b[i] = y;
+        });
+        self.ended(n)
     }
 }
 
@@ -407,9 +428,9 @@ mod tests {
     fn registered_first_and_discovery_never_fails_hard() {
         let d = crate::default_drivers();
         let names: Vec<_> = d.iter().map(|d| d.name()).collect();
-        assert_eq!(&names[..3], ["rtlsdr", "hackrf", "soapy"]);
+        assert_eq!(&names[..4], ["rtlsdr", "hackrf", "pluto", "soapy"]);
         // Each driver either lists devices or says why not.
-        assert!(d.discover().len() >= 3);
+        assert!(d.discover().len() >= 4);
     }
 
     #[test]

@@ -59,6 +59,8 @@ Goal: a live FM receiver from an RTL-SDR with three clicks.
 - [x] SoapySDR backend (loaded at run time, so no build dependency; broad coverage, tested on a PlutoSDR)
 - [x] Native RTL-SDR, plus `rtl_tcp` / SpyServer network sources
 - [x] HackRF and others as needed; live retune/gain via live params and tags
+- [x] PlutoSDR / AD936x through libiio (`pluto:`), with RX2 and both channels sample-aligned
+      (`sdr_source_dual`, streaming only the wired channels)
 - [x] Browser audio sink, and a "Live FM radio" template (open, pick, Run)
 - [x] TX path with the explicit arm-TX safety flow
 

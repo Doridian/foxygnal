@@ -152,7 +152,9 @@ pub enum Gain {
     Db(f64),
 }
 
-/// Settings for a receive stream.
+/// Settings for a receive stream. For a two-channel stream
+/// ([`Device::start_rx_dual`]) every setting applies to both channels and
+/// `channel` is ignored.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RxConfig {
     pub sample_rate: f64,
@@ -163,6 +165,7 @@ pub struct RxConfig {
     /// Analog bandwidth in Hz; `None` lets the driver choose.
     pub bandwidth: Option<f64>,
     pub antenna: Option<String>,
+    /// Receive channel, 0 to [`Device::rx_channels`] − 1.
     pub channel: usize,
 }
 
@@ -203,6 +206,21 @@ pub trait Device: Send {
     /// Start receiving. The device stays open while the stream lives.
     fn start_rx(&mut self, cfg: &RxConfig) -> Result<Box<dyn RxStream>>;
 
+    /// How many receive channels [`RxConfig::channel`] can pick from.
+    fn rx_channels(&self) -> usize {
+        1
+    }
+
+    /// Start receiving channels 0 and 1 together, sample-aligned (one
+    /// local oscillator and one sample clock, as on an AD9361). Only the
+    /// device's own stream can promise that; two `start_rx` calls can't.
+    fn start_rx_dual(&mut self, cfg: &RxConfig) -> Result<Box<dyn DualRxStream>> {
+        let _ = cfg;
+        Err(SdrError::Unsupported(
+            "receiving two channels in sync".into(),
+        ))
+    }
+
     /// Start transmitting. Only called after the user armed TX.
     fn start_tx(&mut self, cfg: &TxConfig) -> Result<Box<dyn TxStream>> {
         let _ = cfg;
@@ -232,6 +250,37 @@ pub trait RxStream: Send {
 
     /// The stream ended for good (device unplugged, connection closed).
     /// `read` returns the error that ended it once the ring is drained.
+    fn finished(&self) -> bool {
+        false
+    }
+}
+
+/// A running two-channel receive stream ([`Device::start_rx_dual`]).
+/// Dropping it stops the device. Settings apply to both channels.
+pub trait DualRxStream: Send {
+    /// Copy available samples of channel 0 into `a` and of channel 1 into
+    /// `b`; `a[i]` and `b[i]` were sampled at the same instant. Copies the
+    /// same count into both (at most the shorter slice) and returns it;
+    /// never blocks. Drops always lose both channels together, so they stay
+    /// aligned.
+    fn read(&mut self, a: &mut [Complex32], b: &mut [Complex32]) -> Result<usize>;
+
+    /// The thread to unpark when new samples arrive (the block's thread).
+    fn set_waker(&mut self, thread: Thread);
+
+    fn set_frequency(&mut self, freq: f64) -> Result<()>;
+
+    fn set_gain(&mut self, gain: Gain) -> Result<()>;
+
+    fn set_ppm(&mut self, ppm: f64) -> Result<()> {
+        let _ = ppm;
+        Err(SdrError::Unsupported("frequency correction".into()))
+    }
+
+    /// Sample instants dropped because the reader fell behind (monotonic).
+    fn overflows(&self) -> u64;
+
+    /// The stream ended for good; see [`RxStream::finished`].
     fn finished(&self) -> bool {
         false
     }
@@ -342,6 +391,7 @@ pub fn default_drivers() -> Drivers {
     // Hardware.
     d.add(native::RtlSdrDriver::new());
     d.add(native::HackrfDriver::new());
+    d.add(native::PlutoDriver::new());
     d.add(native::SoapyDriver::new());
     // Network sources.
     d.add(rtltcp::RtlTcpDriver);
