@@ -3,5 +3,5 @@
 # makes `rustup` install this toolchain instead. Without rustup (e.g. a distro
 # Rust) this file is ignored; any toolchain >= `rust-version` works.
 [toolchain]
-channel = "1.100.0"
+channel = "1.100.1"
 components = ["clippy", "rustfmt"]
